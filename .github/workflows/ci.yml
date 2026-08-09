@@ -6,9 +6,6 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
-    env:
-      QT_QPA_PLATFORM: offscreen
-      VOXWEAVE_HOME: "${{ runner.temp }}/VoxWeave"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,6 +17,9 @@ jobs:
       - name: Static checks
         run: python -m ruff check .
       - name: Unit and CPU contract tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          VOXWEAVE_HOME: "${{ runner.temp }}/VoxWeave"
         run: python -m pytest
       - name: Compile Python sources
         run: python -m compileall -q src tests
