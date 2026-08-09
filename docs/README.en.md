@@ -22,6 +22,8 @@ Python 3.12, Git, and FFmpeg are required. On Windows, choose a data directory o
 .\scripts\run.ps1
 ```
 
+On Windows, you can also double-click `VoxWeave.bat` in the repository root. It delegates to the same PowerShell launcher and does not maintain a second environment or service path.
+
 The selected data root owns the Python environment, caches, temporary files, state, downloads, and generated artifacts. If no external RVC checkout is supplied, call `runtime.install` after bootstrapping; the service installs the pinned upstream revision into the data root.
 
 ## Automation

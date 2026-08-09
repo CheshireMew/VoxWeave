@@ -28,6 +28,8 @@ cd E:\path\to\VoxWeave
 .\scripts\run.ps1
 ```
 
+Windows 也可以直接双击仓库根目录的 `VoxWeave.bat`。它调用同一个 PowerShell 启动入口，不维护第二套环境或服务逻辑。
+
 如果没有现成 RVC 环境，可先完成源码环境配置，再请求后台安装锁定版本：
 
 ```powershell
