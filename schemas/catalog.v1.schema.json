@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/CheshireMew/VoxWeave/schemas/catalog.v1.schema.json",
+  "title": "VoxWeave model catalog v1",
+  "type": "object",
+  "required": ["protocol", "version", "updated_at", "models"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "protocol": {"const": "voxweave-model-catalog"},
+    "version": {"const": 1},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "display_name", "license_spdx", "model_url", "model_size_bytes", "model_sha256", "source_url"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+          "display_name": {"type": "string", "minLength": 1},
+          "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "license_spdx": {"type": "string", "minLength": 1},
+          "source_url": {"type": "string", "pattern": "^https://"},
+          "model_url": {"type": "string", "pattern": "^https://"},
+          "model_size_bytes": {"type": "integer", "minimum": 1},
+          "model_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "index_url": {"type": "string", "pattern": "^https://"},
+          "index_size_bytes": {"type": "integer", "minimum": 1},
+          "index_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/CheshireMew/VoxWeave/schemas/voxweave-rvc-model.v1.schema.json",
+  "title": "voxweave-rvc-model v1",
+  "type": "object",
+  "required": [
+    "protocol", "version", "id", "display_name", "aliases", "family",
+    "model_path", "model_sha256", "index_candidates", "rvc_version", "sample_rate", "f0",
+    "source_kind", "recommended", "status", "imported_at"
+  ],
+  "properties": {
+    "protocol": {"const": "voxweave-rvc-model"},
+    "version": {"const": 1},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "display_name": {"type": "string", "minLength": 1},
+    "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "family": {"type": "string", "minLength": 1},
+    "checkpoint_epoch": {"type": ["integer", "null"], "minimum": 0},
+    "model_path": {"type": "string", "minLength": 1},
+    "model_sha256": {"$ref": "#/$defs/sha256"},
+    "index_path": {"type": ["string", "null"]},
+    "index_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "index_candidates": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "rvc_version": {"type": ["string", "null"]},
+    "sample_rate": {"type": ["integer", "null"], "minimum": 1},
+    "f0": {"type": ["boolean", "null"]},
+    "source_kind": {"enum": ["external", "url", "catalog"]},
+    "license_spdx": {"type": ["string", "null"]},
+    "source_url": {"type": ["string", "null"], "format": "uri"},
+    "recommended": {"$ref": "#/$defs/parameters"},
+    "status": {"enum": ["ready", "runtime_missing", "invalid", "index_choice_required"]},
+    "imported_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "parameters": {
+      "type": "object",
+      "required": ["pitch", "f0", "index_rate", "rms_mix_rate", "protect", "content_mode"],
+      "properties": {
+        "pitch": {"type": "integer", "minimum": -36, "maximum": 36},
+        "f0": {"enum": ["rmvpe", "fcpe", "pm"]},
+        "index_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "rms_mix_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "protect": {"type": "number", "minimum": 0, "maximum": 0.5},
+        "content_mode": {"enum": ["clean", "mixed", "singing"]}
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      VOXWEAVE_HOME: ${{ runner.temp }}\VoxWeave
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install source and test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Static checks
+        run: python -m ruff check .
+      - name: Unit and CPU contract tests
+        run: python -m pytest
+      - name: Compile Python sources
+        run: python -m compileall -q src tests

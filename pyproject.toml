@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxweave"
+version = "0.1.0"
+description = "Local-first high-quality offline RVC voice conversion workstation"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = {text = "AGPL-3.0-only"}
+authors = [{name = "CheshireMew"}]
+dependencies = [
+  "fastapi==0.116.1",
+  "uvicorn==0.35.0",
+  "pydantic==2.11.7",
+  "PySide6==6.11.1",
+  "numpy==1.26.4",
+  "soundfile==0.14.0",
+  "scipy==1.17.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "jsonschema==4.25.0",
+  "pytest==8.4.1",
+  "pytest-cov==6.2.1",
+  "ruff==0.12.7",
+]
+
+[project.scripts]
+voxweave = "voxweave.cli:main"
+voxweave-service = "voxweave.service:main"
+voxweave-gui = "voxweave.gui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+voxweave = ["qml/*.qml", "resources/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
