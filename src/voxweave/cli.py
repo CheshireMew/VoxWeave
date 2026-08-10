@@ -6,7 +6,7 @@ import sys
 import uuid
 from typing import Any
 
-from .client import request_json
+from .client import request_json, shutdown_service
 from .config import configure_process_environment, load_settings
 from .i18n import translate
 
@@ -39,7 +39,10 @@ def _human(payload: dict[str, Any], language: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="voxweave",
-        description="VoxWeave 高质量离线 RVC 变声工作台 / offline RVC workstation",
+        description=(
+            "VoxWeave 高质量离线与实时 RVC 变声工作台 / "
+            "offline and realtime RVC workstation"
+        ),
         epilog=(
             "AGPL-3.0-only; ABSOLUTELY NO WARRANTY. Source: https://github.com/CheshireMew/VoxWeave"
         ),
@@ -67,6 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         child = task_commands.add_parser(command, help=help_text)
         child.add_argument("task_id")
+    service = subparsers.add_parser("service", help="管理后台服务 / manage the service")
+    service_commands = service.add_subparsers(dest="service_command", required=True)
+    service_commands.add_parser("stop", help="安全停止后台服务 / stop the service safely")
     return parser
 
 
@@ -76,6 +82,10 @@ def main() -> int:
     configure_process_environment(settings)
     if args.command == "describe":
         payload = request_json(settings, "GET", "/v1/describe")
+    elif args.command == "service":
+        if args.service_command != "stop":
+            raise AssertionError(f"unhandled service command: {args.service_command}")
+        payload = shutdown_service(settings)
     else:
         if args.command == "execute":
             if args.request:
@@ -88,7 +98,6 @@ def main() -> int:
                     "version": 1,
                     "operation": args.operation,
                     "arguments": json.loads(args.arguments),
-                    "request_id": str(uuid.uuid4()),
                 }
         elif args.command == "models":
             request = {
@@ -120,6 +129,7 @@ def main() -> int:
             }
         else:
             raise AssertionError(f"unhandled command: {args.command}")
+        request.setdefault("request_id", str(uuid.uuid4()))
         payload = request_json(settings, "POST", "/v1/execute", request)
     print(
         json.dumps(payload, ensure_ascii=False, indent=2)

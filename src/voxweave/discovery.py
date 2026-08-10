@@ -36,10 +36,16 @@ def pid_is_alive(pid: int) -> bool:
     return True
 
 
-def reserve_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def reserve_loopback_socket(port: int = 0) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+        sock.listen(socket.SOMAXCONN)
+        sock.set_inheritable(False)
+        return sock
+    except Exception:
+        sock.close()
+        raise
 
 
 @dataclass(slots=True)
@@ -74,7 +80,7 @@ class ServiceLock:
             if os.name == "nt":
                 import msvcrt
 
-                self.handle.seek(0)
+                self.handle.seek(0, os.SEEK_END)
                 if self.handle.tell() == 0:
                     self.handle.write(b"0")
                     self.handle.flush()
@@ -117,6 +123,8 @@ def read_discovery(settings: Settings) -> Discovery | None:
     except (OSError, ValueError, TypeError):
         return None
     if discovery.protocol != PROTOCOL or discovery.protocol_version != PROTOCOL_VERSION:
+        return None
+    if not 1 <= discovery.port <= 65535 or not discovery.token:
         return None
     if not pid_is_alive(discovery.pid):
         return None

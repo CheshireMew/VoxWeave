@@ -2,9 +2,9 @@
 
 [简体中文](../README.md)
 
-VoxWeave is a local-first, high-quality offline RVC voice-conversion workstation. The desktop app, CLI, and loopback HTTP/WebSocket API are clients of one backend service, one task database, and one serialized inference queue.
+VoxWeave is a local-first, high-quality offline and realtime RVC voice-conversion workstation. The desktop app, CLI, and loopback HTTP/WebSocket API are clients of one backend service and one persistent state boundary.
 
-Version 0.1 supports audio, singing, video, batch folders, watched folders, source separation, VAD, speaker clustering, selected-speaker conversion, and up to four preview variants. Every result records the exact model and index hashes. Training, GPT-SoVITS, realtime microphone conversion, and virtual audio devices are intentionally out of scope.
+Version 0.1 supports audio, singing, video, realtime microphones, batch folders, watched folders, source separation, VAD, speaker clustering, selected-speaker conversion, and up to four preview variants. Results and realtime sessions record the exact model and index hashes. Training, GPT-SoVITS, and virtual audio devices are intentionally out of scope.
 
 Windows 11 with NVIDIA CUDA is the currently validated platform. Linux and macOS boundaries are present in source but have not yet been validated on physical machines.
 
@@ -26,6 +26,8 @@ On Windows, you can also double-click `VoxWeave.bat` in the repository root. It 
 
 The selected data root owns the Python environment, caches, temporary files, state, downloads, and generated artifacts. If no external RVC checkout is supplied, call `runtime.install` after bootstrapping; the service installs the pinned upstream revision into the data root.
 
+`requirements.lock` is the single validated Windows/Python 3.12 dependency set used by both the bootstrap and CI.
+
 ## Automation
 
 Always inspect the live contract before invoking an operation:
@@ -36,6 +38,14 @@ Always inspect the live contract before invoking an operation:
 ```
 
 Requests use `voxweave-control v1`. Long operations return a `task_id` immediately and can be observed through `task.get` or the authenticated loopback WebSocket. Outputs are never overwritten unless `overwrite: true` is explicit. See [the protocol reference](PROTOCOL.md) and [architecture](ARCHITECTURE.md).
+
+The Live Voice page lists the Windows audio hosts and devices reported by the configured RVC runtime. It prefers the default Windows WASAPI input and output, falling back to another host only when WASAPI is unavailable. Microphones are captured as mono. Silero VAD detects speech, while an input-level fallback keeps audible blocks flowing when VAD misses them; only genuinely silent blocks write zeroes to the output device, and nothing is recorded. Test mode uses half-duplex playback: after a converted block is sent to the speakers, the microphone block captured during that playback is discarded so it cannot feed the speaker output back into the model. Toggling test mode does not reload the prepared model. The page exposes speech detection, conversion output, and input/output meters. Its 0.5-second default can be changed to a 1.0-second stable block when inference is slower. Input and output must belong to the same host API, and headphones are recommended for normal continuous mode. Automation uses `realtime.devices`, `realtime.start`, `realtime.status`, and `realtime.stop`. A live session does not occupy the offline worker, but it owns the GPU: it cannot start while a task is running, and newly submitted tasks remain queued until live conversion stops.
+
+After updating the source, run `.\scripts\voxweave.ps1 service stop` before `.\scripts\run.ps1` to reload an existing background service through its authenticated shutdown path.
+
+VoxWeave never removes intermediate artifacts automatically. Use the Settings archive action with its confirmation dialog, or explicitly submit `storage.archive`, to move artifacts from finished tasks and rewrite persisted task paths. Same-volume archives are directory moves; cross-volume archives are copied and verified before their source copy is removed.
+
+Structured JSON logs are rotated under the data root at 10 MB with five retained files. The service-owned diagnostics snapshot includes runtime, models, the realtime session, tasks, recent events, storage totals, and log inventory without embedding model or media contents.
 
 VoxWeave does not distribute voice models. Local files are indexed in place; catalog entries require an HTTPS source, exact sizes and SHA-256 hashes, and an SPDX license. See [the model policy](../MODEL_POLICY.md).
 

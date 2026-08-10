@@ -56,6 +56,25 @@ def doctor(arguments: argparse.Namespace) -> int:
     return 0 if payload["ok"] else 1
 
 
+def devices(arguments: argparse.Namespace) -> int:
+    from rvc_realtime_worker import list_audio_devices  # noqa: PLC0415
+
+    root = Path(arguments.rvc_root).resolve()
+    configure(root)
+    emit(list_audio_devices())
+    return 0
+
+
+def realtime(arguments: argparse.Namespace) -> int:
+    from rvc_realtime_worker import run_resident_worker  # noqa: PLC0415
+
+    root = Path(arguments.rvc_root).resolve()
+    configure(root)
+    if arguments.gpu is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(arguments.gpu)
+    return run_resident_worker()
+
+
 def _convert_items(
     arguments: argparse.Namespace, items: list[dict[str, str]]
 ) -> tuple[list[dict[str, Any]], str]:
@@ -196,6 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     doctor_parser = commands.add_parser("doctor")
     doctor_parser.set_defaults(handler=doctor)
+    devices_parser = commands.add_parser("devices")
+    devices_parser.set_defaults(handler=devices)
     conversion = commands.add_parser("convert")
     conversion.add_argument("--input", required=True)
     conversion.add_argument("--output", required=True)
@@ -205,6 +226,9 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--manifest", required=True)
     _add_conversion_arguments(batch)
     batch.set_defaults(handler=convert_batch)
+    realtime_parser = commands.add_parser("realtime")
+    realtime_parser.add_argument("--gpu", type=int, default=0)
+    realtime_parser.set_defaults(handler=realtime)
     return parser
 
 

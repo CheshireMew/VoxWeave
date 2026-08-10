@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from .config import LOCAL_POINTER, Settings
+from .discovery import ServiceLock
 
 
 def optional_path(value: str | None, label: str) -> str | None:
@@ -15,6 +16,22 @@ def optional_path(value: str | None, label: str) -> str | None:
     if not path.exists():
         raise FileNotFoundError(f"{label} does not exist: {path}")
     return str(path)
+
+
+def persist_configuration(settings: Settings, pointer_path: Path = LOCAL_POINTER) -> None:
+    lock = ServiceLock(settings.lock_path)
+    lock.acquire()
+    try:
+        settings.update()
+        temporary = pointer_path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps({"data_root": settings.data_root}, ensure_ascii=False, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(pointer_path)
+    finally:
+        lock.release()
 
 
 def main() -> int:
@@ -30,13 +47,9 @@ def main() -> int:
     if data_root.drive == "" and not data_root.is_absolute():
         raise ValueError("data root must be absolute")
     data_root.mkdir(parents=True, exist_ok=True)
-    pointer = {"data_root": str(data_root)}
-    LOCAL_POINTER.write_text(
-        json.dumps(pointer, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
     rvc_root = optional_path(arguments.rvc_root, "RVC root")
     rvc_python = optional_path(arguments.rvc_python, "RVC Python")
-    model_roots = [str(Path(rvc_root) / "assets" / "weights")] if rvc_root else []
+    weight_roots = [str(Path(rvc_root) / "assets" / "weights")] if rvc_root else []
     settings = Settings(
         data_root=str(data_root),
         rvc_root=rvc_root,
@@ -44,9 +57,10 @@ def main() -> int:
         ffmpeg=optional_path(arguments.ffmpeg or shutil.which("ffmpeg"), "FFmpeg"),
         ffprobe=optional_path(arguments.ffprobe or shutil.which("ffprobe"), "FFprobe"),
         wespeaker_model=optional_path(arguments.wespeaker_model, "WeSpeaker model"),
-        model_roots=model_roots,
+        weight_roots=weight_roots,
+        index_roots=[],
     )
-    settings.save()
+    persist_configuration(settings)
     print(
         json.dumps(
             {

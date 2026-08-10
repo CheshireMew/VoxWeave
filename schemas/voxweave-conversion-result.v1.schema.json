@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/CheshireMew/VoxWeave/schemas/voxweave-conversion-result.v1.schema.json",
+  "title": "VoxWeave conversion result v1",
+  "type": "object",
+  "required": [
+    "protocol",
+    "version",
+    "input",
+    "output",
+    "model",
+    "parameters",
+    "selected_speakers",
+    "segments"
+  ],
+  "properties": {
+    "protocol": {"const": "voxweave-conversion-result"},
+    "version": {"const": 1},
+    "input": {"$ref": "#/$defs/media"},
+    "output": {
+      "allOf": [
+        {"$ref": "#/$defs/media"},
+        {
+          "type": "object",
+          "required": ["full_decode", "audio_quality"],
+          "properties": {
+            "full_decode": {"const": "passed"},
+            "audio_quality": {"type": "array", "items": {"type": "object"}}
+          }
+        }
+      ]
+    },
+    "model": {
+      "type": "object",
+      "required": ["id", "display_name", "model_sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "display_name": {"type": "string", "minLength": 1},
+        "model_sha256": {"$ref": "#/$defs/sha256"},
+        "index_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
+      },
+      "additionalProperties": false
+    },
+    "parameters": {
+      "type": "object",
+      "required": ["pitch", "f0", "index_rate", "rms_mix_rate", "protect", "content_mode"],
+      "properties": {
+        "pitch": {"type": "integer"},
+        "f0": {"enum": ["rmvpe", "fcpe", "pm"]},
+        "index_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "rms_mix_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "protect": {"type": "number", "minimum": 0, "maximum": 0.5},
+        "content_mode": {"enum": ["clean", "mixed", "singing"]}
+      },
+      "additionalProperties": false
+    },
+    "selected_speakers": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "separation": {"type": ["object", "null"]},
+    "loudness_match": {"type": ["object", "null"]},
+    "segments": {"type": "array", "items": {"type": "object"}},
+    "manifest_path": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "media": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256",
+        "size_bytes",
+        "media_type",
+        "duration_seconds",
+        "audio_streams",
+        "video_streams",
+        "subtitle_streams"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "media_type": {"enum": ["audio", "video"]},
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "format_name": {"type": ["string", "null"]},
+        "audio_streams": {"type": "array", "items": {"type": "object"}},
+        "video_streams": {"type": "array", "items": {"type": "object"}},
+        "subtitle_streams": {"type": "array", "items": {"type": "object"}},
+        "full_decode": {"const": "passed"},
+        "audio_quality": {"type": "array", "items": {"type": "object"}}
+      },
+      "additionalProperties": false
+    }
+  }
+}

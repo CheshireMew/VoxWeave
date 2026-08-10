@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
 import platform
-import shutil
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +9,7 @@ from typing import Any
 
 from .config import PACKAGE_ROOT, Settings
 from .hashing import sha256_file
+from .process_control import run_capture
 
 PINNED_RVC_REVISION = "4338f12c3c28c80b3ac015e2d0df66c41592746d"
 PINNED_ASSET_REVISION = "e6d0c1a17da07c33557852f9dfa2bd44cc75737d"
@@ -22,16 +20,13 @@ class RuntimeErrorDetail(RuntimeError):
     pass
 
 
-def _run_json(command: list[str], *, cwd: Path | None = None) -> dict[str, Any]:
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        check=False,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        capture_output=True,
-    )
+def _run_json(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    completed = run_capture(command, cwd=cwd, cancelled=cancelled)
     output = completed.stdout.strip().splitlines()
     if completed.returncode != 0:
         raise RuntimeErrorDetail(completed.stderr.strip() or completed.stdout.strip())
@@ -66,7 +61,9 @@ def resolve_rvc_entry(settings: Settings) -> Path | None:
     return entry if entry.is_file() and all(path.is_file() for path in required) else None
 
 
-def inspect_runtime(settings: Settings) -> dict[str, Any]:
+def inspect_runtime(
+    settings: Settings, cancelled: Callable[[], bool] | None = None
+) -> dict[str, Any]:
     python = resolve_rvc_python(settings)
     entry = resolve_rvc_entry(settings)
     payload: dict[str, Any] = {
@@ -84,11 +81,9 @@ def inspect_runtime(settings: Settings) -> dict[str, Any]:
         "components": {},
     }
     if settings.rvc_root and (Path(settings.rvc_root) / ".git").exists():
-        revision = subprocess.run(
+        revision = run_capture(
             ["git", "-C", settings.rvc_root, "rev-parse", "HEAD"],
-            check=False,
-            text=True,
-            capture_output=True,
+            cancelled=cancelled,
         )
         if revision.returncode == 0:
             payload["rvc_revision"] = revision.stdout.strip()
@@ -103,9 +98,12 @@ def inspect_runtime(settings: Settings) -> dict[str, Any]:
                     "doctor",
                 ],
                 cwd=Path(settings.rvc_root),
+                cancelled=cancelled,
             )
             payload["components"]["python_runtime"] = _run_json(
-                [str(python), str(PACKAGE_ROOT / "runtime_worker.py")], cwd=entry.parent
+                [str(python), str(PACKAGE_ROOT / "runtime_worker.py")],
+                cwd=entry.parent,
+                cancelled=cancelled,
             )
             payload["ready"] = bool(
                 payload["doctor"].get("ok")
@@ -153,100 +151,3 @@ def inspect_runtime(settings: Settings) -> dict[str, Any]:
     payload["pinned_asset_revision"] = PINNED_ASSET_REVISION
     payload["rvc_revision_matches_pin"] = payload["rvc_revision"] == PINNED_RVC_REVISION
     return payload
-
-
-def install_runtime(
-    settings: Settings,
-    arguments: dict[str, Any],
-    progress: Callable[[float, str, str | None], None],
-) -> dict[str, Any]:
-    supplied_root = arguments.get("rvc_root")
-    supplied_python = arguments.get("rvc_python")
-    if supplied_root:
-        root = Path(supplied_root).expanduser().resolve()
-        if (
-            not (root / "configs" / "config.py").is_file()
-            or not (root / "infer" / "vc" / "modules.py").is_file()
-        ):
-            raise RuntimeErrorDetail(f"official RVC inference modules not found under {root}")
-        settings.rvc_root = str(root)
-        settings.rvc_python = str(Path(supplied_python).resolve()) if supplied_python else None
-        runtime = inspect_runtime(settings)
-        if not runtime["ready"]:
-            raise RuntimeErrorDetail(runtime.get("error") or "supplied RVC runtime is not ready")
-        weight_root = root / "assets" / "weights"
-        if str(weight_root) not in settings.model_roots:
-            settings.model_roots.append(str(weight_root))
-        settings.save()
-        progress(1.0, "completed", "external RVC runtime registered")
-        return runtime
-
-    runtime_root = settings.root / "runtime" / "rvc"
-    source_root = runtime_root / "source"
-    venv_root = runtime_root / "venv"
-    if source_root.exists() and any(source_root.iterdir()):
-        raise RuntimeErrorDetail(f"runtime source directory already exists: {source_root}")
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    progress(0.05, "download", "cloning pinned RVC source")
-    subprocess.run(
-        ["git", "clone", "--filter=blob:none", RVC_REPOSITORY, str(source_root)],
-        check=True,
-    )
-    subprocess.run(["git", "-C", str(source_root), "checkout", PINNED_RVC_REVISION], check=True)
-    progress(0.25, "environment", "creating Python environment")
-    subprocess.run([sys.executable, "-m", "venv", str(venv_root)], check=True)
-    runtime_python = venv_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    requirements = source_root / (
-        "requirments_cu118_py312.txt"
-        if platform.system() == "Windows" and shutil.which("nvidia-smi")
-        else "requirments_cpu_py312.txt"
-    )
-    env = os.environ.copy()
-    env["PIP_CACHE_DIR"] = str(settings.root / "pip-cache")
-    env["TMP"] = str(settings.root / "temp")
-    env["TEMP"] = str(settings.root / "temp")
-    Path(env["TEMP"]).mkdir(parents=True, exist_ok=True)
-    progress(0.35, "dependencies", f"installing {requirements.name}")
-    subprocess.run(
-        [str(runtime_python), "-m", "pip", "install", "-r", str(requirements)],
-        check=True,
-        env=env,
-    )
-    subprocess.run(
-        [
-            str(runtime_python),
-            "-m",
-            "pip",
-            "install",
-            "huggingface-hub==0.36.2",
-        ],
-        check=True,
-        env=env,
-    )
-    progress(0.72, "assets", "downloading required official inference assets")
-    env["HF_HOME"] = str(settings.cache_dir / "huggingface")
-    asset_command = [
-        str(runtime_python),
-        str(PACKAGE_ROOT / "runtime_assets_worker.py"),
-        "--rvc-root",
-        str(source_root),
-    ]
-    if arguments.get("install_separation", False):
-        asset_command.append("--with-separation")
-    install_speaker_model = arguments.get("install_speaker_model", True)
-    speaker_root = settings.components_dir / "wespeaker-resnet34-lm"
-    if install_speaker_model:
-        asset_command.extend(["--speaker-root", str(speaker_root)])
-    subprocess.run(asset_command, check=True, env=env)
-    settings.rvc_root = str(source_root)
-    settings.rvc_python = str(runtime_python)
-    settings.model_roots.append(str(source_root / "assets" / "weights"))
-    if install_speaker_model:
-        settings.wespeaker_model = str(speaker_root / "voxceleb_resnet34_LM.onnx")
-    settings.save()
-    progress(0.9, "doctor", "validating installed runtime")
-    runtime = inspect_runtime(settings)
-    if not runtime["ready"]:
-        raise RuntimeErrorDetail(runtime.get("error") or "installed runtime failed doctor")
-    progress(1.0, "completed", "runtime installed")
-    return runtime

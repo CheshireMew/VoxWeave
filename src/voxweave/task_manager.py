@@ -1,77 +1,124 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
-import traceback
-import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
-from .database import Database, utc_now
+from .database import Database
+from .protocol import public_error_code, validate_completion_result
+from .task_repository import TaskRepository
 
 Progress = Callable[[float, str, str | None], None]
-Handler = Callable[[dict[str, Any], Progress, Callable[[], bool]], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class TaskContext:
+    task_id: str
+    retry_of: str | None
+    snapshot: dict[str, Any]
+    progress: Progress
+    cancelled: Callable[[], bool]
+
+
+Handler = Callable[[dict[str, Any], TaskContext], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredTask:
+    stage: str
+    detail: str
 
 
 TERMINAL_STATES = {"completed", "failed", "cancelled", "interrupted"}
+LIFECYCLE_STATES = {"queued", "running", *TERMINAL_STATES}
+LOGGER = logging.getLogger(__name__)
 
 
 class TaskManager:
     def __init__(self, database: Database):
         self.database = database
+        self.repository = TaskRepository(database)
         self.handlers: dict[str, Handler] = {}
         self.queue: queue.Queue[str] = queue.Queue()
         self.stop_event = threading.Event()
-        self.worker = threading.Thread(target=self._run, name="voxweave-task-worker", daemon=True)
-        self.worker.start()
-        for task in self.database.fetch_all(
-            "SELECT id FROM tasks WHERE state='queued' ORDER BY created_at"
-        ):
-            self.queue.put(task["id"])
+        self.worker: threading.Thread | None = None
+        self.started = False
+        self._dispatch_condition = threading.Condition()
+        self._dispatch_pause_reasons: set[str] = set()
+        self._executing = False
 
     def register(self, operation: str, handler: Handler) -> None:
+        if self.started:
+            raise RuntimeError("task handlers must be registered before the manager starts")
         self.handlers[operation] = handler
 
-    def submit(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def start(self, *, preserved_task_ids: set[str] | None = None) -> None:
+        if self.started:
+            raise RuntimeError("task manager is already running")
+        for task_id in self.repository.recover_for_start(preserved_task_ids or set()):
+            self.queue.put(task_id)
+        self.started = True
+        self.worker = threading.Thread(
+            target=self._run, name="voxweave-task-worker", daemon=True
+        )
+        self.worker.start()
+
+    def create_in_transaction(
+        self,
+        db: Any,
+        operation: str,
+        arguments: dict[str, Any],
+        *,
+        request_id: str | None,
+        actor: dict[str, Any] | None,
+        snapshot: dict[str, Any] | None = None,
+        retry_of: str | None = None,
+    ) -> tuple[str, bool]:
+        return self.repository.create(
+            db,
+            operation,
+            arguments,
+            request_id=request_id,
+            actor=actor,
+            snapshot=snapshot,
+            retry_of=retry_of,
+        )
+
+    def submit(
+        self,
+        operation: str,
+        arguments: dict[str, Any],
+        *,
+        request_id: str | None = None,
+        actor: dict[str, Any] | None = None,
+        snapshot: dict[str, Any] | None = None,
+        retry_of: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.started:
+            raise RuntimeError("task manager has not started")
         if operation not in self.handlers:
             raise LookupError(f"no long-running handler registered for {operation}")
-        task_id = str(uuid.uuid4())
         arguments = dict(arguments)
-        arguments["_task_id"] = task_id
-        now = utc_now()
-        self.database.execute(
-            "INSERT INTO tasks("
-            "id,operation,arguments_json,state,progress,stage,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (
-                task_id,
+        with self.database.connect() as db:
+            task_id, created = self.create_in_transaction(
+                db,
                 operation,
-                json.dumps(arguments, ensure_ascii=False),
-                "queued",
-                0.0,
-                "queued",
-                now,
-                now,
-            ),
-        )
-        self._event(task_id, "queued", 0.0, "queued", None)
-        self.queue.put(task_id)
+                arguments,
+                request_id=request_id,
+                actor=actor,
+                snapshot=snapshot,
+                retry_of=retry_of,
+            )
+        if created:
+            self.notify_enqueued(task_id)
         return self.get(task_id)
 
-    def _event(
-        self,
-        task_id: str,
-        state: str,
-        progress: float,
-        stage: str | None,
-        detail: str | None,
-    ) -> None:
-        self.database.execute(
-            "INSERT INTO task_events("
-            "task_id,state,progress,stage,detail,created_at) VALUES(?,?,?,?,?,?)",
-            (task_id, state, progress, stage, detail, utc_now()),
-        )
+    def notify_enqueued(self, task_id: str) -> None:
+        self.queue.put(task_id)
 
     def _update(
         self,
@@ -85,22 +132,19 @@ class TaskManager:
         error_type: str | None = None,
         error: str | None = None,
     ) -> None:
-        self.database.execute(
-            "UPDATE tasks SET "
-            "state=?,progress=?,stage=?,result_json=?,error_type=?,error=?,updated_at=? "
-            "WHERE id=?",
-            (
-                state,
-                max(0.0, min(1.0, progress)),
-                stage,
-                json.dumps(result, ensure_ascii=False) if result is not None else None,
-                error_type,
-                error,
-                utc_now(),
-                task_id,
-            ),
+        if state not in LIFECYCLE_STATES:
+            raise ValueError(f"invalid task lifecycle state: {state}")
+        normalized_progress = max(0.0, min(1.0, progress))
+        self.repository.update(
+            task_id,
+            state=state,
+            progress=normalized_progress,
+            stage=stage,
+            detail=detail,
+            result=result,
+            error_type=error_type,
+            error=error,
         )
-        self._event(task_id, state, progress, stage, detail or error)
 
     def _run(self) -> None:
         while not self.stop_event.is_set():
@@ -109,12 +153,35 @@ class TaskManager:
             except queue.Empty:
                 continue
             try:
+                with self._dispatch_condition:
+                    while self._dispatch_pause_reasons and not self.stop_event.is_set():
+                        self._dispatch_condition.wait(timeout=0.25)
+                    if self.stop_event.is_set():
+                        continue
+                    self._executing = True
                 self._execute(task_id)
+            except Exception:  # noqa: BLE001 - keep the durable worker alive
+                LOGGER.exception("unhandled task worker failure for %s", task_id)
             finally:
+                with self._dispatch_condition:
+                    self._executing = False
+                    self._dispatch_condition.notify_all()
                 self.queue.task_done()
 
+    def pause_dispatch(self, reason: str) -> bool:
+        with self._dispatch_condition:
+            if self._executing:
+                return False
+            self._dispatch_pause_reasons.add(reason)
+            return True
+
+    def resume_dispatch(self, reason: str) -> None:
+        with self._dispatch_condition:
+            self._dispatch_pause_reasons.discard(reason)
+            self._dispatch_condition.notify_all()
+
     def _execute(self, task_id: str) -> None:
-        row = self.database.fetch_one("SELECT * FROM tasks WHERE id=?", (task_id,))
+        row = self.repository.raw(task_id)
         if not row or row["state"] != "queued":
             return
         operation = row["operation"]
@@ -131,19 +198,32 @@ class TaskManager:
             return
 
         def cancelled() -> bool:
-            current = self.database.fetch_one(
-                "SELECT cancel_requested FROM tasks WHERE id=?", (task_id,)
-            )
-            return self.stop_event.is_set() or bool(current and current["cancel_requested"])
+            return self.stop_event.is_set() or self.repository.cancel_requested(task_id)
 
         def progress(value: float, stage: str, detail: str | None = None) -> None:
             if cancelled():
                 raise InterruptedError("task cancellation requested")
-            self._update(task_id, state=stage, progress=value, stage=stage, detail=detail)
+            if stage in TERMINAL_STATES:
+                raise ValueError("task handlers cannot publish terminal lifecycle states")
+            self._update(task_id, state="running", progress=value, stage=stage, detail=detail)
 
-        self._update(task_id, state="running", progress=0.01, stage="starting")
         try:
-            result = handler(json.loads(row["arguments_json"]), progress, cancelled)
+            if cancelled():
+                raise InterruptedError("task cancellation requested")
+            self._update(task_id, state="running", progress=0.01, stage="starting")
+            LOGGER.info(
+                "task started", extra={"task_id": task_id, "operation": operation}
+            )
+            context = TaskContext(
+                task_id=task_id,
+                retry_of=row.get("retry_of"),
+                snapshot=json.loads(row.get("snapshot_json") or "{}"),
+                progress=progress,
+                cancelled=cancelled,
+            )
+            result = handler(json.loads(row["arguments_json"]), context)
+            if not isinstance(result, DeferredTask):
+                result = validate_completion_result(operation, result)
         except InterruptedError as exc:
             service_stopping = self.stop_event.is_set()
             self._update(
@@ -154,59 +234,145 @@ class TaskManager:
                 error_type="service_shutdown" if service_stopping else "cancelled",
                 error="service stopped during task" if service_stopping else str(exc),
             )
+            LOGGER.info(
+                "task interrupted",
+                extra={"task_id": task_id, "operation": operation},
+            )
         except Exception as exc:  # noqa: BLE001 - task errors must be persisted
             self._update(
                 task_id,
                 state="failed",
                 progress=0.0,
                 stage="failed",
-                error_type=type(exc).__name__,
-                error=f"{exc}\n{traceback.format_exc()}",
+                error_type=public_error_code(exc),
+                error=str(exc) or "operation failed",
+            )
+            LOGGER.exception(
+                "task failed", extra={"task_id": task_id, "operation": operation}
             )
         else:
+            if isinstance(result, DeferredTask):
+                self._update(
+                    task_id,
+                    state="running",
+                    progress=0.99,
+                    stage=result.stage,
+                    detail=result.detail,
+                )
+                return
             self._update(task_id, state="completed", progress=1.0, stage="completed", result=result)
+            LOGGER.info(
+                "task completed", extra={"task_id": task_id, "operation": operation}
+            )
 
     def get(self, task_id: str) -> dict[str, Any]:
-        row = self.database.fetch_one("SELECT * FROM tasks WHERE id=?", (task_id,))
-        if not row:
-            raise LookupError(f"task not found: {task_id}")
-        result = Database.decode_json_row(row, ("arguments_json", "result_json"))
-        result["cancel_requested"] = bool(result["cancel_requested"])
-        result["task_id"] = result["id"]
-        return result
+        return self.repository.get(task_id)
 
-    def list(self) -> list[dict[str, Any]]:
-        rows = self.database.fetch_all("SELECT * FROM tasks ORDER BY created_at DESC")
-        results = [Database.decode_json_row(row, ("arguments_json", "result_json")) for row in rows]
-        for result in results:
-            result["cancel_requested"] = bool(result["cancel_requested"])
-            result["task_id"] = result["id"]
-        return results
+    def list(self, limit: int = 200, cursor: str | None = None) -> dict[str, Any]:
+        return self.repository.list(limit, cursor)
 
     def cancel(self, task_id: str) -> dict[str, Any]:
         task = self.get(task_id)
         if task["state"] in TERMINAL_STATES:
             return task
-        self.database.execute(
-            "UPDATE tasks SET cancel_requested=1,updated_at=? WHERE id=?",
-            (utc_now(), task_id),
-        )
+        if task["state"] == "queued":
+            self._update(
+                task_id,
+                state="cancelled",
+                progress=0.0,
+                stage="cancelled",
+                error_type="cancelled",
+                error="task cancellation requested before dispatch",
+            )
+        else:
+            self.repository.request_cancel(task_id)
         return self.get(task_id)
 
-    def retry(self, task_id: str) -> dict[str, Any]:
+    def retry(
+        self,
+        task_id: str,
+        *,
+        request_id: str | None = None,
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         task = self.get(task_id)
         if task["state"] not in {"failed", "cancelled", "interrupted"}:
             raise ValueError("only failed, cancelled, or interrupted tasks can be retried")
-        arguments = dict(task["arguments"])
-        arguments["_resume_from_task_id"] = task_id
-        return self.submit(task["operation"], arguments)
-
-    def events(self, task_id: str, after_id: int = 0) -> list[dict[str, Any]]:
-        return self.database.fetch_all(
-            "SELECT * FROM task_events WHERE task_id=? AND id>? ORDER BY id",
-            (task_id, after_id),
+        return self.submit(
+            task["operation"],
+            dict(task["arguments"]),
+            request_id=request_id,
+            actor=actor,
+            snapshot=task["snapshot"],
+            retry_of=task_id,
         )
+
+    def complete_deferred(self, task_id: str, result: Any) -> None:
+        task = self.get(task_id)
+        if task["state"] in TERMINAL_STATES:
+            return
+        try:
+            result = validate_completion_result(task["operation"], result)
+        except Exception as exc:  # noqa: BLE001 - contract failure is persisted
+            self._update(
+                task_id,
+                state="failed",
+                progress=0.0,
+                stage="failed",
+                error_type=public_error_code(exc),
+                error=str(exc),
+            )
+            return
+        self._update(
+            task_id,
+            state="completed",
+            progress=1.0,
+            stage="completed",
+            result=result,
+        )
+
+    def fail_deferred(self, task_id: str, error_type: str, error: str, result: Any) -> None:
+        task = self.get(task_id)
+        if task["state"] in TERMINAL_STATES:
+            return
+        self._update(
+            task_id,
+            state="failed",
+            progress=1.0,
+            stage="failed",
+            result=result,
+            error_type=error_type,
+            error=error,
+        )
+
+    def cancel_deferred(self, task_id: str, result: Any) -> None:
+        task = self.get(task_id)
+        if task["state"] in TERMINAL_STATES:
+            return
+        self._update(
+            task_id,
+            state="cancelled",
+            progress=1.0,
+            stage="cancelled",
+            result=result,
+            error_type="cancelled",
+            error="batch run cancellation requested",
+        )
+
+    def events(
+        self, task_id: str, after_id: int = 0, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        return self.repository.events(task_id, after_id, limit)
+
+    def events_all(self, after_id: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+        return self.repository.events_all(after_id, limit)
+
+    def recent_events(self, limit: int = 500) -> list[dict[str, Any]]:
+        return self.repository.recent_events(limit)
 
     def shutdown(self) -> None:
         self.stop_event.set()
-        self.worker.join(timeout=15)
+        with self._dispatch_condition:
+            self._dispatch_condition.notify_all()
+        if self.worker:
+            self.worker.join(timeout=15)

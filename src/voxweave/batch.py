@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat as stat_module
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .batch_repository import BatchRepository
 from .database import Database, utc_now
 from .hashing import sha256_file
-from .task_manager import TaskManager
+from .protocol import OperationError
+from .task_manager import DeferredTask, TaskContext, TaskManager
 
 DEFAULT_EXTENSIONS = [".wav", ".flac", ".mp3", ".m4a", ".aac", ".mp4", ".mkv", ".mov", ".webm"]
 TEMP_SUFFIXES = (".tmp", ".part", ".crdownload", ".download")
+LOGGER = logging.getLogger(__name__)
 
 
 def _slug(value: str) -> str:
@@ -32,11 +37,24 @@ def _is_hidden(path: Path) -> bool:
 
 
 class BatchManager:
-    def __init__(self, database: Database, tasks: TaskManager):
+    def __init__(
+        self,
+        database: Database,
+        tasks: TaskManager,
+        resolve_model: Callable[[str], dict[str, Any]],
+    ):
         self.database = database
+        self.repository = BatchRepository(database)
         self.tasks = tasks
+        self.resolve_model = resolve_model
         self.stop_event = threading.Event()
-        self.observed: dict[tuple[str, str], tuple[int, float]] = {}
+        self.observed: dict[tuple[str, str], tuple[int, int, float]] = {}
+        self.submission_lock = threading.RLock()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.thread:
+            raise RuntimeError("batch watcher is already running")
         self.thread = threading.Thread(
             target=self._watch_loop, name="voxweave-batch-watch", daemon=True
         )
@@ -50,23 +68,23 @@ class BatchManager:
         if output_root == input_root or input_root in output_root.parents:
             raise ValueError("output_root cannot be the input directory or a child of it")
         output_root.mkdir(parents=True, exist_ok=True)
+        model = self.resolve_model(arguments["model"])
         batch_id = str(uuid.uuid4())
         now = utc_now()
-        self.database.execute(
-            "INSERT INTO batch_rules("
-            "id,input_root,output_root,model_selector,preset_json,preset_name,recursive,"
-            "watch_enabled,extensions_json,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        self.repository.create_rule(
             (
                 batch_id,
                 str(input_root),
                 str(output_root),
-                arguments["model"],
+                model["id"],
+                model["model_sha256"],
+                model["index_sha256"],
                 json.dumps(arguments.get("preset") or {}, ensure_ascii=False),
                 _slug(arguments.get("preset_name") or "default"),
                 int(bool(arguments.get("recursive", True))),
                 int(bool(arguments.get("watch", False))),
                 json.dumps(arguments.get("extensions") or DEFAULT_EXTENSIONS),
+                "active",
                 now,
                 now,
             ),
@@ -74,23 +92,21 @@ class BatchManager:
         return self.get(batch_id)
 
     def get(self, batch_id: str) -> dict[str, Any]:
-        row = self.database.fetch_one("SELECT * FROM batch_rules WHERE id=?", (batch_id,))
-        if not row:
-            raise LookupError(f"batch not found: {batch_id}")
-        result = Database.decode_json_row(row, ("preset_json", "extensions_json"))
-        result["recursive"] = bool(result["recursive"])
-        result["watch_enabled"] = bool(result["watch_enabled"])
-        return result
+        return self.repository.get(batch_id)
+
+    def list(self, limit: int = 100, cursor: str | None = None) -> dict[str, Any]:
+        return self.repository.list(limit, cursor)
 
     def set_watch(self, batch_id: str, enabled: bool) -> dict[str, Any]:
-        self.get(batch_id)
-        self.database.execute(
-            "UPDATE batch_rules SET watch_enabled=?,updated_at=? WHERE id=?",
-            (int(enabled), utc_now(), batch_id),
-        )
+        batch = self.get(batch_id)
+        if batch["state"] != "active":
+            raise ValueError(f"batch rule is not active: {batch_id}")
+        self.repository.set_watch(batch_id, enabled)
         return self.get(batch_id)
 
-    def _files(self, rule: dict[str, Any]) -> list[Path]:
+    def _files(
+        self, rule: dict[str, Any], cancelled: Callable[[], bool] | None = None
+    ) -> list[Path]:
         root = Path(rule["input_root"])
         iterator = root.rglob("*") if rule["recursive"] else root.glob("*")
         extensions = {value.casefold() for value in rule["extensions"]}
@@ -104,141 +120,259 @@ class BatchManager:
                     return False
             return True
 
-        return sorted(
-            path
-            for path in iterator
-            if path.is_file()
-            and visible(path)
-            and path.suffix.casefold() in extensions
-            and not path.name.casefold().endswith(TEMP_SUFFIXES)
-        )
+        files = []
+        for path in iterator:
+            if cancelled and cancelled():
+                raise InterruptedError("task cancellation requested")
+            if (
+                path.is_file()
+                and visible(path)
+                and path.suffix.casefold() in extensions
+                and not path.name.casefold().endswith(TEMP_SUFFIXES)
+            ):
+                files.append(path)
+        return sorted(files)
 
-    def _output(self, rule: dict[str, Any], source: Path) -> Path:
+    def _output(self, rule: dict[str, Any], source: Path, source_hash: str) -> Path:
         relative = source.relative_to(Path(rule["input_root"]))
-        model_slug = _slug(rule["model_selector"])
+        model_slug = _slug(rule["model_id"])
         preset_slug = _slug(rule["preset_name"])
         suffix = (
             source.suffix
             if source.suffix.casefold() in {".mp4", ".mkv", ".mov", ".webm"}
             else ".wav"
         )
-        name = f"{source.stem}_{model_slug}_{preset_slug}{suffix}"
+        source_type = source.suffix.casefold().removeprefix(".")
+        name = (
+            f"{source.stem}_{source_type}_{model_slug}_{preset_slug}_{source_hash[:12]}{suffix}"
+        )
         return Path(rule["output_root"]) / relative.parent / name
 
     def _submit_file(self, rule: dict[str, Any], source: Path) -> dict[str, Any]:
-        stat = source.stat()
-        existing = self.database.fetch_one(
-            "SELECT * FROM batch_items WHERE "
-            "batch_id=? AND source_path=? AND source_size=? AND source_mtime_ns=?",
-            (rule["id"], str(source), stat.st_size, stat.st_mtime_ns),
-        )
-        if existing:
-            task = self.tasks.get(existing["task_id"]) if existing.get("task_id") else None
-            return {"batch_item": existing, "task": task}
-        output = self._output(rule, source)
-        item_id = str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"voxweave:{rule['id']}:{source}:{stat.st_size}:{stat.st_mtime_ns}",
+        with self.submission_lock:
+            before = source.stat()
+            source_hash = sha256_file(source)
+            after = source.stat()
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise RuntimeError(f"source changed while hashing: {source}")
+            output = self._output(rule, source, source_hash)
+            item_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"voxweave:{rule['id']}:{source}:{source_hash}",
+                )
             )
-        )
-        now = utc_now()
-        self.database.execute(
-            "INSERT INTO batch_items("
-            "id,batch_id,source_path,source_size,source_mtime_ns,source_sha256,"
-            "output_path,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (
-                item_id,
-                rule["id"],
-                str(source),
-                stat.st_size,
-                stat.st_mtime_ns,
-                sha256_file(source),
-                str(output),
-                "submitting",
-                now,
-                now,
-            ),
-        )
-        arguments = {
-            **rule["preset"],
-            "input": str(source),
-            "output": str(output),
-            "model": rule["model_selector"],
-            "overwrite": False,
-        }
-        try:
-            task = self.tasks.submit("conversion.run", arguments)
-        except Exception as error:
-            self.database.execute(
-                "UPDATE batch_items SET state='failed',error=?,updated_at=? WHERE id=?",
-                (str(error), utc_now(), item_id),
-            )
-            raise
-        self.database.execute(
-            "UPDATE batch_items SET task_id=?,state='queued',updated_at=? WHERE id=?",
-            (task["task_id"], utc_now(), item_id),
-        )
-        return {
-            "batch_item": self.database.fetch_one(
-                "SELECT * FROM batch_items WHERE id=?", (item_id,)
-            ),
-            "task": task,
-        }
+            now = utc_now()
+            arguments = {
+                **rule["preset"],
+                "input": str(source),
+                "input_sha256": source_hash,
+                "output": str(output),
+                "model": rule["model_id"],
+                "overwrite": False,
+            }
+            created = False
+            with self.database.connect() as db:
+                existing = self.repository.find_item(
+                    db, rule["id"], str(source), source_hash
+                )
+                if existing and existing["task_id"]:
+                    existing_dict = dict(existing)
+                    task = self.tasks.get(existing_dict["task_id"])
+                    return {"batch_item": existing_dict, "task": task}
+                if not existing:
+                    self.repository.insert_item(
+                        db,
+                        (
+                            item_id,rule["id"],str(source),after.st_size,after.st_mtime_ns,
+                            source_hash,str(output),"submitting",now,now,
+                        ),
+                    )
+                else:
+                    item_id = existing["id"]
+                task_id, created = self.tasks.create_in_transaction(
+                    db,
+                    "conversion.run",
+                    arguments,
+                    request_id=f"batch-item:{item_id}",
+                    actor={"kind": "batch", "batch_id": rule["id"]},
+                    snapshot={
+                        "input": {
+                            "path": str(source),
+                            "size_bytes": after.st_size,
+                            "modified_ns": after.st_mtime_ns,
+                            "sha256": source_hash,
+                        },
+                        "model": {
+                            "id": rule["model_id"],
+                            "model_sha256": rule["model_sha256"],
+                            "index_sha256": rule.get("index_sha256"),
+                        },
+                    },
+                )
+                self.repository.link_item(db, item_id, task_id)
+            if created:
+                self.tasks.notify_enqueued(task_id)
+            task = self.tasks.get(task_id)
+            return {
+                "batch_item": self.repository.get_item(item_id),
+                "task": task,
+            }
 
-    def run(self, batch_id: str) -> dict[str, Any]:
+    def run(self, arguments: dict[str, Any], context: TaskContext) -> dict[str, Any] | DeferredTask:
+        batch_id = arguments["batch_id"]
         rule = self.get(batch_id)
-        tasks = [
-            self._submit_file(rule, path)
-            for path in self._files(rule)
-            if not self._output(rule, path).exists()
-        ]
-        return {"batch": rule, "tasks": tasks}
+        if rule["state"] != "active":
+            raise ValueError(f"batch rule is not active: {batch_id}")
+        tasks = []
+        failures = []
+        files = self._files(rule, context.cancelled)
+        total = max(1, len(files))
+        for index, path in enumerate(files):
+            if context.cancelled():
+                raise InterruptedError("task cancellation requested")
+            context.progress(index / total, "enumerating", f"{index}/{len(files)} files")
+            try:
+                tasks.append(self._submit_file(rule, path))
+            except Exception as error:  # noqa: BLE001 - isolate each source file
+                failures.append({"source_path": str(path), "error": str(error)})
+        item_ids = [item["batch_item"]["id"] for item in tasks]
+        result = {"batch": rule, "tasks": tasks, "failures": failures}
+        if not item_ids:
+            if failures:
+                raise OperationError(
+                    "batch_submission_failed",
+                    f"failed to submit {len(failures)} batch files",
+                )
+            return result
+        self.repository.insert_run(context.task_id, batch_id, item_ids, failures)
+        context.progress(0.99, "waiting_for_children", f"waiting for {len(item_ids)} files")
+        return DeferredTask("waiting_for_children", f"waiting for {len(item_ids)} files")
 
-    def retry_task(self, task_id: str) -> dict[str, Any]:
-        task = self.tasks.retry(task_id)
-        self.database.execute(
-            "UPDATE batch_items SET task_id=?,state='queued',error=NULL,updated_at=? "
-            "WHERE task_id=?",
-            (task["task_id"], utc_now(), task_id),
-        )
-        return task
+    def relink_retry(self, previous_task_id: str, task_id: str) -> None:
+        self.repository.relink_retry(previous_task_id, task_id)
+
+    def durable_task_ids(self) -> set[str]:
+        return self.repository.active_run_ids()
+
+    def retry(
+        self, arguments: dict[str, Any], context: TaskContext
+    ) -> dict[str, Any] | DeferredTask:
+        batch_id = arguments["batch_id"]
+        self.get(batch_id)
+        items = self.repository.retryable_items(batch_id)
+        retried = []
+        for index, item in enumerate(items):
+            if context.cancelled():
+                raise InterruptedError("task cancellation requested")
+            if not item["task_id"]:
+                continue
+            task = self.tasks.retry(
+                item["task_id"],
+                request_id=f"batch-retry:{context.task_id}:{item['id']}",
+                actor={"kind": "batch-retry", "batch_id": batch_id},
+            )
+            self.repository.link_existing_item(item["id"], task["id"])
+            retried.append(item["id"])
+            context.progress(
+                0.9 * ((index + 1) / max(1, len(items))),
+                "retrying_children",
+                f"{index + 1}/{len(items)}",
+            )
+        if not retried:
+            return {"batch_id": batch_id, "retried": 0, "items": []}
+        self.repository.insert_run(context.task_id, batch_id, retried, [])
+        return DeferredTask("waiting_for_children", f"waiting for {len(retried)} retries")
 
     def _sync_items(self) -> None:
-        items = self.database.fetch_all(
-            "SELECT id,task_id FROM batch_items WHERE task_id IS NOT NULL "
-            "AND state NOT IN ('completed','failed','cancelled','interrupted')"
-        )
+        items = self.repository.pending_items()
         for item in items:
             task = self.tasks.get(item["task_id"])
-            self.database.execute(
-                "UPDATE batch_items SET state=?,error=?,updated_at=? WHERE id=?",
-                (task["state"], task.get("error"), utc_now(), item["id"]),
+            self.repository.update_item_state(
+                item["id"], task["state"], task.get("error")
             )
+
+    def _sync_runs(self) -> None:
+        runs = self.repository.active_runs()
+        for run in runs:
+            item_ids = json.loads(run["item_ids_json"])
+            items = self.repository.items_by_ids(item_ids)
+            parent = self.tasks.get(run["id"])
+            if parent["cancel_requested"]:
+                for item in items:
+                    if item["task_id"]:
+                        self.tasks.cancel(item["task_id"])
+            terminal = {"completed", "failed", "cancelled", "interrupted"}
+            if len(items) != len(item_ids) or any(item["state"] not in terminal for item in items):
+                continue
+            counts: dict[str, int] = {}
+            for item in items:
+                counts[item["state"]] = counts.get(item["state"], 0) + 1
+            result = {
+                "batch_id": run["batch_id"],
+                "item_count": len(items),
+                "counts": counts,
+                "items": items,
+                "submission_failures": json.loads(run["submission_failures_json"]),
+            }
+            if parent["cancel_requested"]:
+                self.tasks.cancel_deferred(run["id"], result)
+                state = "cancelled"
+            elif set(counts) == {"completed"} and not result["submission_failures"]:
+                self.tasks.complete_deferred(run["id"], result)
+                state = "completed"
+            else:
+                self.tasks.fail_deferred(
+                    run["id"],
+                    "batch_run_failed",
+                    f"{sum(count for name, count in counts.items() if name != 'completed')} "
+                    "batch items did not complete; "
+                    f"{len(result['submission_failures'])} files failed submission",
+                    result,
+                )
+                state = "failed"
+            self.repository.finish_run(run["id"], state)
 
     def _watch_loop(self) -> None:
         while not self.stop_event.wait(2.0):
-            self._sync_items()
-            rules = self.database.fetch_all("SELECT * FROM batch_rules WHERE watch_enabled=1")
+            try:
+                self._sync_items()
+                self._sync_runs()
+                rules = self.repository.watched_rules()
+            except Exception:  # noqa: BLE001 - a watcher must remain supervised
+                LOGGER.exception("batch watcher synchronization failed")
+                continue
             for raw in rules:
-                rule = Database.decode_json_row(raw, ("preset_json", "extensions_json"))
-                rule["recursive"] = bool(rule["recursive"])
-                for path in self._files(rule):
-                    if self._output(rule, path).exists():
-                        continue
-                    key = (rule["id"], str(path))
-                    size = path.stat().st_size
-                    previous = self.observed.get(key)
-                    now = time.time()
-                    if previous and previous[0] == size and now - previous[1] >= 5.0:
-                        try:
-                            self._submit_file(rule, path)
-                        except Exception:
-                            continue
+                try:
+                    rule = Database.decode_json_row(raw, ("preset_json", "extensions_json"))
+                    rule["recursive"] = bool(rule["recursive"])
+                    files = self._files(rule)
+                    seen = {(rule["id"], str(path)) for path in files}
+                    for key in [
+                        key for key in self.observed if key[0] == rule["id"] and key not in seen
+                    ]:
                         self.observed.pop(key, None)
-                    elif not previous or previous[0] != size:
-                        self.observed[key] = (size, now)
+                    for path in files:
+                        key = (rule["id"], str(path))
+                        stat = path.stat()
+                        previous = self.observed.get(key)
+                        now = time.time()
+                        stable = (
+                            previous
+                            and previous[:2] == (stat.st_size, stat.st_mtime_ns)
+                            and now - previous[2] >= 5.0
+                        )
+                        if stable:
+                            self._submit_file(rule, path)
+                            self.observed.pop(key, None)
+                        elif not previous or previous[:2] != (stat.st_size, stat.st_mtime_ns):
+                            self.observed[key] = (stat.st_size, stat.st_mtime_ns, now)
+                    self.repository.clear_rule_error(rule["id"])
+                except Exception as error:  # noqa: BLE001 - isolate each watched rule
+                    LOGGER.exception("batch watch rule failed: %s", raw.get("id"))
+                    self.repository.record_rule_error(raw["id"], str(error))
 
     def shutdown(self) -> None:
         self.stop_event.set()
-        self.thread.join(timeout=5)
+        if self.thread:
+            self.thread.join(timeout=5)

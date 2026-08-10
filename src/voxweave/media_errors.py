@@ -1,0 +1,2 @@
+class MediaPipelineError(RuntimeError):
+    pass

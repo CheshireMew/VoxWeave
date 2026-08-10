@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -8,6 +10,8 @@ from typing import Any
 
 from .config import Settings
 from .hashing import sha256_file
+from .model_registry import ModelRegistry
+from .process_control import run_capture
 from .runtime import resolve_rvc_entry, resolve_rvc_python
 
 
@@ -49,28 +53,84 @@ class RvcEngine:
             raise RvcEngineError("RVC runtime is not configured")
         return python, entry
 
+    def audio_devices(self) -> dict[str, Any]:
+        python, entry = self._runtime()
+        command = [
+            str(python),
+            str(entry),
+            "--rvc-root",
+            str(Path(self.settings.rvc_root).resolve()),
+            "devices",
+        ]
+        return self._run_worker(command, entry, None)
+
+    def realtime_worker_command(self) -> tuple[list[str], Path]:
+        python, entry = self._runtime()
+        command = [
+            str(python),
+            str(entry),
+            "--rvc-root",
+            str(Path(self.settings.rvc_root).resolve()),
+            "realtime",
+        ]
+        return command, entry
+
+    def realtime_start_payload(
+        self,
+        model: dict[str, Any],
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        values = self._parameters(parameters)
+        payload = {
+            "command": "start",
+            "model_id": model["id"],
+            "model": model["model_path"],
+            "index": model.get("index_path"),
+            "pitch": values["pitch"],
+            "f0": values["f0"],
+            "index_rate": values["index_rate"],
+            "rms_mix_rate": values["rms_mix_rate"],
+            "input_device": int(parameters["input_device"]),
+            "output_device": int(parameters["output_device"]),
+            "block_seconds": float(parameters["block_seconds"]),
+            "crossfade_seconds": float(parameters.get("crossfade_seconds", 0.05)),
+            "extra_seconds": float(parameters.get("extra_seconds", 2.5)),
+            "vad_threshold": float(parameters.get("vad_threshold", 0.35)),
+        }
+        converter_identity = {
+            "model_sha256": model["model_sha256"],
+            "index_sha256": model.get("index_sha256"),
+            "pitch": values["pitch"],
+            "index_rate": values["index_rate"],
+        }
+        payload["converter_key"] = hashlib.sha256(
+            json.dumps(converter_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        cache_identity = {
+            **payload,
+            "input_device_name": parameters.get("input_device_name"),
+            "output_device_name": parameters.get("output_device_name"),
+            "input_device_sample_rate": parameters.get("input_device_sample_rate"),
+            "output_device_sample_rate": parameters.get("output_device_sample_rate"),
+            "hostapi": parameters.get("hostapi"),
+        }
+        payload["cache_key"] = hashlib.sha256(
+            json.dumps(cache_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        payload["test_mode"] = bool(parameters.get("test_mode", False))
+        return payload
+
+    @staticmethod
+    def realtime_creation_flags() -> int:
+        return subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+
     @staticmethod
     def _run_worker(
         command: list[str], entry: Path, cancelled: Callable[[], bool] | None
     ) -> dict[str, Any]:
-        process = subprocess.Popen(
-            command,
-            cwd=entry.parent,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        while True:
-            try:
-                stdout, stderr = process.communicate(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                if cancelled and cancelled():
-                    process.terminate()
-                    process.communicate()
-                    raise InterruptedError("task cancellation requested") from None
+        completed = run_capture(command, cwd=entry.parent, cancelled=cancelled)
+        stdout = completed.stdout
+        stderr = completed.stderr
         lines = [line for line in stdout.splitlines() if line.strip()]
         payload: dict[str, Any] | None = None
         for line in reversed(lines):
@@ -79,7 +139,7 @@ class RvcEngine:
                 break
             except json.JSONDecodeError:
                 continue
-        if process.returncode != 0 or not payload or not payload.get("ok"):
+        if completed.returncode != 0 or not payload or not payload.get("ok"):
             detail = (payload or {}).get("error") or stderr.strip() or stdout.strip()
             raise RvcEngineError(detail)
         return payload
@@ -146,7 +206,9 @@ class RvcEngine:
             command.append("--overwrite")
         if progress:
             progress(0.35, "converting", f"loading {model['display_name']}")
+        ModelRegistry.verify_snapshot(model)
         payload = self._run_worker(command, entry, cancelled)
+        ModelRegistry.verify_snapshot(model)
         if not output_path.is_file():
             raise RvcEngineError("RVC reported success but output file is missing")
         if progress:
@@ -174,6 +236,7 @@ class RvcEngine:
     ) -> list[dict[str, Any]]:
         if not jobs:
             raise ValueError("RVC batch requires at least one job")
+        ModelRegistry.verify_snapshot(model)
         python, entry = self._runtime()
         values = self._parameters(parameters)
         items = []
@@ -201,6 +264,7 @@ class RvcEngine:
         if progress:
             progress(0.35, "converting", f"loading {model['display_name']} for {len(jobs)} chunks")
         payload = self._run_worker(command, entry, cancelled)
+        ModelRegistry.verify_snapshot(model)
         upstream_results = payload.get("results") or []
         if len(upstream_results) != len(jobs):
             raise RvcEngineError("RVC batch returned an unexpected result count")

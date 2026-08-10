@@ -18,7 +18,8 @@ export TMPDIR="$data_root/temp"
 if [ ! -x "$data_root/.venv/bin/python" ]; then
   "$python_cmd" -m venv "$data_root/.venv"
 fi
-"$data_root/.venv/bin/python" -m pip install --upgrade pip
-"$data_root/.venv/bin/python" -m pip install -e "$repository[dev]"
+export PIP_CONSTRAINT="$repository/requirements.lock"
+"$data_root/.venv/bin/python" -m pip install 'pip==26.2.1'
+"$data_root/.venv/bin/python" -m pip install -c "$PIP_CONSTRAINT" -e "$repository[dev]"
 "$data_root/.venv/bin/python" -m voxweave.bootstrap --data-root "$data_root"
 printf 'VoxWeave source environment is ready: %s\n' "$data_root/.venv"

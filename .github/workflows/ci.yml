@@ -13,9 +13,20 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install source and test dependencies
-        run: python -m pip install -e ".[dev]"
+        run: |
+          python -m pip install "pip==26.2.1"
+          python -m pip install -c requirements.lock -e ".[dev]"
       - name: Static checks
         run: python -m ruff check .
+      - name: QML static checks
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem src\voxweave\qml -Filter *.qml | ForEach-Object { $_.FullName })
+          $output = @(& pyside6-qmllint @files 2>&1)
+          $output | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0 -or @($output | Where-Object { $_ -match '^Warning: ' }).Count -gt 0) {
+            exit 1
+          }
       - name: Unit and CPU contract tests
         env:
           QT_QPA_PLATFORM: offscreen

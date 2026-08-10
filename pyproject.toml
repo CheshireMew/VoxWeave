@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=75", "wheel"]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxweave"
 version = "0.1.0"
-description = "Local-first high-quality offline RVC voice conversion workstation"
+description = "Local-first high-quality offline and realtime RVC voice conversion workstation"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = {text = "AGPL-3.0-only"}
@@ -13,6 +13,7 @@ authors = [{name = "CheshireMew"}]
 dependencies = [
   "fastapi==0.116.1",
   "uvicorn==0.35.0",
+  "websockets==15.0.1",
   "pydantic==2.11.7",
   "PySide6==6.11.1",
   "numpy==1.26.4",

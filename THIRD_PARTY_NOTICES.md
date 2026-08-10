@@ -9,10 +9,12 @@ VoxWeave 源码使用 AGPL-3.0-only。以下项目没有因此改用 VoxWeave �
 | FFmpeg | 解封装、滤镜、编码和封装 | 取决于用户安装的构建；当前开发机构建报告 GPL v3 enabled | https://ffmpeg.org/legal.html |
 | FastAPI | 本机 HTTP API | MIT | https://github.com/fastapi/fastapi |
 | Uvicorn | ASGI 服务 | BSD-3-Clause | https://github.com/encode/uvicorn |
+| websockets | Uvicorn 的本机 WebSocket 传输 | BSD-3-Clause | https://github.com/python-websockets/websockets |
 | Pydantic | 请求数据边界 | MIT | https://github.com/pydantic/pydantic |
 | NumPy | 音频数组处理 | BSD-3-Clause（发行物可能含兼容许可组件） | https://github.com/numpy/numpy |
 | SciPy | 聚类与数值处理 | BSD-3-Clause | https://github.com/scipy/scipy |
 | SoundFile / libsndfile | WAV/FLAC 音频读写 | BSD-3-Clause / LGPL-2.1-or-later | https://github.com/bastibe/python-soundfile |
+| python-sounddevice / PortAudio | RVC 运行环境中的实时音频采集与播放 | MIT / MIT | https://python-sounddevice.readthedocs.io/ |
 | Silero VAD | 语音活动检测 | MIT | https://github.com/snakers4/silero-vad |
 | WeSpeaker | 说话人嵌入代码 | Apache-2.0 | https://github.com/wenet-e2e/wespeaker |
 | `wespeaker-resnet34-LM` ONNX | 说话人嵌入权重 | CC-BY-4.0；锁定 HF revision `f0c48c…` | https://huggingface.co/Wespeaker/wespeaker-resnet34-LM |

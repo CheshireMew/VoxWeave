@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
+from urllib.parse import quote
 
+import pytest
 from jsonschema import Draft202012Validator
+
+from voxweave.config import Settings, load_settings
+from voxweave.database import Database
+from voxweave.model_registry import ModelRegistry
 
 ROOT = Path(__file__).parents[1]
 
@@ -17,35 +24,30 @@ def test_empty_official_catalog_is_valid() -> None:
     Draft202012Validator(_schema("catalog.v1.schema.json")).validate(catalog)
 
 
-def test_rvc_model_contract_example_is_valid() -> None:
-    model = {
-        "protocol": "voxweave-rvc-model",
-        "version": 1,
-        "id": "local.example.default",
-        "display_name": "Example",
-        "aliases": ["Example Voice"],
-        "family": "example",
-        "checkpoint_epoch": None,
-        "model_path": "D:\\Models\\example.pth",
-        "model_sha256": "a" * 64,
-        "index_path": None,
-        "index_sha256": None,
-        "index_candidates": [],
-        "rvc_version": "v2",
-        "sample_rate": 40000,
-        "f0": True,
-        "source_kind": "external",
-        "license_spdx": None,
-        "source_url": None,
-        "recommended": {
-            "pitch": 9,
-            "f0": "rmvpe",
-            "index_rate": 0.72,
-            "rms_mix_rate": 0.25,
-            "protect": 0.33,
-            "content_mode": "clean",
-        },
-        "status": "ready",
-        "imported_at": "2026-08-09T00:00:00Z",
-    }
+def test_rvc_model_contract_validates_registry_output(tmp_path) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    model_path = tmp_path / "example.pth"
+    model_path.write_bytes(b"not-a-pickle-and-never-loaded-in-process")
+    model = ModelRegistry(Database(settings.database_path)).register(
+        model_path,
+        inspection={"status": "runtime_missing"},
+    )
     Draft202012Validator(_schema("voxweave-rvc-model.v1.schema.json")).validate(model)
+
+
+def test_current_machine_conversion_results_match_public_schema() -> None:
+    settings = load_settings(create=False)
+    if not settings.database_path.is_file():
+        pytest.skip("current-machine task database is unavailable")
+    uri = "file:" + quote(settings.database_path.resolve().as_posix(), safe="/:") + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    rows = connection.execute(
+        "SELECT result_json FROM tasks WHERE operation='conversion.run' "
+        "AND state='completed' AND result_json IS NOT NULL"
+    ).fetchall()
+    connection.close()
+    if not rows:
+        pytest.skip("current-machine conversion results are unavailable")
+    validator = Draft202012Validator(_schema("voxweave-conversion-result.v1.schema.json"))
+    for (payload,) in rows:
+        validator.validate(json.loads(payload))

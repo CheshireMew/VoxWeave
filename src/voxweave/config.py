@@ -4,7 +4,8 @@ import json
 import os
 import platform
 import shutil
-from dataclasses import asdict, dataclass
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,13 +48,19 @@ class Settings:
     separation_backend: str = "rvc-pymss"
     separation_model_id: str = "vocals-bs-roformer-368"
     wespeaker_model: str | None = None
-    model_roots: list[str] | None = None
+    weight_roots: list[str] | None = None
+    index_roots: list[str] | None = None
     catalog_urls: list[str] | None = None
     telemetry_enabled: bool = False
+    _write_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
-        if self.model_roots is None:
-            self.model_roots = []
+        if self.weight_roots is None:
+            self.weight_roots = []
+        if self.index_roots is None:
+            self.index_roots = []
         if self.catalog_urls is None:
             self.catalog_urls = []
         if self.telemetry_enabled:
@@ -70,6 +77,10 @@ class Settings:
     @property
     def cache_dir(self) -> Path:
         return self.root / "cache"
+
+    @property
+    def logs_dir(self) -> Path:
+        return self.root / "logs"
 
     @property
     def artifacts_dir(self) -> Path:
@@ -108,6 +119,7 @@ class Settings:
             self.root,
             self.state_dir,
             self.cache_dir,
+            self.logs_dir,
             self.artifacts_dir,
             self.downloads_dir,
             self.components_dir,
@@ -116,13 +128,46 @@ class Settings:
         ):
             path.mkdir(parents=True, exist_ok=True)
 
-    def save(self) -> None:
-        self.ensure_layout()
-        temp = self.config_path.with_suffix(".json.tmp")
-        temp.write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        temp.replace(self.config_path)
+    def payload(self) -> dict[str, Any]:
+        return {
+            "data_root": self.data_root,
+            "rvc_root": self.rvc_root,
+            "rvc_python": self.rvc_python,
+            "ffmpeg": self.ffmpeg,
+            "ffprobe": self.ffprobe,
+            "language": self.language,
+            "hardware_backend": self.hardware_backend,
+            "separation_backend": self.separation_backend,
+            "separation_model_id": self.separation_model_id,
+            "wespeaker_model": self.wespeaker_model,
+            "weight_roots": list(self.weight_roots or []),
+            "index_roots": list(self.index_roots or []),
+            "catalog_urls": list(self.catalog_urls or []),
+            "telemetry_enabled": self.telemetry_enabled,
+        }
+
+    def updated(self, **changes: Any) -> Settings:
+        payload = self.payload()
+        unknown = set(changes) - payload.keys()
+        if unknown:
+            raise ValueError(f"unsupported settings: {sorted(unknown)}")
+        payload.update(changes)
+        payload["data_root"] = self.data_root
+        return Settings(**payload)
+
+    def update(self, **changes: Any) -> None:
+        """Atomically persist an update from the owning process."""
+        with self._write_lock:
+            candidate = self.updated(**changes)
+            candidate.ensure_layout()
+            temp = candidate.config_path.with_suffix(".json.tmp")
+            temp.write_text(
+                json.dumps(candidate.payload(), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temp.replace(candidate.config_path)
+            for name, value in candidate.payload().items():
+                setattr(self, name, value)
 
 
 def _which(name: str) -> str | None:
@@ -133,8 +178,13 @@ def _which(name: str) -> str | None:
 def load_settings(*, create: bool = True) -> Settings:
     root = resolve_data_root()
     path = root / "config" / "settings.json"
+    migrated_legacy_roots = False
     if path.exists():
         payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        migrated_legacy_roots = "model_roots" in payload
+        legacy_roots = payload.pop("model_roots", [])
+        payload.setdefault("weight_roots", legacy_roots)
+        payload.setdefault("index_roots", [])
         payload["data_root"] = str(root)
         settings = Settings(**payload)
     else:
@@ -145,6 +195,8 @@ def load_settings(*, create: bool = True) -> Settings:
         )
     if create:
         settings.ensure_layout()
+        if migrated_legacy_roots:
+            settings.update()
     return settings
 
 

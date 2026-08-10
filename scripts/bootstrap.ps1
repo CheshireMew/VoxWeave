@@ -38,8 +38,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $venv 'Scripts\python.exe'))) {
     & $Python -m venv $venv
 }
 $venvPython = Join-Path $venv 'Scripts\python.exe'
-& $venvPython -m pip install --upgrade pip
-& $venvPython -m pip install -e "${repository}[dev]"
+$lockFile = Join-Path $repository 'requirements.lock'
+$env:PIP_CONSTRAINT = $lockFile
+& $venvPython -m pip install 'pip==26.2.1'
+& $venvPython -m pip install -c $lockFile -e "${repository}[dev]"
 
 $configure = @('-m','voxweave.bootstrap','--data-root',$resolvedDataRoot)
 if ($RvcRoot) { $configure += @('--rvc-root',$RvcRoot) }
