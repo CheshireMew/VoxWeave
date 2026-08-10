@@ -81,8 +81,30 @@ class EmptyCommand(Command):
     pass
 
 
+class RealtimeSettings(Command):
+    model: str = Field(max_length=256)
+    hostapi: str = Field(max_length=256)
+    input_device: str = Field(max_length=512)
+    output_device: str = Field(max_length=512)
+    pitch: int = Field(ge=-36, le=36)
+    f0: Literal["rmvpe", "fcpe", "pm"]
+    index_rate: float = Field(ge=0, le=1)
+    rms_mix_rate: float = Field(ge=0, le=1)
+    vad_threshold: float = Field(ge=0.1, le=0.9)
+    input_gate_db: float = Field(ge=-60, le=-20)
+    block_seconds: Literal[0.25, 0.5, 1.0]
+    test_mode: bool
+
+
 class SettingsUpdateCommand(Command):
-    language: Literal["zh-CN", "en"]
+    language: Literal["zh-CN", "en"] | None = None
+    realtime: RealtimeSettings | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> SettingsUpdateCommand:
+        if self.language is None and self.realtime is None:
+            raise ValueError("at least one setting must be provided")
+        return self
 
 
 class RuntimeInstallCommand(Command):
@@ -183,6 +205,7 @@ class RealtimeStartCommand(Command):
     index_rate: float = Field(default=0.72, ge=0, le=1)
     rms_mix_rate: float = Field(default=0.25, ge=0, le=1)
     vad_threshold: float = Field(default=0.55, ge=0.1, le=0.9)
+    input_gate_db: float = Field(default=-40.0, ge=-60, le=-20)
     block_seconds: Literal[0.25, 0.5, 1.0] = 0.5
     test_mode: bool = False
 

@@ -63,6 +63,34 @@ def test_realtime_requires_valid_devices_and_latency() -> None:
         )
 
 
+def test_settings_update_accepts_one_complete_realtime_profile() -> None:
+    realtime = {
+        "model": "local.voice.default",
+        "hostapi": "Windows WASAPI",
+        "input_device": "Microphone",
+        "output_device": "Speakers",
+        "pitch": 9,
+        "f0": "rmvpe",
+        "index_rate": 0.72,
+        "rms_mix_rate": 0.25,
+        "vad_threshold": 0.35,
+        "input_gate_db": -40.0,
+        "block_seconds": 0.5,
+        "test_mode": True,
+    }
+    assert parse_arguments("settings.update", {"realtime": realtime}) == {
+        "realtime": realtime
+    }
+    with pytest.raises(ValueError, match="at least one setting"):
+        parse_arguments("settings.update", {})
+    with pytest.raises(ValueError, match="pitch"):
+        parse_arguments("settings.update", {"realtime": {**realtime, "pitch": 50}})
+    with pytest.raises(ValueError, match="input_gate_db"):
+        parse_arguments(
+            "settings.update", {"realtime": {**realtime, "input_gate_db": -10}}
+        )
+
+
 def test_conversion_requires_absolute_paths() -> None:
     with pytest.raises(ValueError, match="absolute"):
         parse_arguments(

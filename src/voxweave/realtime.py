@@ -77,10 +77,13 @@ class RealtimeSessionManager:
             "crossfade_seconds": 0.05,
             "extra_seconds": 2.5,
             "vad_threshold": float(arguments.get("vad_threshold", 0.35)),
+            "input_gate_db": float(arguments.get("input_gate_db", -40.0)),
             "test_mode": bool(arguments.get("test_mode", False)),
         }
         if not 0.1 <= values["vad_threshold"] <= 0.9:
             raise ValueError("vad_threshold must be between 0.1 and 0.9")
+        if not -60.0 <= values["input_gate_db"] <= -20.0:
+            raise ValueError("input_gate_db must be between -60 and -20")
         RvcEngine._parameters(values)
         return values
 

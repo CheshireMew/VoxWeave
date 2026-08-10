@@ -18,8 +18,8 @@ from voxweave.model_registry import ModelRegistry
 from voxweave.realtime import RealtimeSessionManager
 from voxweave.rvc_engine import RvcEngine
 from voxweave.rvc_realtime_audio import (
-    HalfDuplexGate,
     RealtimeAudioProcessor,
+    UtteranceTestMode,
     VoiceActivityDecision,
     VoiceActivityState,
     select_mono_channel,
@@ -94,6 +94,7 @@ def test_realtime_cache_reloads_changed_models_and_rebuilds_changed_routes(
         model, {**arguments, "output_device_name": "Headphones"}
     )
     changed_vad = engine.realtime_start_payload(model, {**arguments, "vad_threshold": 0.7})
+    changed_gate = engine.realtime_start_payload(model, {**arguments, "input_gate_db": -30})
     test_mode = engine.realtime_start_payload(model, {**arguments, "test_mode": True})
     assert changed_model["converter_key"] != original["converter_key"]
     assert changed_model["cache_key"] != original["cache_key"]
@@ -101,32 +102,41 @@ def test_realtime_cache_reloads_changed_models_and_rebuilds_changed_routes(
     assert changed_route["cache_key"] != original["cache_key"]
     assert changed_vad["converter_key"] == original["converter_key"]
     assert changed_vad["cache_key"] != original["cache_key"]
+    assert changed_gate["converter_key"] == original["converter_key"]
+    assert changed_gate["cache_key"] != original["cache_key"]
     assert test_mode["test_mode"] is True
     assert test_mode["cache_key"] == original["cache_key"]
 
 
-def test_half_duplex_gate_suppresses_the_input_captured_during_playback() -> None:
-    gate = HalfDuplexGate()
-    gate.configure(True)
+def test_utterance_test_mode_buffers_before_playback_and_drains_the_tail() -> None:
+    mode = UtteranceTestMode()
+    mode.configure(True)
+    mode.begin_utterance()
+    mode.buffer_output("first")
+    mode.buffer_output("second")
 
-    assert gate.begin_callback() is True
-    gate.output_started()
-    assert gate.begin_callback() is False
-    assert gate.begin_callback() is True
+    assert mode.phase == "capture"
+    assert mode.mark_silence(2) is False
+    mode.mark_speech()
+    assert mode.mark_silence(2) is False
+    assert mode.mark_silence(2) is True
+    assert mode.start_playback() == "first"
+    assert mode.phase == "playback"
+    assert mode.playback_output() == "second"
+    assert mode.playback_output() is None
+    assert mode.phase == "tail"
+    assert mode.finish_tail_callback() is True
+    assert mode.phase == "capture"
 
-    gate.output_started()
-    gate.configure(False)
-    assert gate.begin_callback() is True
-    assert gate.begin_callback() is True
 
-
-def test_realtime_callback_discards_feedback_block_before_inference() -> None:
+def test_realtime_test_mode_plays_the_complete_utterance_after_speech_ends() -> None:
     class FakeVad:
         def __init__(self) -> None:
             self.resets = 0
 
-        def process(self, _mono):
-            return VoiceActivityDecision(True, True, 0.9)
+        def process(self, mono):
+            active = bool(np.max(np.abs(mono)) >= 0.5)
+            return VoiceActivityDecision(active, active, 0.9 if active else 0.0)
 
         def reset(self) -> None:
             self.resets += 1
@@ -150,46 +160,75 @@ def test_realtime_callback_discards_feedback_block_before_inference() -> None:
     processor = RealtimeAudioProcessor.__new__(RealtimeAudioProcessor)
     processor.np = np
     processor.sd = SimpleNamespace(CallbackAbort=RuntimeError)
-    processor.spec = SimpleNamespace(output_channels=1)
+    processor.spec = SimpleNamespace(output_channels=1, block_frame=4, sample_rate=8)
     processor.vad = FakeVad()
-    processor.half_duplex = HalfDuplexGate()
-    processor.half_duplex.configure(True)
+    processor.test_session = UtteranceTestMode()
+    processor.test_session.configure(True)
     processor.metrics_lock = threading.Lock()
     processor.metrics = {
         "callbacks": 0,
         "inference_callbacks": 0,
         "skipped_callbacks": 0,
         "suppressed_callbacks": 0,
+        "completed_utterances": 0,
         "xruns": 0,
     }
     processor.callback_error = []
     processor.warming = False
     processor.output_active = False
+    processor.input_gate_db = -30.0
     accepted_inputs = []
     processor._push_input = lambda mono, _frames: accepted_inputs.append(mono.copy()) or 1
     processor._infer = lambda _frames: FakeConverted()
     processor._match_rms = lambda _inferred: None
     processor._crossfade = lambda inferred: inferred
     processor._clear_output_state = lambda: None
+    processor._clear_conversion_state = lambda: setattr(processor, "output_active", False)
 
-    microphone = np.ones((4, 1), dtype=np.float32)
-    first_output = np.zeros((4, 1), dtype=np.float32)
-    feedback_output = np.zeros((4, 1), dtype=np.float32)
-    resumed_output = np.zeros((4, 1), dtype=np.float32)
+    noise = np.full((4, 1), 0.02, dtype=np.float32)
+    noise_output = np.zeros((4, 1), dtype=np.float32)
+    processor.callback(noise, noise_output, 4, None, None)
+    assert np.all(noise_output == 0)
+    assert processor.test_session.utterance_active is False
 
-    processor.callback(microphone, first_output, 4, None, None)
-    processor.callback(microphone, feedback_output, 4, None, None)
-    processor.callback(microphone, resumed_output, 4, None, None)
+    speech = np.ones((4, 1), dtype=np.float32)
+    silence = np.zeros((4, 1), dtype=np.float32)
+    feedback = np.ones((4, 1), dtype=np.float32)
+    outputs = [np.zeros((4, 1), dtype=np.float32) for _ in range(8)]
 
-    assert np.all(first_output == 0.25)
-    assert np.all(feedback_output == 0)
-    assert np.all(resumed_output == 0.25)
+    processor.callback(speech, outputs[0], 4, None, None)
+    processor.callback(speech, outputs[1], 4, None, None)
+    processor.callback(silence, outputs[2], 4, None, None)
+    processor.callback(silence, outputs[3], 4, None, None)
+    processor.callback(feedback, outputs[4], 4, None, None)
+    processor.callback(feedback, outputs[5], 4, None, None)
+    processor.callback(feedback, outputs[6], 4, None, None)
+    processor.callback(speech, outputs[7], 4, None, None)
+
+    assert np.all(outputs[0] == 0)
+    assert np.all(outputs[1] == 0)
+    assert np.all(outputs[2] == 0)
+    assert np.all(outputs[3] == 0.25)
+    assert np.all(outputs[4] == 0.25)
+    assert np.all(outputs[5] == 0)
+    assert np.all(outputs[6] == 0)
+    assert np.all(outputs[7] == 0)
     assert np.all(accepted_inputs[0] == 1)
-    assert np.all(accepted_inputs[1] == 0)
+    assert np.all(accepted_inputs[1] == 1)
     assert np.all(accepted_inputs[2] == 1)
-    assert processor.metrics["inference_callbacks"] == 2
-    assert processor.metrics["suppressed_callbacks"] == 1
-    assert processor.vad.resets == 1
+    assert len(accepted_inputs) == 3
+    assert processor.metrics["inference_callbacks"] == 3
+    assert processor.metrics["suppressed_callbacks"] == 3
+    assert processor.metrics["completed_utterances"] == 1
+    assert processor.metrics["test_phase"] == "capture"
+    assert processor.vad.resets == 2
+
+    processor.test_session.configure(False)
+    normal_output = np.zeros((4, 1), dtype=np.float32)
+    processor.callback(speech, normal_output, 4, None, None)
+    assert np.all(normal_output == 0.25)
+    assert processor.metrics["test_mode"] is False
+    assert processor.metrics["test_phase"] == "off"
 
 
 def test_voice_activity_state_requires_speech_and_holds_the_end_of_an_utterance() -> None:
@@ -217,9 +256,9 @@ def test_input_level_prevents_vad_from_muting_audible_microphone_audio() -> None
         probability=0.9,
     )
 
-    assert should_process_audio(rejected, -37.4) is True
-    assert should_process_audio(rejected, -60.0) is False
-    assert should_process_audio(accepted, -90.0) is True
+    assert should_process_audio(rejected, -29.0, -30.0) is True
+    assert should_process_audio(rejected, -37.4, -30.0) is False
+    assert should_process_audio(accepted, -90.0, -30.0) is True
 
 
 def test_realtime_stream_spec_uses_a_rate_supported_by_both_devices() -> None:

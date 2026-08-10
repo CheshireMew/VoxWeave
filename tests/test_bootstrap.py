@@ -48,3 +48,23 @@ def test_legacy_model_roots_are_migrated_and_removed_from_persisted_settings(
     assert "model_roots" not in persisted
     assert persisted["weight_roots"] == ["D:/weights"]
     assert persisted["index_roots"] == []
+    assert persisted["realtime"]["block_seconds"] == 0.5
+
+
+def test_realtime_settings_are_normalized_and_written_atomically(tmp_path) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    realtime = {
+        **settings.realtime,
+        "model": "local.voice.default",
+        "hostapi": "Windows WASAPI",
+        "input_device": "Microphone",
+        "output_device": "Speakers",
+        "pitch": 8,
+        "test_mode": True,
+    }
+    settings.update(realtime=realtime)
+    persisted = json.loads(settings.config_path.read_text(encoding="utf-8"))
+    assert persisted["realtime"] == realtime
+    assert settings.updated(language="en").realtime == realtime
+    with pytest.raises(ValueError, match="realtime.pitch"):
+        settings.updated(realtime={**realtime, "pitch": 60})

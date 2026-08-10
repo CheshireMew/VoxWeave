@@ -96,6 +96,7 @@ class RvcEngine:
             "crossfade_seconds": float(parameters.get("crossfade_seconds", 0.05)),
             "extra_seconds": float(parameters.get("extra_seconds", 2.5)),
             "vad_threshold": float(parameters.get("vad_threshold", 0.35)),
+            "input_gate_db": float(parameters.get("input_gate_db", -40.0)),
         }
         converter_identity = {
             "model_sha256": model["model_sha256"],

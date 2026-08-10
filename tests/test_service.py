@@ -65,6 +65,20 @@ def test_service_owned_settings_update_preserves_runtime_fields(tmp_path) -> Non
         rvc_python=str(tmp_path / "runtime" / "python.exe"),
     )
     with TestClient(create_app(settings, token="secret")) as client:
+        realtime = {
+            "model": "local.voice.default",
+            "hostapi": "Windows WASAPI",
+            "input_device": "Microphone",
+            "output_device": "Speakers",
+            "pitch": 9,
+            "f0": "rmvpe",
+            "index_rate": 0.72,
+            "rms_mix_rate": 0.25,
+            "vad_threshold": 0.35,
+            "input_gate_db": -40.0,
+            "block_seconds": 0.5,
+            "test_mode": True,
+        }
         response = client.post(
             "/v1/execute",
             headers={"Authorization": "Bearer secret"},
@@ -72,7 +86,7 @@ def test_service_owned_settings_update_preserves_runtime_fields(tmp_path) -> Non
                 "protocol": "voxweave-control",
                 "version": 1,
                 "operation": "settings.update",
-                "arguments": {"language": "en"},
+                "arguments": {"language": "en", "realtime": realtime},
             },
         ).json()
     assert response["ok"] is True
@@ -80,6 +94,8 @@ def test_service_owned_settings_update_preserves_runtime_fields(tmp_path) -> Non
     assert payload["language"] == "en"
     assert payload["rvc_root"] == str(tmp_path / "runtime")
     assert payload["rvc_python"] == str(tmp_path / "runtime" / "python.exe")
+    assert payload["realtime"] == realtime
+    assert response["result"]["realtime"] == realtime
 
 
 def test_diagnostics_snapshot_comes_from_service_state(tmp_path) -> None:

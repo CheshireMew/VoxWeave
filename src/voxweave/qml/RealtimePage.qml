@@ -54,35 +54,120 @@ Item {
         return Math.max(0, Math.min(1, (decibels + 60) / 60))
     }
 
-    function selectDefaultDevices() {
+    function comboValueIndex(combo, value) {
+        for (var i = 0; i < combo.count; ++i) {
+            if (String(combo.valueAt(i)) === String(value)) return i
+        }
+        return -1
+    }
+
+    function currentPreferences() {
+        var saved = root.bridge.realtime.preferences || ({})
+        return {
+            "model": realtimeModel.currentIndex >= 0
+                ? String(realtimeModel.currentValue) : String(saved.model || ""),
+            "hostapi": hostApi.currentIndex >= 0
+                ? String(hostApi.currentText) : String(saved.hostapi || ""),
+            "input_device": inputDevice.currentIndex >= 0
+                ? String(inputDevice.currentText) : String(saved.input_device || ""),
+            "output_device": outputDevice.currentIndex >= 0
+                ? String(outputDevice.currentText) : String(saved.output_device || ""),
+            "pitch": Math.round(Number(pitchSlider.value)),
+            "f0": String(f0Method.currentValue),
+            "index_rate": Number(indexRateSlider.value) / 100.0,
+            "rms_mix_rate": Number(rmsMixSlider.value) / 100.0,
+            "vad_threshold": Number(vadThresholdSlider.value) / 100.0,
+            "input_gate_db": Number(inputGateSlider.value),
+            "block_seconds": Number(latencyMode.currentValue),
+            "test_mode": Boolean(testMode.checked)
+        }
+    }
+
+    function saveCurrentPreferences() {
+        root.bridge.realtime.savePreferences(root.currentPreferences())
+    }
+
+    function restoreModel() {
+        var saved = root.bridge.realtime.preferences || ({})
+        var index = root.comboValueIndex(realtimeModel, saved.model || "")
+        realtimeModel.currentIndex = index >= 0 ? index : (realtimeModel.count > 0 ? 0 : -1)
+    }
+
+    function restoreDevices() {
         var hosts = devicePayload.hostapis || []
         var devices = devicePayload.devices || []
+        var saved = root.bridge.realtime.preferences || ({})
         var defaultInput = Number(devicePayload.default_input_device)
-        var hostIndex = 0
-        for (var i = 0; i < devices.length; ++i) {
-            if (devices[i].id === defaultInput) {
-                for (var j = 0; j < hosts.length; ++j) {
-                    if (hosts[j].id === devices[i].hostapi_id) hostIndex = j
+        var hostIndex = -1
+        for (var i = 0; i < hosts.length; ++i) {
+            if (String(hosts[i].name) === String(saved.hostapi || "")) {
+                hostIndex = i
+                break
+            }
+        }
+        if (hostIndex < 0) {
+            for (var deviceIndex = 0; deviceIndex < devices.length; ++deviceIndex) {
+                if (Number(devices[deviceIndex].id) === defaultInput) {
+                    for (var hostFallback = 0; hostFallback < hosts.length; ++hostFallback) {
+                        if (Number(hosts[hostFallback].id) === Number(devices[deviceIndex].hostapi_id))
+                            hostIndex = hostFallback
+                    }
                 }
             }
         }
-        hostApi.currentIndex = hostIndex
+        hostApi.currentIndex = hostIndex >= 0 ? hostIndex : (hosts.length > 0 ? 0 : -1)
         Qt.callLater(function() {
-            inputDevice.currentIndex = 0
-            outputDevice.currentIndex = 0
+            var savedInputIndex = -1
             for (var inputIndex = 0; inputIndex < root.inputDevices.length; ++inputIndex) {
-                if (root.inputDevices[inputIndex].id === defaultInput)
-                    inputDevice.currentIndex = inputIndex
+                if (String(root.inputDevices[inputIndex].name) === String(saved.input_device || "")) {
+                    savedInputIndex = inputIndex
+                    break
+                }
+                if (savedInputIndex < 0 && Number(root.inputDevices[inputIndex].id) === defaultInput)
+                    savedInputIndex = inputIndex
             }
+            inputDevice.currentIndex = savedInputIndex >= 0
+                ? savedInputIndex : (root.inputDevices.length > 0 ? 0 : -1)
+
             var defaultOutput = Number(root.devicePayload.default_output_device)
+            var savedOutputIndex = -1
             for (var outputIndex = 0; outputIndex < root.outputDevices.length; ++outputIndex) {
-                if (root.outputDevices[outputIndex].id === defaultOutput)
-                    outputDevice.currentIndex = outputIndex
+                if (String(root.outputDevices[outputIndex].name) === String(saved.output_device || "")) {
+                    savedOutputIndex = outputIndex
+                    break
+                }
+                if (savedOutputIndex < 0 && Number(root.outputDevices[outputIndex].id) === defaultOutput)
+                    savedOutputIndex = outputIndex
             }
+            outputDevice.currentIndex = savedOutputIndex >= 0
+                ? savedOutputIndex : (root.outputDevices.length > 0 ? 0 : -1)
         })
     }
 
-    onDevicePayloadChanged: Qt.callLater(selectDefaultDevices)
+    function restoreControls() {
+        var saved = root.bridge.realtime.preferences || ({})
+        pitchSlider.value = Number(saved.pitch)
+        vadThresholdSlider.value = Number(saved.vad_threshold) * 100
+        inputGateSlider.value = Number(saved.input_gate_db)
+        indexRateSlider.value = Number(saved.index_rate) * 100
+        rmsMixSlider.value = Number(saved.rms_mix_rate) * 100
+        testMode.checked = Boolean(saved.test_mode)
+        var f0Index = root.comboValueIndex(f0Method, saved.f0)
+        f0Method.currentIndex = f0Index >= 0 ? f0Index : 0
+        var latencyIndex = root.comboValueIndex(latencyMode, saved.block_seconds)
+        latencyMode.currentIndex = latencyIndex >= 0 ? latencyIndex : 1
+        root.restoreModel()
+        root.restoreDevices()
+    }
+
+    onDevicePayloadChanged: Qt.callLater(restoreDevices)
+    onReadyModelsChanged: Qt.callLater(restoreModel)
+    Component.onCompleted: Qt.callLater(restoreControls)
+
+    Connections {
+        target: root.bridge.realtime
+        function onPreferencesChanged() { Qt.callLater(root.restoreControls) }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -152,17 +237,24 @@ Item {
                         Item { Layout.fillWidth: true }
                         StatusPill {
                             objectName: "realtimeVadStatus"
-                            text: root.metrics.speech_detected
+                            text: root.metrics.test_mode && root.metrics.rvc_inference_active
+                                ? root.bridge.text("realtime.voice.recording")
+                                : root.metrics.speech_detected
                                 ? root.bridge.text("realtime.voice.detected")
                                 : root.bridge.text("realtime.voice.waiting")
                             tone: root.metrics.speech_detected ? "info" : "neutral"
                         }
                         StatusPill {
                             objectName: "realtimeVoiceStatus"
-                            text: root.metrics.rvc_inference_active
+                            text: root.metrics.test_mode && root.metrics.playback_active
+                                ? root.bridge.text("realtime.voice.playing")
+                                : root.metrics.test_mode && root.metrics.rvc_inference_active
+                                ? root.bridge.text("realtime.voice.processing")
+                                : root.metrics.rvc_inference_active
                                 ? root.bridge.text("realtime.voice.converting")
                                 : root.bridge.text("realtime.voice.listening")
-                            tone: root.metrics.rvc_inference_active ? "success" : "neutral"
+                            tone: root.metrics.playback_active || root.metrics.rvc_inference_active
+                                ? "success" : "neutral"
                         }
                     }
 
@@ -280,15 +372,17 @@ Item {
                         Layout.fillWidth: true
                         AppComboBox {
                             id: hostApi
+                            objectName: "realtimeHostApi"
                             Layout.fillWidth: true
                             model: root.devicePayload.hostapis || []
                             textRole: "name"
                             valueRole: "id"
                             emptyText: root.bridge.text("realtime.no_devices")
                             enabled: !root.active && count > 0
-                            onCurrentValueChanged: {
+                            onActivated: {
                                 inputDevice.currentIndex = 0
                                 outputDevice.currentIndex = 0
+                                Qt.callLater(root.saveCurrentPreferences)
                             }
                         }
                         AppButton {
@@ -308,12 +402,14 @@ Item {
                             FieldLabel { text: root.bridge.text("field.input_device") }
                             AppComboBox {
                                 id: inputDevice
+                                objectName: "realtimeInputDevice"
                                 Layout.fillWidth: true
                                 model: root.inputDevices
                                 textRole: "name"
                                 valueRole: "id"
                                 emptyText: root.bridge.text("realtime.no_input")
                                 enabled: !root.active && count > 0
+                                onActivated: root.saveCurrentPreferences()
                             }
                         }
                         ColumnLayout {
@@ -321,12 +417,14 @@ Item {
                             FieldLabel { text: root.bridge.text("field.output_device") }
                             AppComboBox {
                                 id: outputDevice
+                                objectName: "realtimeOutputDevice"
                                 Layout.fillWidth: true
                                 model: root.outputDevices
                                 textRole: "name"
                                 valueRole: "id"
                                 emptyText: root.bridge.text("realtime.no_output")
                                 enabled: !root.active && count > 0
+                                onActivated: root.saveCurrentPreferences()
                             }
                         }
                     }
@@ -348,12 +446,14 @@ Item {
                     FieldLabel { text: root.bridge.text("field.model") }
                     AppComboBox {
                         id: realtimeModel
+                        objectName: "realtimeModelSelector"
                         Layout.fillWidth: true
                         model: root.readyModels
                         textRole: "localized_name"
                         valueRole: "id"
                         emptyText: root.bridge.text("empty.models.short")
                         enabled: !root.active && count > 0
+                        onActivated: root.saveCurrentPreferences()
                     }
 
                     GridLayout {
@@ -367,6 +467,7 @@ Item {
                             FieldLabel { text: root.bridge.text("field.latency_mode") }
                             AppComboBox {
                                 id: latencyMode
+                                objectName: "realtimeLatencyMode"
                                 Layout.fillWidth: true
                                 model: [
                                     {"label": root.bridge.text("realtime.latency.low"), "value": 0.25},
@@ -377,6 +478,7 @@ Item {
                                 valueRole: "value"
                                 currentIndex: 1
                                 enabled: !root.active
+                                onActivated: root.saveCurrentPreferences()
                             }
                         }
                         ColumnLayout {
@@ -393,6 +495,7 @@ Item {
                                 showPositiveSign: true
                                 accessibleName: root.bridge.text("field.pitch")
                                 enabled: !root.active
+                                onUserEdited: root.saveCurrentPreferences()
                             }
                         }
                         ColumnLayout {
@@ -400,11 +503,13 @@ Item {
                             FieldLabel { text: root.bridge.text("field.f0") }
                             AppComboBox {
                                 id: f0Method
+                                objectName: "realtimeF0Method"
                                 Layout.fillWidth: true
                                 model: [{"label": "RMVPE", "value": "rmvpe"}, {"label": "FCPE", "value": "fcpe"}, {"label": "PM", "value": "pm"}]
                                 textRole: "label"
                                 valueRole: "value"
                                 enabled: !root.active
+                                onActivated: root.saveCurrentPreferences()
                             }
                         }
                         ColumnLayout {
@@ -421,6 +526,24 @@ Item {
                                 suffix: "%"
                                 accessibleName: root.bridge.text("field.vad_threshold")
                                 enabled: !root.active
+                                onUserEdited: root.saveCurrentPreferences()
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text("field.input_gate_db") }
+                            AppSlider {
+                                id: inputGateSlider
+                                objectName: "realtimeInputGateSlider"
+                                Layout.fillWidth: true
+                                from: -60
+                                to: -20
+                                value: -40
+                                stepSize: 1
+                                suffix: " dB"
+                                accessibleName: root.bridge.text("field.input_gate_db")
+                                enabled: !root.active
+                                onUserEdited: root.saveCurrentPreferences()
                             }
                         }
                         ColumnLayout {
@@ -437,6 +560,7 @@ Item {
                                 suffix: "%"
                                 accessibleName: root.bridge.text("field.index_rate_percent")
                                 enabled: !root.active
+                                onUserEdited: root.saveCurrentPreferences()
                             }
                         }
                         ColumnLayout {
@@ -453,6 +577,7 @@ Item {
                                 suffix: "%"
                                 accessibleName: root.bridge.text("field.rms_mix_percent")
                                 enabled: !root.active
+                                onUserEdited: root.saveCurrentPreferences()
                             }
                         }
                     }
@@ -464,6 +589,7 @@ Item {
                         text: root.bridge.text("realtime.test_mode")
                         checked: false
                         enabled: !root.active
+                        onClicked: root.saveCurrentPreferences()
                     }
 
                     RowLayout {
@@ -487,18 +613,22 @@ Item {
                                 && realtimeModel.currentIndex >= 0
                                 && inputDevice.currentIndex >= 0
                                 && outputDevice.currentIndex >= 0
-                            onClicked: root.bridge.realtime.startSession(
-                                realtimeModel.currentValue,
-                                Number(inputDevice.currentValue),
-                                Number(outputDevice.currentValue),
-                                pitchSlider.value,
-                                f0Method.currentValue,
-                                indexRateSlider.value / 100.0,
-                                rmsMixSlider.value / 100.0,
-                                vadThresholdSlider.value / 100.0,
-                                Number(latencyMode.currentValue),
-                                testMode.checked
-                            )
+                            onClicked: {
+                                root.saveCurrentPreferences()
+                                root.bridge.realtime.startSession(
+                                    realtimeModel.currentValue,
+                                    Number(inputDevice.currentValue),
+                                    Number(outputDevice.currentValue),
+                                    pitchSlider.value,
+                                    f0Method.currentValue,
+                                    indexRateSlider.value / 100.0,
+                                    rmsMixSlider.value / 100.0,
+                                    vadThresholdSlider.value / 100.0,
+                                    inputGateSlider.value,
+                                    Number(latencyMode.currentValue),
+                                    testMode.checked
+                                )
+                            }
                         }
                         AppButton {
                             objectName: "realtimeStopButton"

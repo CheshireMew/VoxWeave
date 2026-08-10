@@ -9,6 +9,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from fastapi.testclient import TestClient  # noqa: E402
 from PySide6.QtCore import QMetaObject, QObject, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtQml import QQmlApplicationEngine  # noqa: E402
@@ -20,6 +21,7 @@ from voxweave.gui_presenters import (  # noqa: E402
     localized_model_name,
     localized_task_title,
 )
+from voxweave.service import create_app  # noqa: E402
 
 
 def test_main_qml_loads(tmp_path) -> None:
@@ -75,6 +77,7 @@ def test_main_qml_loads(tmp_path) -> None:
         "conversionProtectSlider": (0.0, 0.5, 0.01, 0.33),
         "realtimePitchSlider": (-36.0, 36.0, 1.0, 0.0),
         "realtimeVadThresholdSlider": (10.0, 90.0, 1.0, 35.0),
+        "realtimeInputGateSlider": (-60.0, -20.0, 1.0, -40.0),
         "realtimeIndexRateSlider": (0.0, 100.0, 1.0, 72.0),
         "realtimeRmsMixSlider": (0.0, 100.0, 1.0, 25.0),
     }
@@ -137,6 +140,152 @@ def test_main_qml_loads(tmp_path) -> None:
     assert models_page.property("importTab") == 1
     assert model_import_stack.property("currentIndex") == 1
     bridge.shutdown()
+    app.processEvents()
+
+
+def test_realtime_preferences_survive_restart_and_device_id_changes(
+    tmp_path, monkeypatch
+) -> None:
+    app = QGuiApplication.instance() or QGuiApplication([])
+    settings = Settings(data_root=str(tmp_path))
+    ready_models = [
+        {"id": "local.other.default", "localized_name": "Other", "status": "ready"},
+        {"id": "local.voice.default", "localized_name": "Voice", "status": "ready"},
+    ]
+
+    def devices(input_id: int, output_id: int) -> dict:
+        return {
+            "hostapis": [
+                {"id": 0, "name": "MME"},
+                {"id": 1, "name": "Windows WASAPI"},
+            ],
+            "devices": [
+                {
+                    "id": input_id,
+                    "name": "Microphone",
+                    "hostapi": "Windows WASAPI",
+                    "hostapi_id": 1,
+                    "input_channels": 2,
+                    "output_channels": 0,
+                },
+                {
+                    "id": output_id,
+                    "name": "Speakers",
+                    "hostapi": "Windows WASAPI",
+                    "hostapi_id": 1,
+                    "input_channels": 0,
+                    "output_channels": 2,
+                },
+            ],
+            "default_input_device": input_id,
+            "default_output_device": output_id,
+        }
+
+    with TestClient(create_app(settings, token="secret")) as client:
+        def request_json(_settings, _method, route, payload):
+            return client.post(
+                route,
+                headers={"Authorization": "Bearer secret"},
+                json=payload,
+            ).json()
+
+        monkeypatch.setattr(gui_module, "request_json", request_json)
+        bridge = Bridge(settings, start_background=False)
+        engine = QQmlApplicationEngine()
+        engine.setInitialProperties({"bridge": bridge})
+        qml = Path(__file__).parents[1] / "src" / "voxweave" / "qml" / "Main.qml"
+        engine.load(QUrl.fromLocalFile(str(qml)))
+        root = engine.rootObjects()[0]
+        page = root.findChild(QObject, "realtimePage")
+        page.setProperty("readyModels", ready_models)
+        page.setProperty("devicePayload", devices(7, 8))
+        for _ in range(3):
+            app.processEvents()
+
+        root.findChild(QObject, "realtimeModelSelector").setProperty("currentIndex", 1)
+        root.findChild(QObject, "realtimePitchSlider").setProperty("value", 8)
+        root.findChild(QObject, "realtimeF0Method").setProperty("currentIndex", 1)
+        root.findChild(QObject, "realtimeVadThresholdSlider").setProperty("value", 41)
+        root.findChild(QObject, "realtimeInputGateSlider").setProperty("value", -34)
+        root.findChild(QObject, "realtimeIndexRateSlider").setProperty("value", 66)
+        root.findChild(QObject, "realtimeRmsMixSlider").setProperty("value", 18)
+        root.findChild(QObject, "realtimeLatencyMode").setProperty("currentIndex", 2)
+        root.findChild(QObject, "realtimeTestMode").setProperty("checked", True)
+        assert QMetaObject.invokeMethod(page, "saveCurrentPreferences")
+        assert bridge.realtime.preferences["model"] == "local.voice.default"
+        assert bridge.realtime.preferences["pitch"] == 8
+
+        deadline = time.monotonic() + 3
+        persisted = {}
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if settings.config_path.exists():
+                persisted = json.loads(settings.config_path.read_text(encoding="utf-8"))
+                if persisted.get("realtime", {}).get("model") == "local.voice.default":
+                    break
+            time.sleep(0.01)
+        profile = persisted["realtime"]
+        assert profile == {
+            "model": "local.voice.default",
+            "hostapi": "Windows WASAPI",
+            "input_device": "Microphone",
+            "output_device": "Speakers",
+            "pitch": 8,
+            "f0": "fcpe",
+            "index_rate": 0.66,
+            "rms_mix_rate": 0.18,
+            "vad_threshold": 0.41,
+            "input_gate_db": -34.0,
+            "block_seconds": 1.0,
+            "test_mode": True,
+        }
+        bridge.shutdown()
+        root.close()
+        app.processEvents()
+
+    restarted = Settings(**persisted)
+    restarted_bridge = Bridge(restarted, start_background=False)
+    restarted_engine = QQmlApplicationEngine()
+    restarted_engine.setInitialProperties({"bridge": restarted_bridge})
+    restarted_engine.load(QUrl.fromLocalFile(str(qml)))
+    restarted_root = restarted_engine.rootObjects()[0]
+    restarted_page = restarted_root.findChild(QObject, "realtimePage")
+    restarted_page.setProperty("readyModels", ready_models)
+    restarted_page.setProperty("devicePayload", devices(70, 80))
+    for _ in range(5):
+        app.processEvents()
+
+    assert restarted_root.findChild(QObject, "realtimeModelSelector").property(
+        "currentValue"
+    ) == "local.voice.default"
+    assert restarted_root.findChild(QObject, "realtimeInputDevice").property(
+        "currentValue"
+    ) == 70
+    assert restarted_root.findChild(QObject, "realtimeOutputDevice").property(
+        "currentValue"
+    ) == 80
+    assert restarted_root.findChild(QObject, "realtimePitchSlider").property("value") == 8
+    assert restarted_root.findChild(QObject, "realtimeF0Method").property(
+        "currentValue"
+    ) == "fcpe"
+    assert restarted_root.findChild(QObject, "realtimeVadThresholdSlider").property(
+        "value"
+    ) == 41
+    assert restarted_root.findChild(QObject, "realtimeInputGateSlider").property(
+        "value"
+    ) == -34
+    assert restarted_root.findChild(QObject, "realtimeIndexRateSlider").property(
+        "value"
+    ) == 66
+    assert restarted_root.findChild(QObject, "realtimeRmsMixSlider").property(
+        "value"
+    ) == 18
+    assert restarted_root.findChild(QObject, "realtimeLatencyMode").property(
+        "currentValue"
+    ) == 1.0
+    assert restarted_root.findChild(QObject, "realtimeTestMode").property("checked") is True
+    restarted_bridge.shutdown()
+    restarted_root.close()
     app.processEvents()
 
 

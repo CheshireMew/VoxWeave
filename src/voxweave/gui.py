@@ -57,7 +57,7 @@ class Bridge(QObject):
             self.requests, self._activity, self._task_feed, self
         )
         self._realtime = RealtimeViewModel(
-            self.requests, self._set_status, self.text, self
+            settings, self.requests, self._set_status, self.text, self
         )
         self._batch_rules = BatchRulesViewModel(
             self.requests, self._activity, self._task_feed, self

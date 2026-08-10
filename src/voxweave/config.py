@@ -13,6 +13,74 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 SOURCE_ROOT = PACKAGE_ROOT.parents[1]
 LOCAL_POINTER = SOURCE_ROOT / ".voxweave.local.json"
 
+DEFAULT_REALTIME_SETTINGS: dict[str, Any] = {
+    "model": "",
+    "hostapi": "",
+    "input_device": "",
+    "output_device": "",
+    "pitch": 0,
+    "f0": "rmvpe",
+    "index_rate": 0.72,
+    "rms_mix_rate": 0.25,
+    "vad_threshold": 0.35,
+    "input_gate_db": -40.0,
+    "block_seconds": 0.5,
+    "test_mode": False,
+}
+
+
+def normalize_realtime_settings(value: Any) -> dict[str, Any]:
+    """Return one complete, validated realtime preference record."""
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("realtime settings must be an object")
+    unknown = set(value) - DEFAULT_REALTIME_SETTINGS.keys()
+    if unknown:
+        raise ValueError(f"unsupported realtime settings: {sorted(unknown)}")
+    result = {**DEFAULT_REALTIME_SETTINGS, **value}
+    for name in ("model", "hostapi", "input_device", "output_device"):
+        if not isinstance(result[name], str):
+            raise ValueError(f"realtime.{name} must be a string")
+    pitch = result["pitch"]
+    if (
+        isinstance(pitch, bool)
+        or not isinstance(pitch, int | float)
+        or not float(pitch).is_integer()
+    ):
+        raise ValueError("realtime.pitch must be an integer")
+    pitch = int(pitch)
+    if not -36 <= pitch <= 36:
+        raise ValueError("realtime.pitch must be between -36 and 36")
+    result["pitch"] = pitch
+    if result["f0"] not in {"rmvpe", "fcpe", "pm"}:
+        raise ValueError("realtime.f0 must be rmvpe, fcpe, or pm")
+    for name, minimum, maximum in (
+        ("index_rate", 0.0, 1.0),
+        ("rms_mix_rate", 0.0, 1.0),
+        ("vad_threshold", 0.1, 0.9),
+        ("input_gate_db", -60.0, -20.0),
+    ):
+        number = result[name]
+        if isinstance(number, bool) or not isinstance(number, int | float):
+            raise ValueError(f"realtime.{name} must be a number")
+        number = float(number)
+        if not minimum <= number <= maximum:
+            raise ValueError(
+                f"realtime.{name} must be between {minimum} and {maximum}"
+            )
+        result[name] = number
+    block_seconds = result["block_seconds"]
+    if isinstance(block_seconds, bool) or not isinstance(block_seconds, int | float):
+        raise ValueError("realtime.block_seconds must be a number")
+    block_seconds = float(block_seconds)
+    if block_seconds not in {0.25, 0.5, 1.0}:
+        raise ValueError("realtime.block_seconds must be 0.25, 0.5, or 1.0")
+    result["block_seconds"] = block_seconds
+    if not isinstance(result["test_mode"], bool):
+        raise ValueError("realtime.test_mode must be a boolean")
+    return result
+
 
 def _default_data_root() -> Path:
     system = platform.system()
@@ -51,6 +119,7 @@ class Settings:
     weight_roots: list[str] | None = None
     index_roots: list[str] | None = None
     catalog_urls: list[str] | None = None
+    realtime: dict[str, Any] = field(default_factory=dict)
     telemetry_enabled: bool = False
     _write_lock: threading.RLock = field(
         default_factory=threading.RLock, init=False, repr=False, compare=False
@@ -63,6 +132,7 @@ class Settings:
             self.index_roots = []
         if self.catalog_urls is None:
             self.catalog_urls = []
+        self.realtime = normalize_realtime_settings(self.realtime)
         if self.telemetry_enabled:
             raise ValueError("VoxWeave 0.1 does not implement telemetry")
 
@@ -143,6 +213,7 @@ class Settings:
             "weight_roots": list(self.weight_roots or []),
             "index_roots": list(self.index_roots or []),
             "catalog_urls": list(self.catalog_urls or []),
+            "realtime": dict(self.realtime),
             "telemetry_enabled": self.telemetry_enabled,
         }
 
@@ -179,9 +250,14 @@ def load_settings(*, create: bool = True) -> Settings:
     root = resolve_data_root()
     path = root / "config" / "settings.json"
     migrated_legacy_roots = False
+    added_realtime_settings = False
     if path.exists():
         payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
         migrated_legacy_roots = "model_roots" in payload
+        stored_realtime = payload.get("realtime")
+        added_realtime_settings = not isinstance(stored_realtime, dict) or bool(
+            DEFAULT_REALTIME_SETTINGS.keys() - stored_realtime.keys()
+        )
         legacy_roots = payload.pop("model_roots", [])
         payload.setdefault("weight_roots", legacy_roots)
         payload.setdefault("index_roots", [])
@@ -195,7 +271,7 @@ def load_settings(*, create: bool = True) -> Settings:
         )
     if create:
         settings.ensure_layout()
-        if migrated_legacy_roots:
+        if migrated_legacy_roots or added_realtime_settings:
             settings.update()
     return settings
 

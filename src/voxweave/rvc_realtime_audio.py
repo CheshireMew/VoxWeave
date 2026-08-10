@@ -3,12 +3,15 @@ from __future__ import annotations
 import threading
 import time
 import traceback
+from collections import deque
 from dataclasses import dataclass
+from math import ceil
 from typing import Any
 
 VAD_SAMPLE_RATE = 16000
 VAD_WINDOW_SAMPLES = 512
-LEVEL_GATE_DB = -50.0
+TEST_MODE_END_SILENCE_SECONDS = 0.8
+TEST_MODE_MAX_UTTERANCE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -31,8 +34,10 @@ class VoiceActivityDecision:
     probability: float
 
 
-def should_process_audio(decision: VoiceActivityDecision, input_db: float) -> bool:
-    return decision.process_block or input_db >= LEVEL_GATE_DB
+def should_process_audio(
+    decision: VoiceActivityDecision, input_db: float, input_gate_db: float
+) -> bool:
+    return decision.process_block or input_db >= input_gate_db
 
 
 class VoiceActivityState:
@@ -75,26 +80,69 @@ class VoiceActivityState:
         return was_active or self.active
 
 
-class HalfDuplexGate:
-    """Discard the input block captured while the preceding output block plays."""
+class UtteranceTestMode:
+    """Buffer converted speech, then play it only after the utterance ends."""
 
     def __init__(self) -> None:
-        self.enabled = False
-        self._suppress_next_input = False
+        self.outputs: deque[Any] = deque()
+        self.configure(False)
 
     def configure(self, enabled: bool) -> None:
         self.enabled = enabled
-        self._suppress_next_input = False
+        self.phase = "capture" if enabled else "off"
+        self.utterance_active = False
+        self.silence_callbacks = 0
+        self.tail_callbacks_remaining = 0
+        self.outputs.clear()
 
-    def begin_callback(self) -> bool:
-        if not self.enabled or not self._suppress_next_input:
-            return True
-        self._suppress_next_input = False
-        return False
+    def begin_utterance(self) -> None:
+        if self.phase != "capture":
+            raise RuntimeError("test mode is not ready to capture")
+        self.utterance_active = True
+        self.silence_callbacks = 0
 
-    def output_started(self) -> None:
-        if self.enabled:
-            self._suppress_next_input = True
+    def mark_speech(self) -> None:
+        if not self.utterance_active:
+            raise RuntimeError("test mode has no active utterance")
+        self.silence_callbacks = 0
+
+    def mark_silence(self, required_callbacks: int) -> bool:
+        if not self.utterance_active:
+            raise RuntimeError("test mode has no active utterance")
+        self.silence_callbacks += 1
+        return self.silence_callbacks >= required_callbacks
+
+    def buffer_output(self, output: Any) -> None:
+        if not self.utterance_active:
+            raise RuntimeError("test mode has no active utterance")
+        self.outputs.append(output)
+
+    def start_playback(self) -> Any:
+        if not self.outputs:
+            raise RuntimeError("test mode has no buffered output")
+        self.phase = "playback"
+        self.utterance_active = False
+        self.silence_callbacks = 0
+        return self.outputs.popleft()
+
+    def playback_output(self) -> Any | None:
+        if self.phase != "playback":
+            raise RuntimeError("test mode is not playing")
+        if self.outputs:
+            return self.outputs.popleft()
+        self.phase = "tail"
+        self.tail_callbacks_remaining = 1
+        return None
+
+    def finish_tail_callback(self) -> bool:
+        if self.phase != "tail":
+            raise RuntimeError("test mode is not draining speaker tail")
+        if self.tail_callbacks_remaining > 0:
+            self.tail_callbacks_remaining -= 1
+            if self.tail_callbacks_remaining > 0:
+                return False
+        self.phase = "capture"
+        return True
 
 
 class StreamingVoiceActivityDetector:
@@ -239,6 +287,7 @@ class RealtimeAudioProcessor:
         device: Any,
         spec: StreamSpec,
         vad_threshold: float,
+        input_gate_db: float,
         rms_mix_rate: float,
         f0_method: str,
     ) -> None:
@@ -251,6 +300,9 @@ class RealtimeAudioProcessor:
         self.spec = spec
         self.rms_mix_rate = rms_mix_rate
         self.f0_method = f0_method
+        if not -60.0 <= input_gate_db <= -20.0:
+            raise ValueError("input_gate_db must be between -60 and -20")
+        self.input_gate_db = input_gate_db
         self.vad = StreamingVoiceActivityDetector(
             torch=torch,
             transforms=transforms,
@@ -259,7 +311,7 @@ class RealtimeAudioProcessor:
             threshold=vad_threshold,
         )
         self.output_active = False
-        self.half_duplex = HalfDuplexGate()
+        self.test_session = UtteranceTestMode()
         self.warming = True
         self.callback_error: list[str] = []
         self.metrics_lock = threading.Lock()
@@ -277,6 +329,10 @@ class RealtimeAudioProcessor:
             "speech_detected": False,
             "rvc_inference_active": False,
             "test_mode": False,
+            "test_phase": "off",
+            "buffered_blocks": 0,
+            "completed_utterances": 0,
+            "playback_active": False,
             "microphone_suppressed": False,
         }
 
@@ -375,78 +431,218 @@ class RealtimeAudioProcessor:
         self.sola_buffer[:] = inferred[self.spec.block_frame : self.spec.block_frame + size]
         return inferred[: self.spec.block_frame]
 
+    def _clear_conversion_state(self) -> None:
+        self.input_wav.zero_()
+        self.input_wav_resampled.zero_()
+        self._clear_output_state()
+        self.output_active = False
+
+    def _measure_input(self, indata: Any) -> tuple[Any, float, float]:
+        mono = select_mono_channel(self.np, indata)
+        peak_in = float(self.np.max(self.np.abs(mono))) if mono.size else 0.0
+        rms = float(self.np.sqrt(self.np.mean(self.np.square(mono), dtype=self.np.float64)))
+        input_db = float(20 * self.np.log10(max(rms, 1e-6)))
+        return mono, peak_in, input_db
+
+    def _convert_output(self, block_frame_16k: int) -> tuple[Any, int, float]:
+        infer_started = time.perf_counter()
+        inferred = self._infer(block_frame_16k)
+        self._match_rms(inferred)
+        output = (
+            self._crossfade(inferred).repeat(self.spec.output_channels, 1).t().float().cpu().numpy()
+        )
+        infer_ms = int((time.perf_counter() - infer_started) * 1000)
+        peak_out = float(self.np.max(self.np.abs(output))) if output.size else 0.0
+        self.output_active = True
+        return output, infer_ms, peak_out
+
+    @staticmethod
+    def _speech_source(decision: VoiceActivityDecision, level_active: bool) -> str | None:
+        if decision.process_block or decision.active:
+            return "vad"
+        if level_active:
+            return "input_level"
+        return None
+
+    def _normal_callback(self, indata: Any, outdata: Any, frames: int) -> dict[str, Any]:
+        mono, peak_in, input_db = self._measure_input(indata)
+        decision = self.vad.process(mono)
+        process_audio = should_process_audio(decision, input_db, self.input_gate_db)
+        block_frame_16k = self._push_input(mono, frames)
+        infer_ms = 0
+        peak_out = 0.0
+        if process_audio:
+            output, infer_ms, peak_out = self._convert_output(block_frame_16k)
+            outdata[:] = output
+        else:
+            outdata.fill(0)
+            if self.output_active:
+                self._clear_output_state()
+            self.output_active = False
+        return {
+            "inference_delta": int(process_audio),
+            "skipped_delta": int(not process_audio),
+            "suppressed_delta": 0,
+            "completed_delta": 0,
+            "infer_ms": infer_ms,
+            "peak_in": peak_in,
+            "peak_out": peak_out,
+            "input_db": input_db,
+            "vad_probability": decision.probability,
+            "speech_detected": process_audio,
+            "speech_source": self._speech_source(decision, process_audio),
+            "rvc_inference_active": process_audio,
+            "playback_active": process_audio,
+            "microphone_suppressed": False,
+        }
+
+    def _test_capture_callback(self, indata: Any, outdata: Any, frames: int) -> dict[str, Any]:
+        mono, peak_in, input_db = self._measure_input(indata)
+        decision = self.vad.process(mono)
+        level_active = input_db >= self.input_gate_db
+        speech_detected = decision.active or level_active
+        inference_active = False
+        playback_active = False
+        completed_delta = 0
+        infer_ms = 0
+        peak_out = 0.0
+
+        if speech_detected:
+            if not self.test_session.utterance_active:
+                self._clear_conversion_state()
+                self.test_session.begin_utterance()
+            else:
+                self.test_session.mark_speech()
+            block_frame_16k = self._push_input(mono, frames)
+            output, infer_ms, _converted_peak = self._convert_output(block_frame_16k)
+            self.test_session.buffer_output(output.copy())
+            inference_active = True
+            max_blocks = max(
+                1,
+                int(
+                    TEST_MODE_MAX_UTTERANCE_SECONDS
+                    / (self.spec.block_frame / self.spec.sample_rate)
+                ),
+            )
+            if len(self.test_session.outputs) >= max_blocks:
+                playback = self.test_session.start_playback()
+                outdata[:] = playback
+                peak_out = float(self.np.max(self.np.abs(playback))) if playback.size else 0.0
+                playback_active = True
+                completed_delta = 1
+                self.vad.reset()
+            else:
+                outdata.fill(0)
+        elif self.test_session.utterance_active:
+            required_silence_callbacks = max(
+                1,
+                ceil(
+                    TEST_MODE_END_SILENCE_SECONDS / (self.spec.block_frame / self.spec.sample_rate)
+                ),
+            )
+            if self.test_session.mark_silence(required_silence_callbacks):
+                playback = self.test_session.start_playback()
+                outdata[:] = playback
+                peak_out = float(self.np.max(self.np.abs(playback))) if playback.size else 0.0
+                playback_active = True
+                completed_delta = 1
+                self.vad.reset()
+            else:
+                outdata.fill(0)
+        else:
+            outdata.fill(0)
+
+        return {
+            "inference_delta": int(inference_active),
+            "skipped_delta": int(not inference_active),
+            "suppressed_delta": 0,
+            "completed_delta": completed_delta,
+            "infer_ms": infer_ms,
+            "peak_in": peak_in,
+            "peak_out": peak_out,
+            "input_db": input_db,
+            "vad_probability": decision.probability,
+            "speech_detected": speech_detected,
+            "speech_source": (
+                self._speech_source(decision, level_active) if speech_detected else None
+            ),
+            "rvc_inference_active": inference_active,
+            "playback_active": playback_active,
+            "microphone_suppressed": False,
+        }
+
+    def _test_suppressed_callback(self, outdata: Any) -> dict[str, Any]:
+        playback_active = False
+        peak_out = 0.0
+        if self.test_session.phase == "playback":
+            playback = self.test_session.playback_output()
+            if playback is not None:
+                outdata[:] = playback
+                peak_out = float(self.np.max(self.np.abs(playback))) if playback.size else 0.0
+                playback_active = True
+            else:
+                outdata.fill(0)
+        elif self.test_session.phase == "tail":
+            outdata.fill(0)
+            if self.test_session.finish_tail_callback():
+                self._clear_conversion_state()
+                self.vad.reset()
+        else:
+            raise RuntimeError(f"invalid test mode phase: {self.test_session.phase}")
+        return {
+            "inference_delta": 0,
+            "skipped_delta": 1,
+            "suppressed_delta": 1,
+            "completed_delta": 0,
+            "infer_ms": 0,
+            "peak_in": 0.0,
+            "peak_out": peak_out,
+            "input_db": -120.0,
+            "vad_probability": 0.0,
+            "speech_detected": False,
+            "speech_source": None,
+            "rvc_inference_active": False,
+            "playback_active": playback_active,
+            "microphone_suppressed": True,
+        }
+
     def callback(self, indata: Any, outdata: Any, frames: int, _times: Any, status: Any) -> None:
         try:
             if status:
                 with self.metrics_lock:
                     self.metrics["xruns"] += 1
-            microphone_enabled = self.half_duplex.begin_callback()
-            if microphone_enabled:
-                mono = select_mono_channel(self.np, indata)
-                peak_in = float(self.np.max(self.np.abs(mono))) if mono.size else 0.0
-                rms = float(self.np.sqrt(self.np.mean(self.np.square(mono), dtype=self.np.float64)))
-                input_db = float(20 * self.np.log10(max(rms, 1e-6)))
-                decision = self.vad.process(mono)
-                process_audio = should_process_audio(decision, input_db)
+            if not self.test_session.enabled:
+                result = self._normal_callback(indata, outdata, frames)
+            elif self.test_session.phase == "capture":
+                result = self._test_capture_callback(indata, outdata, frames)
             else:
-                mono = self.np.zeros(frames, dtype="float32")
-                peak_in = 0.0
-                input_db = -120.0
-                decision = VoiceActivityDecision(False, False, 0.0)
-                process_audio = False
-                self.vad.reset()
-            block_frame_16k = self._push_input(mono, frames)
-            infer_ms = 0
-            peak_out = 0.0
-            inference_callbacks = self.metrics["inference_callbacks"]
-            skipped_callbacks = self.metrics["skipped_callbacks"]
-            suppressed_callbacks = self.metrics["suppressed_callbacks"]
-            if process_audio:
-                infer_started = time.perf_counter()
-                inferred = self._infer(block_frame_16k)
-                self._match_rms(inferred)
-                output = (
-                    self._crossfade(inferred)
-                    .repeat(self.spec.output_channels, 1)
-                    .t()
-                    .float()
-                    .cpu()
-                    .numpy()
-                )
-                outdata[:] = output
-                infer_ms = int((time.perf_counter() - infer_started) * 1000)
-                peak_out = float(self.np.max(self.np.abs(output))) if output.size else 0.0
-                inference_callbacks += 1
-                self.output_active = True
-                self.half_duplex.output_started()
-            else:
-                outdata.fill(0)
-                skipped_callbacks += 1
-                if not microphone_enabled:
-                    suppressed_callbacks += 1
-                if self.output_active:
-                    self._clear_output_state()
-                self.output_active = False
+                result = self._test_suppressed_callback(outdata)
             with self.metrics_lock:
                 self.metrics.update(
                     callbacks=self.metrics["callbacks"] + 1,
-                    inference_callbacks=inference_callbacks,
-                    skipped_callbacks=skipped_callbacks,
-                    suppressed_callbacks=suppressed_callbacks,
-                    infer_ms=infer_ms,
-                    peak_in=round(peak_in, 4),
-                    peak_out=round(peak_out, 4),
-                    input_db=round(input_db, 1),
-                    vad_probability=round(decision.probability, 3),
-                    speech_detected=process_audio,
-                    speech_source=(
-                        "vad"
-                        if decision.process_block
-                        else ("input_level" if process_audio else None)
+                    inference_callbacks=(
+                        self.metrics["inference_callbacks"] + result["inference_delta"]
                     ),
-                    rvc_inference_active=process_audio,
-                    test_mode=self.half_duplex.enabled,
-                    microphone_suppressed=not microphone_enabled,
+                    skipped_callbacks=(self.metrics["skipped_callbacks"] + result["skipped_delta"]),
+                    suppressed_callbacks=(
+                        self.metrics["suppressed_callbacks"] + result["suppressed_delta"]
+                    ),
+                    completed_utterances=(
+                        self.metrics["completed_utterances"] + result["completed_delta"]
+                    ),
+                    infer_ms=result["infer_ms"],
+                    peak_in=round(result["peak_in"], 4),
+                    peak_out=round(result["peak_out"], 4),
+                    input_db=round(result["input_db"], 1),
+                    vad_probability=round(result["vad_probability"], 3),
+                    speech_detected=result["speech_detected"],
+                    speech_source=result["speech_source"],
+                    rvc_inference_active=result["rvc_inference_active"],
+                    test_mode=self.test_session.enabled,
+                    test_phase=self.test_session.phase,
+                    buffered_blocks=len(self.test_session.outputs),
+                    playback_active=result["playback_active"],
+                    microphone_suppressed=result["microphone_suppressed"],
                 )
         except Exception:  # noqa: BLE001 - PortAudio callback boundary
             outdata.fill(0)
@@ -469,13 +665,9 @@ class RealtimeAudioProcessor:
 
     def reset(self) -> None:
         self.callback_error.clear()
-        self.input_wav.zero_()
-        self.input_wav_resampled.zero_()
-        self.sola_buffer.zero_()
-        self._clear_output_state()
+        self._clear_conversion_state()
         self.vad.reset()
-        self.output_active = False
-        self.half_duplex.configure(False)
+        self.test_session.configure(False)
         with self.metrics_lock:
             self.metrics.update(
                 callbacks=0,
@@ -491,14 +683,24 @@ class RealtimeAudioProcessor:
                 speech_detected=False,
                 rvc_inference_active=False,
                 test_mode=False,
+                test_phase="off",
+                buffered_blocks=0,
+                completed_utterances=0,
+                playback_active=False,
                 microphone_suppressed=False,
             )
 
     def configure_test_mode(self, enabled: bool) -> None:
-        self.half_duplex.configure(enabled)
+        self._clear_conversion_state()
+        self.vad.reset()
+        self.test_session.configure(enabled)
         with self.metrics_lock:
             self.metrics.update(
                 test_mode=enabled,
+                test_phase=self.test_session.phase,
+                buffered_blocks=0,
+                completed_utterances=0,
+                playback_active=False,
                 microphone_suppressed=False,
                 suppressed_callbacks=0,
             )

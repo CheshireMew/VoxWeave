@@ -199,8 +199,16 @@ class OperationRouter:
             )
 
     def _update_settings(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        self.settings.update(language=arguments["language"])
-        return {"language": self.settings.language}
+        changes = {
+            name: arguments[name]
+            for name in ("language", "realtime")
+            if name in arguments
+        }
+        self.settings.update(**changes)
+        return {
+            "language": self.settings.language,
+            "realtime": dict(self.settings.realtime),
+        }
 
     def _model_preparer(self, arguments: dict[str, Any]) -> dict[str, Any]:
         model = self.models.resolve(arguments["model"])

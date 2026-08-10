@@ -253,6 +253,7 @@ class ResidentRealtimeWorker:
                     device=self.config.device,
                     spec=spec,
                     vad_threshold=float(arguments.vad_threshold),
+                    input_gate_db=float(arguments.input_gate_db),
                     rms_mix_rate=float(arguments.rms_mix_rate),
                     f0_method=arguments.f0,
                 )

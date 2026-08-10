@@ -5,6 +5,8 @@ import QtQuick.Layouts
 RowLayout {
     id: control
 
+    signal userEdited()
+
     property alias from: slider.from
     property alias to: slider.to
     property alias value: slider.value
@@ -36,6 +38,7 @@ RowLayout {
         snapMode: Basic.Slider.SnapAlways
         live: true
         Accessible.name: control.accessibleName
+        onMoved: control.userEdited()
 
         background: Rectangle {
             x: slider.leftPadding
