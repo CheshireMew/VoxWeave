@@ -192,6 +192,16 @@ D:\Tools\VoxWeave\.venv\Scripts\python.exe scripts\verify_real_user_chain.py `
 
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。当前项目只验收 Windows，不生成安装器、压缩包或整合运行时。
 
+## Star History
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history.svg">
+  <img alt="VoxWeave GitHub Star History" src="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history.svg">
+</picture>
+
+图表由 GitHub Actions 定期生成，并发布到独立的 `star-history` 分支。
+
 ## 许可证与第三方组件
 
 VoxWeave 源码使用 [AGPL-3.0-only](LICENSE)。RVC、Qt、FFmpeg、Python 依赖、推理组件和模型保持各自许可证；本仓库只发布源码，不随仓库分发这些运行时和权重。完整来源、锁定版本和再分发边界见 [第三方说明](THIRD_PARTY_NOTICES.md)。

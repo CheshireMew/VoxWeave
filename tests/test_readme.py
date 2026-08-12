@@ -69,3 +69,36 @@ def test_language_readmes_use_logo_before_explanatory_visual() -> None:
         assert source.find("assets/readme/logo.svg") < source.find("assets/readme/hero.svg")
         assert "CONTRIBUTING.md" in source
         assert "LICENSE" in source
+
+
+def test_star_history_has_one_remote_producer_and_all_readme_consumers() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "star-history.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "workflow_dispatch:" in workflow
+    assert 'cron: "17 3 * * 1"' in workflow
+    assert "contents: write" in workflow
+    assert (
+        "uses: CheshireMew/project-steward/.github/workflows/star-history.yml@main"
+        in workflow
+    )
+
+    light_url = (
+        "https://raw.githubusercontent.com/CheshireMew/VoxWeave/"
+        "star-history/star-history.svg"
+    )
+    dark_url = (
+        "https://raw.githubusercontent.com/CheshireMew/VoxWeave/"
+        "star-history/star-history-dark.svg"
+    )
+    legal_headings = {
+        "README.md": "## 许可证与第三方组件",
+        "README.en.md": "## License and third-party components",
+        "README.ja.md": "## ライセンスと第三者コンポーネント",
+    }
+    for name, legal_heading in legal_headings.items():
+        source = (ROOT / name).read_text(encoding="utf-8")
+        assert source.count("## Star History") == 1
+        assert source.count(light_url) == 2
+        assert source.count(dark_url) == 1
+        assert source.index("## Star History") < source.index(legal_heading)

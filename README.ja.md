@@ -192,6 +192,16 @@ D:\Tools\VoxWeave\.venv\Scripts\python.exe scripts\verify_real_user_chain.py `
 
 Pull Request の前に [CONTRIBUTING.md](CONTRIBUTING.md) を確認してください。現在は Windows のみを検証対象とし、インストーラー、圧縮アーカイブ、統合ランタイムは生成しません。
 
+## Star History
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history.svg">
+  <img alt="VoxWeave GitHub Star History" src="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history.svg">
+</picture>
+
+グラフは GitHub Actions で定期的に生成し、専用の `star-history` ブランチへ公開します。
+
 ## ライセンスと第三者コンポーネント
 
 VoxWeave のソースは [AGPL-3.0-only](LICENSE) です。RVC、Qt、FFmpeg、Python 依存関係、推論コンポーネント、モデルには、それぞれのライセンスが適用されます。このリポジトリはソースだけを配布し、ランタイムやウェイトを同梱しません。出典、固定版、再配布境界は [第三者コンポーネント](THIRD_PARTY_NOTICES.md) を参照してください。

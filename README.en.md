@@ -192,6 +192,16 @@ D:\Tools\VoxWeave\.venv\Scripts\python.exe scripts\verify_real_user_chain.py `
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. The current project validates Windows only and does not produce an installer, archive, or bundled runtime.
 
+## Star History
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history.svg">
+  <img alt="VoxWeave GitHub Star History" src="https://raw.githubusercontent.com/CheshireMew/VoxWeave/star-history/star-history.svg">
+</picture>
+
+GitHub Actions regenerates the chart on a schedule and publishes it to the dedicated `star-history` branch.
+
 ## License and third-party components
 
 VoxWeave source is licensed under [AGPL-3.0-only](LICENSE). RVC, Qt, FFmpeg, Python dependencies, inference components, and models retain their own terms. This repository distributes source only, not those runtimes or weights. See [third-party notices](THIRD_PARTY_NOTICES.md) for sources, pinned revisions, and redistribution boundaries.
