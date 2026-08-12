@@ -129,16 +129,16 @@ Basic.ApplicationWindow {
                 NavButton {
                     objectName: "navButton0"
                     Layout.fillWidth: true
-                    iconName: "convert"
-                    text: root.bridge.text("nav.convert")
+                    iconName: "realtime"
+                    text: root.bridge.text("nav.realtime")
                     selected: root.currentPage === 0
                     onClicked: root.currentPage = 0
                 }
                 NavButton {
                     objectName: "navButton1"
                     Layout.fillWidth: true
-                    iconName: "realtime"
-                    text: root.bridge.text("nav.realtime")
+                    iconName: "convert"
+                    text: root.bridge.text("nav.convert")
                     selected: root.currentPage === 1
                     onClicked: root.currentPage = 1
                 }
@@ -230,6 +230,13 @@ Basic.ApplicationWindow {
                 anchors.fill: parent
                 currentIndex: root.currentPage
 
+                RealtimePage {
+                    bridge: root.bridge
+                    theme: theme
+                    readyModels: root.readyModels
+                    session: root.realtimeStatus
+                }
+
                 ConversionPage {
                     bridge: root.bridge
                     theme: theme
@@ -237,14 +244,6 @@ Basic.ApplicationWindow {
                     speakers: root.speakers
                     previewOutputs: root.previewOutputs
                     presets: root.presets
-                }
-
-                RealtimePage {
-                    bridge: root.bridge
-                    theme: theme
-                    readyModels: root.readyModels
-                    devicePayload: root.realtimeDevices
-                    session: root.realtimeStatus
                 }
 
                 ModelsPage {
@@ -269,6 +268,7 @@ Basic.ApplicationWindow {
                 SettingsPage {
                     bridge: root.bridge
                     theme: theme
+                    devicePayload: root.realtimeDevices
                 }
             }
         }

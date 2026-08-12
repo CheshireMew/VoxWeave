@@ -10,7 +10,72 @@ Item {
     id: root
     required property var bridge
     required property var theme
+    property var devicePayload: ({"hostapis": [], "devices": []})
     property url pendingArchiveRoot
+    readonly property bool realtimeActive: ["starting", "running", "stopping"].indexOf(
+        root.bridge.realtime.status.state
+    ) >= 0
+    readonly property var inputDevices: (devicePayload.devices || []).filter(function(device) {
+        return Number(device.input_channels) > 0
+            && Number(device.hostapi_id) === Number(audioHostApi.currentValue)
+    })
+    readonly property var outputDevices: (devicePayload.devices || []).filter(function(device) {
+        return Number(device.output_channels) > 0
+            && Number(device.hostapi_id) === Number(audioHostApi.currentValue)
+    })
+
+    function comboValueIndex(combo, value) {
+        for (var index = 0; index < combo.count; ++index) {
+            if (String(combo.valueAt(index)) === String(value)) return index
+        }
+        return -1
+    }
+
+    function restoreAudioDevices() {
+        var route = root.bridge.realtime.audioRoute || ({})
+        var hostIndex = root.comboValueIndex(audioHostApi, route.hostapi_id)
+        audioHostApi.currentIndex = hostIndex >= 0
+            ? hostIndex : (audioHostApi.count > 0 ? 0 : -1)
+        Qt.callLater(function() {
+            var inputIndex = root.comboValueIndex(audioInputDevice, route.input_device)
+            audioInputDevice.currentIndex = inputIndex >= 0
+                ? inputIndex : (audioInputDevice.count > 0 ? 0 : -1)
+            var outputIndex = root.comboValueIndex(audioOutputDevice, route.output_device)
+            audioOutputDevice.currentIndex = outputIndex >= 0
+                ? outputIndex : (audioOutputDevice.count > 0 ? 0 : -1)
+        })
+    }
+
+    function saveCurrentAudioRoute() {
+        if (audioInputDevice.currentIndex < 0 || audioOutputDevice.currentIndex < 0)
+            return
+        root.bridge.realtime.saveAudioRoute(
+            Number(audioInputDevice.currentValue),
+            Number(audioOutputDevice.currentValue)
+        )
+    }
+
+    function selectDefaultAudioRoute() {
+        var inputIndex = root.comboValueIndex(
+            audioInputDevice, root.devicePayload.default_input_device
+        )
+        audioInputDevice.currentIndex = inputIndex >= 0
+            ? inputIndex : (audioInputDevice.count > 0 ? 0 : -1)
+        var outputIndex = root.comboValueIndex(
+            audioOutputDevice, root.devicePayload.default_output_device
+        )
+        audioOutputDevice.currentIndex = outputIndex >= 0
+            ? outputIndex : (audioOutputDevice.count > 0 ? 0 : -1)
+        root.saveCurrentAudioRoute()
+    }
+
+    onDevicePayloadChanged: Qt.callLater(restoreAudioDevices)
+    Component.onCompleted: Qt.callLater(restoreAudioDevices)
+
+    Connections {
+        target: root.bridge.realtime
+        function onAudioRouteChanged() { Qt.callLater(root.restoreAudioDevices) }
+    }
 
 FileDialog {
     id: diagnosticDialog
@@ -64,6 +129,83 @@ Basic.Dialog {
             ColumnLayout {
                 width: settingsScroll.availableWidth
                 spacing: 10
+
+                AppPanel {
+                    objectName: "settingsAudioPanel"
+                    Layout.fillWidth: true
+
+                    SectionHeader {
+                        Layout.fillWidth: true
+                        title: root.bridge.text("section.audio_devices")
+                    }
+
+                    FieldLabel { text: root.bridge.text("field.audio_host") }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppComboBox {
+                            id: audioHostApi
+                            objectName: "settingsAudioHostApi"
+                            Layout.fillWidth: true
+                            model: root.devicePayload.hostapis || []
+                            textRole: "name"
+                            valueRole: "id"
+                            emptyText: root.bridge.text("audio.no_devices")
+                            enabled: !root.realtimeActive && count > 0
+                            onActivated: Qt.callLater(root.selectDefaultAudioRoute)
+                        }
+                        AppButton {
+                            text: root.bridge.text("action.refresh")
+                            enabled: !root.realtimeActive
+                            onClicked: root.bridge.realtime.refreshDevices()
+                        }
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 10
+                        rowSpacing: 8
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text("field.input_device") }
+                            AppComboBox {
+                                id: audioInputDevice
+                                objectName: "settingsAudioInputDevice"
+                                Layout.fillWidth: true
+                                model: root.inputDevices
+                                textRole: "name"
+                                valueRole: "id"
+                                emptyText: root.bridge.text("audio.no_input")
+                                enabled: !root.realtimeActive && count > 0
+                                onActivated: root.saveCurrentAudioRoute()
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text("field.output_device") }
+                            AppComboBox {
+                                id: audioOutputDevice
+                                objectName: "settingsAudioOutputDevice"
+                                Layout.fillWidth: true
+                                model: root.outputDevices
+                                textRole: "name"
+                                valueRole: "id"
+                                emptyText: root.bridge.text("audio.no_output")
+                                enabled: !root.realtimeActive && count > 0
+                                onActivated: root.saveCurrentAudioRoute()
+                            }
+                        }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: root.bridge.text("audio.headphones_hint")
+                        color: root.theme.warning
+                        font.family: root.theme.uiFont
+                        font.pixelSize: 11
+                        wrapMode: Text.Wrap
+                    }
+                }
 
                 GridLayout {
                     Layout.fillWidth: true

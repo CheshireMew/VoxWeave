@@ -116,6 +116,7 @@ class OperationRouter:
             "media.inspect": OperationBinding(media.inspect, (snapshot_input,)),
             "media.analyze": OperationBinding(media.analyze, (snapshot_input,)),
             "realtime.devices": OperationBinding(sync(lambda _arguments: realtime.devices())),
+            "realtime.prepare": OperationBinding(sync(realtime.prepare)),
             "realtime.start": OperationBinding(sync(realtime.start)),
             "realtime.status": OperationBinding(sync(lambda _arguments: realtime.status())),
             "realtime.stop": OperationBinding(sync(lambda _arguments: realtime.stop())),

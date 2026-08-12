@@ -67,7 +67,7 @@ def test_concurrent_clients_launch_only_one_service(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(client, "read_discovery", read)
     monkeypatch.setattr(client, "_handshake", lambda value: value is discovery)
-    monkeypatch.setattr(client.subprocess, "Popen", launch)
+    monkeypatch.setattr(client, "start_managed_process", launch)
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(lambda _index: client.ensure_service(settings), range(8)))
     assert results == [discovery] * 8

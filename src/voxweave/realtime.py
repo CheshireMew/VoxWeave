@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import threading
 import time
@@ -13,7 +12,7 @@ from typing import Any
 
 from .database import Database
 from .model_registry import ModelRegistry
-from .process_control import terminate_process_tree
+from .process_control import start_managed_process, terminate_process_tree
 from .protocol import public_error_code
 from .realtime_repository import RealtimeRepository
 from .rvc_engine import RvcEngine
@@ -53,6 +52,8 @@ class RealtimeSessionManager:
         self._worker_model_id: str | None = None
         self._model_ready = False
         self._prepared_key: str | None = None
+        self._prepare_id: str | None = None
+        self._preparing_key: str | None = None
         self._service_stopping = False
         self._offline_dispatch_paused = False
         self._recover_interrupted_sessions()
@@ -96,7 +97,9 @@ class RealtimeSessionManager:
             "default_output_device": payload["default_output_device"],
         }
 
-    def start(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _worker_command(
+        self, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         model = self.models.resolve_for_execution(arguments["model"])
         normalized = self._normalize_arguments(arguments)
         device_payload = self.devices()
@@ -117,7 +120,44 @@ class RealtimeSessionManager:
             hostapi=input_device["hostapi"],
         )
         normalized["model"] = model["id"]
-        worker_command = self.engine.realtime_start_payload(model, normalized)
+        worker_command = self.engine.realtime_payload(model, normalized)
+        return model, normalized, worker_command
+
+    def prepare(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        model, _normalized, worker_command = self._worker_command(arguments)
+        with self._lock:
+            if self.repository.active():
+                return self.status()
+            cache_key = str(worker_command["cache_key"])
+            if self._model_ready and self._prepared_key == cache_key:
+                return self.status()
+            if self._prepare_id and self._preparing_key == cache_key:
+                return self.status()
+            self._ensure_worker_locked()
+            prepare_id = str(uuid.uuid4())
+            self._prepare_id = prepare_id
+            self._preparing_key = cache_key
+            self._worker_state = "warming"
+            self._worker_model_id = model["id"]
+            self._model_ready = False
+            self._prepared_key = None
+            try:
+                self._send_command_locked(
+                    {
+                        **worker_command,
+                        "command": "prepare",
+                        "prepare_id": prepare_id,
+                    }
+                )
+            except Exception:
+                self._prepare_id = None
+                self._preparing_key = None
+                self._worker_state = "failed"
+                raise
+            return self.status()
+
+    def start(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        model, normalized, worker_command = self._worker_command(arguments)
         session_id = str(uuid.uuid4())
         try:
             with self._lock:
@@ -184,7 +224,7 @@ class RealtimeSessionManager:
         if self._process and self._process.poll() is None:
             return
         command, entry = self.engine.realtime_worker_command()
-        process = subprocess.Popen(
+        process = start_managed_process(
             command,
             cwd=entry.parent,
             text=True,
@@ -194,8 +234,6 @@ class RealtimeSessionManager:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=1,
-            creationflags=self.engine.realtime_creation_flags(),
-            start_new_session=os.name != "nt",
         )
         if process.stdin is None or process.stdout is None or process.stderr is None:
             terminate_process_tree(process)
@@ -205,6 +243,8 @@ class RealtimeSessionManager:
         self._worker_model_id = None
         self._model_ready = False
         self._prepared_key = None
+        self._prepare_id = None
+        self._preparing_key = None
         self._stderr_tail.clear()
         self._stderr_thread = threading.Thread(
             target=self._read_stderr,
@@ -277,6 +317,33 @@ class RealtimeSessionManager:
                     self._worker_state = "idle"
                 return
             if event == "worker_stopped":
+                return
+
+            prepare_id = str(payload.get("prepare_id") or "")
+            if prepare_id:
+                if prepare_id != self._prepare_id:
+                    return
+                self._worker_model_id = str(payload.get("model_id") or "") or None
+                if not payload.get("ok"):
+                    self._model_ready = bool(payload.get("model_ready"))
+                    self._worker_state = "ready" if self._model_ready else "failed"
+                    self._prepared_key = (
+                        str(payload["cache_key"])
+                        if self._model_ready and payload.get("cache_key")
+                        else None
+                    )
+                    self._prepare_id = None
+                    self._preparing_key = None
+                elif event == "warming":
+                    self._worker_state = "warming"
+                    self._model_ready = False
+                    self._prepared_key = None
+                elif event == "ready":
+                    self._worker_state = "ready"
+                    self._model_ready = True
+                    self._prepared_key = str(payload.get("cache_key") or "") or None
+                    self._prepare_id = None
+                    self._preparing_key = None
                 return
 
             session_id = str(payload.get("session_id") or "")
@@ -390,6 +457,8 @@ class RealtimeSessionManager:
             self._worker_model_id = None
             self._model_ready = False
             self._prepared_key = None
+            self._prepare_id = None
+            self._preparing_key = None
             session_id = self._active_id
             if session_id:
                 current = self.repository.get(session_id)

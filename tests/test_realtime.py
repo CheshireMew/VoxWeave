@@ -59,6 +59,9 @@ def test_resident_worker_control_receives_start_without_waiting_for_pipe_eof() -
     ):
         control = WorkerControl(source)
         control.start()
+        sink.write('{"command":"prepare","prepare_id":"prepare"}\n')
+        command = control.commands.get(timeout=2)
+        assert command == {"command": "prepare", "prepare_id": "prepare"}
         sink.write('{"command":"start","session_id":"session"}\n')
         command = control.commands.get(timeout=2)
         assert command == {"command": "start", "session_id": "session"}
@@ -88,14 +91,14 @@ def test_realtime_cache_reloads_changed_models_and_rebuilds_changed_routes(
         "hostapi": "MME",
         "block_seconds": 0.5,
     }
-    original = engine.realtime_start_payload(model, arguments)
-    changed_model = engine.realtime_start_payload({**model, "model_sha256": "b" * 64}, arguments)
-    changed_route = engine.realtime_start_payload(
+    original = engine.realtime_payload(model, arguments)
+    changed_model = engine.realtime_payload({**model, "model_sha256": "b" * 64}, arguments)
+    changed_route = engine.realtime_payload(
         model, {**arguments, "output_device_name": "Headphones"}
     )
-    changed_vad = engine.realtime_start_payload(model, {**arguments, "vad_threshold": 0.7})
-    changed_gate = engine.realtime_start_payload(model, {**arguments, "input_gate_db": -30})
-    test_mode = engine.realtime_start_payload(model, {**arguments, "test_mode": True})
+    changed_vad = engine.realtime_payload(model, {**arguments, "vad_threshold": 0.7})
+    changed_gate = engine.realtime_payload(model, {**arguments, "input_gate_db": -30})
+    test_mode = engine.realtime_payload(model, {**arguments, "test_mode": True})
     assert changed_model["converter_key"] != original["converter_key"]
     assert changed_model["cache_key"] != original["cache_key"]
     assert changed_route["converter_key"] == original["converter_key"]
@@ -399,18 +402,23 @@ import sys
 def emit(event, **values):
     print(json.dumps({"ok": True, "event": event, **values}), flush=True)
 
-prepared = False
+prepared_key = None
 emit("worker_started")
 for line in sys.stdin:
     message = json.loads(line)
     command = message["command"]
-    if command == "start":
-        session_id = message["session_id"]
-        common = {"session_id": session_id, "model_id": message["model_id"]}
-        if not prepared:
+    if command in {"prepare", "start"}:
+        common = {"model_id": message["model_id"]}
+        if command == "prepare":
+            common["prepare_id"] = message["prepare_id"]
+        else:
+            common["session_id"] = message["session_id"]
+        if prepared_key != message["cache_key"]:
             emit("warming", **common)
-            prepared = True
+            prepared_key = message["cache_key"]
         emit("ready", cache_key=message["cache_key"], **common)
+        if command == "prepare":
+            continue
         emit("running", estimated_latency_ms=550, **common)
         emit("metrics", callbacks=1, infer_ms=120, overloaded=False, **common)
     elif command == "stop":
@@ -429,7 +437,7 @@ for line in sys.stdin:
         ], self.working_directory / "worker.py"
 
     @staticmethod
-    def realtime_start_payload(model: dict[str, Any], _arguments: dict[str, Any]) -> dict[str, Any]:
+    def realtime_payload(model: dict[str, Any], _arguments: dict[str, Any]) -> dict[str, Any]:
         return {
             "command": "start",
             "model_id": model["id"],
@@ -470,11 +478,6 @@ for line in sys.stdin:
             "default_input_device": 1,
             "default_output_device": 2,
         }
-
-    @staticmethod
-    def realtime_creation_flags() -> int:
-        return 0
-
 
 class DelayedStopEngine(ProcessEngine):
     @staticmethod
@@ -534,6 +537,55 @@ def wait_for_state(
             return status
         time.sleep(0.02)
     raise AssertionError(f"realtime session did not reach {expected}: {manager.status()}")
+
+
+def wait_for_worker_state(
+    manager: RealtimeSessionManager, expected: str, timeout: float = 5
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = manager.status()
+        if status["worker"]["state"] == expected:
+            return status
+        time.sleep(0.02)
+    raise AssertionError(f"realtime worker did not reach {expected}: {manager.status()}")
+
+
+def test_realtime_model_prepares_before_audio_session_starts(tmp_path) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    database = Database(settings.database_path)
+    register_model(database, tmp_path)
+    manager = RealtimeSessionManager(
+        database,
+        ModelRegistry(database),
+        ProcessEngine(tmp_path),  # type: ignore[arg-type]
+    )
+    arguments = {
+        "model": "voice",
+        "input_device": 1,
+        "output_device": 2,
+        "block_seconds": 0.5,
+    }
+
+    preparing = manager.prepare(arguments)
+    assert preparing["session_id"] is None
+    prepared = wait_for_worker_state(manager, "ready")
+    assert prepared["state"] == "idle"
+    assert prepared["worker"]["model_id"] == "voice"
+    assert prepared["worker"]["model_ready"] is True
+    worker_pid = prepared["worker"]["pid"]
+
+    submitted = manager.start(arguments)
+    running = wait_for_state(manager, "running")
+    assert running["worker"]["pid"] == worker_pid
+    assert [event["stage"] for event in manager.events(submitted["id"])] == [
+        "waiting_for_worker",
+        "ready",
+        "streaming",
+    ]
+    manager.stop()
+    wait_for_state(manager, "stopped")
+    manager.shutdown()
 
 
 def test_realtime_subprocess_lifecycle_is_persisted(tmp_path) -> None:

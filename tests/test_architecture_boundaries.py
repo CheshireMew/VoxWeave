@@ -171,6 +171,7 @@ def test_shared_infrastructure_is_the_only_definition_of_common_helpers() -> Non
             "archive_failed_staging",
             "run_capture",
             "run_logged",
+            "start_managed_process",
         )
     }
     for path in SOURCE.glob("*.py"):
@@ -184,16 +185,37 @@ def test_shared_infrastructure_is_the_only_definition_of_common_helpers() -> Non
         "archive_failed_staging": ["staging.py"],
         "run_capture": ["process_control.py"],
         "run_logged": ["process_control.py"],
+        "start_managed_process": ["process_control.py"],
     }
 
     for module in (
+        "client.py",
         "media_io.py",
         "model_inspector.py",
+        "realtime.py",
         "runtime.py",
         "runtime_install.py",
         "rvc_engine.py",
     ):
-        assert "subprocess.Popen" not in (SOURCE / module).read_text(encoding="utf-8")
+        tree = ast.parse((SOURCE / module).read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "subprocess"
+            and node.func.attr == "Popen"
+        ]
+        assert calls == []
+
+    for token in ("CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW", "creationflags"):
+        owners = [
+            path.name
+            for path in SOURCE.glob("*.py")
+            if token in path.read_text(encoding="utf-8")
+        ]
+        assert owners == ["process_control.py"]
 
 
 def test_realtime_worker_delegates_audio_processing_and_stream_lifecycle() -> None:

@@ -48,10 +48,13 @@ def test_main_qml_loads(tmp_path) -> None:
     assert root.width() == 560
     assert root.minimumWidth() == 540
     assert sidebar.property("width") == 64.0
+    assert root.property("currentPage") == 0
+    assert root.findChild(QObject, "navButton0").property("iconName") == "realtime"
+    assert root.findChild(QObject, "navButton1").property("iconName") == "convert"
     for index, object_name in enumerate(
         [
-            "conversionPage",
             "realtimePage",
+            "conversionPage",
             "modelsPage",
             "batchPage",
             "tasksPage",
@@ -67,8 +70,43 @@ def test_main_qml_loads(tmp_path) -> None:
         assert root.findChild(QObject, object_name) is not None
     assert root.findChild(QObject, "realtimeStartButton") is not None
     assert root.findChild(QObject, "realtimeStopButton") is not None
+    primary_controls = root.findChild(QObject, "realtimePrimaryControls")
+    action_row = root.findChild(QObject, "realtimeActionRow")
     test_mode = root.findChild(QObject, "realtimeTestMode")
+    realtime_scroll = root.findChild(QObject, "realtimeScroll")
+    voice_panel = root.findChild(QObject, "realtimeVoicePanel")
+    status_panel = root.findChild(QObject, "realtimeStatusPanel")
+    latency_mode = root.findChild(QObject, "realtimeLatencyMode")
+    f0_method = root.findChild(QObject, "realtimeF0Method")
+    pitch_slider = root.findChild(QObject, "realtimePitchSlider")
+    realtime_page = root.findChild(QObject, "realtimePage")
+    settings_page = root.findChild(QObject, "settingsPage")
+    settings_audio_panel = settings_page.findChild(QObject, "settingsAudioPanel")
+    assert primary_controls is not None
+    assert action_row is not None
     assert test_mode is not None
+    assert realtime_scroll is not None
+    assert voice_panel is not None
+    assert status_panel is not None
+    assert latency_mode is not None
+    assert f0_method is not None
+    assert pitch_slider is not None
+    assert settings_audio_panel is not None
+    assert realtime_page.findChild(QObject, "settingsAudioPanel") is None
+    assert primary_controls.property("y") < realtime_scroll.property("y")
+    assert action_row.property("y") < test_mode.property("y")
+    assert action_row.property("width") <= primary_controls.property("width")
+    for object_name in (
+        "realtimeStartButton",
+        "realtimeStopButton",
+        "realtimeModelSelector",
+    ):
+        button = root.findChild(QObject, object_name)
+        assert button.property("x") + button.property("width") <= action_row.property("width")
+    assert voice_panel.property("y") < status_panel.property("y")
+    assert latency_mode.parent().property("y") == f0_method.parent().property("y")
+    assert latency_mode.parent().property("x") < f0_method.parent().property("x")
+    assert pitch_slider.parent().property("y") > latency_mode.parent().property("y")
     assert test_mode.property("checked") is False
     slider_specs = {
         "conversionPitchSlider": (-24.0, 24.0, 1.0, 9.0),
@@ -88,7 +126,6 @@ def test_main_qml_loads(tmp_path) -> None:
         assert slider.property("to") == maximum
         assert slider.property("stepSize") == step
         assert slider.property("value") == initial
-    realtime_page = root.findChild(QObject, "realtimePage")
     warmup_status = root.findChild(QObject, "realtimeWarmupStatus")
     vad_status = root.findChild(QObject, "realtimeVadStatus")
     voice_status = root.findChild(QObject, "realtimeVoiceStatus")
@@ -181,8 +218,33 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(
             "default_output_device": output_id,
         }
 
+    current_device_ids = [7, 8]
+    prepare_requests: list[dict] = []
+
     with TestClient(create_app(settings, token="secret")) as client:
         def request_json(_settings, _method, route, payload):
+            if payload.get("operation") == "realtime.devices":
+                return {
+                    "ok": True,
+                    "result": devices(*current_device_ids),
+                }
+            if payload.get("operation") == "realtime.prepare":
+                prepare_requests.append(dict(payload["arguments"]))
+                return {
+                    "ok": True,
+                    "result": {
+                        "session_id": None,
+                        "state": "idle",
+                        "stage": "idle",
+                        "metrics": {},
+                        "worker": {
+                            "state": "warming",
+                            "pid": 123,
+                            "model_id": payload["arguments"]["model"],
+                            "model_ready": False,
+                        },
+                    },
+                }
             return client.post(
                 route,
                 headers={"Authorization": "Bearer secret"},
@@ -198,9 +260,15 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(
         root = engine.rootObjects()[0]
         page = root.findChild(QObject, "realtimePage")
         page.setProperty("readyModels", ready_models)
-        page.setProperty("devicePayload", devices(7, 8))
-        for _ in range(3):
+        bridge.realtime.refreshDevices()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
             app.processEvents()
+            if root.findChild(QObject, "settingsAudioInputDevice").property(
+                "currentValue"
+            ) == 7:
+                break
+            time.sleep(0.01)
 
         root.findChild(QObject, "realtimeModelSelector").setProperty("currentIndex", 1)
         root.findChild(QObject, "realtimePitchSlider").setProperty("value", 8)
@@ -214,6 +282,16 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(
         assert QMetaObject.invokeMethod(page, "saveCurrentPreferences")
         assert bridge.realtime.preferences["model"] == "local.voice.default"
         assert bridge.realtime.preferences["pitch"] == 8
+
+        prepare_deadline = time.monotonic() + 3
+        while time.monotonic() < prepare_deadline:
+            app.processEvents()
+            if prepare_requests and prepare_requests[-1]["model"] == "local.voice.default":
+                break
+            time.sleep(0.01)
+        assert prepare_requests[-1]["pitch"] == 8
+        assert prepare_requests[-1]["input_device"] == 7
+        assert prepare_requests[-1]["output_device"] == 8
 
         deadline = time.monotonic() + 3
         persisted = {}
@@ -251,17 +329,24 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(
     restarted_root = restarted_engine.rootObjects()[0]
     restarted_page = restarted_root.findChild(QObject, "realtimePage")
     restarted_page.setProperty("readyModels", ready_models)
-    restarted_page.setProperty("devicePayload", devices(70, 80))
-    for _ in range(5):
+    current_device_ids[:] = [70, 80]
+    restarted_bridge.realtime.refreshDevices()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
         app.processEvents()
+        if restarted_root.findChild(QObject, "settingsAudioInputDevice").property(
+            "currentValue"
+        ) == 70:
+            break
+        time.sleep(0.01)
 
     assert restarted_root.findChild(QObject, "realtimeModelSelector").property(
         "currentValue"
     ) == "local.voice.default"
-    assert restarted_root.findChild(QObject, "realtimeInputDevice").property(
+    assert restarted_root.findChild(QObject, "settingsAudioInputDevice").property(
         "currentValue"
     ) == 70
-    assert restarted_root.findChild(QObject, "realtimeOutputDevice").property(
+    assert restarted_root.findChild(QObject, "settingsAudioOutputDevice").property(
         "currentValue"
     ) == 80
     assert restarted_root.findChild(QObject, "realtimePitchSlider").property("value") == 8

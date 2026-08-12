@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -75,7 +73,7 @@ class RvcEngine:
         ]
         return command, entry
 
-    def realtime_start_payload(
+    def realtime_payload(
         self,
         model: dict[str, Any],
         parameters: dict[str, Any],
@@ -120,10 +118,6 @@ class RvcEngine:
         ).hexdigest()
         payload["test_mode"] = bool(parameters.get("test_mode", False))
         return payload
-
-    @staticmethod
-    def realtime_creation_flags() -> int:
-        return subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
 
     @staticmethod
     def _run_worker(

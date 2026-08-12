@@ -193,6 +193,114 @@ class ResidentRealtimeWorker:
         self.config = None
         _release_cuda(self.torch)
 
+    def _prepare_processor(
+        self,
+        command: dict[str, Any],
+        emit_status: Any,
+    ) -> tuple[Any, str, bool]:
+        arguments = SimpleNamespace(**command)
+        model_path = Path(arguments.model).resolve()
+        index_path = Path(arguments.index).resolve() if arguments.index else None
+        if not model_path.is_file():
+            raise FileNotFoundError(f"model file not found: {model_path}")
+        if index_path and not index_path.is_file():
+            raise FileNotFoundError(f"index file not found: {index_path}")
+
+        input_device = int(arguments.input_device)
+        output_device = int(arguments.output_device)
+        cache_key = str(arguments.cache_key)
+        cached = self.prepared_key == cache_key and self.processor is not None
+        if not cached:
+            self.prepared_key = None
+            self.processor = None
+            next_converter_key = str(arguments.converter_key)
+            emit_status({"ok": True, "event": "warming"})
+            if self.converter_key != next_converter_key:
+                self.converter = None
+                self.config = None
+                self.converter_key = None
+                _release_cuda(self.torch)
+                self.config, self.converter = _load_converter(
+                    arguments, model_path, index_path
+                )
+                self.converter_key = next_converter_key
+            if self.vad_model is None:
+                self.vad_model = _load_vad_model()
+
+            input_info, output_info, hostapi = _validate_audio_devices(
+                self.sd, input_device, output_device
+            )
+            spec = select_stream_spec(
+                self.sd,
+                input_device,
+                output_device,
+                input_info,
+                output_info,
+                int(self.converter.tgt_sr),
+                float(arguments.block_seconds),
+                float(arguments.crossfade_seconds),
+                float(arguments.extra_seconds),
+            )
+            self.processor = RealtimeAudioProcessor(
+                np=self.np,
+                torch=self.torch,
+                functional=self.functional,
+                transforms=self.transforms,
+                sd=self.sd,
+                converter=self.converter,
+                vad_model=self.vad_model,
+                device=self.config.device,
+                spec=spec,
+                vad_threshold=float(arguments.vad_threshold),
+                input_gate_db=float(arguments.input_gate_db),
+                rms_mix_rate=float(arguments.rms_mix_rate),
+                f0_method=arguments.f0,
+            )
+            self.processor.warmup()
+            self.prepared_key = cache_key
+        else:
+            _input_info, _output_info, hostapi = _validate_audio_devices(
+                self.sd, input_device, output_device
+            )
+            spec = self.processor.spec
+        return spec, hostapi, cached
+
+    def _failure_payload(self, error: Exception) -> dict[str, Any]:
+        if self.processor is not None and self.prepared_key is not None:
+            with contextlib.suppress(Exception):
+                self.processor.reset()
+        return {
+            "ok": False,
+            "event": "failed",
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "model_ready": self.processor is not None and self.prepared_key is not None,
+            "cache_key": self.prepared_key,
+        }
+
+    def prepare(self, command: dict[str, Any]) -> None:
+        prepare_id = str(command["prepare_id"])
+        model_id = str(command.get("model_id") or "")
+
+        def emit_prepare(payload: dict[str, Any]) -> None:
+            _emit({**payload, "prepare_id": prepare_id, "model_id": model_id})
+
+        try:
+            spec, _hostapi, cached = self._prepare_processor(command, emit_prepare)
+            emit_prepare(
+                {
+                    "ok": True,
+                    "event": "ready",
+                    "cache_key": str(command["cache_key"]),
+                    "cached": cached,
+                    "device": str(self.config.device),
+                    "sample_rate": spec.sample_rate,
+                    "block_frames": spec.block_frame,
+                }
+            )
+        except Exception as error:  # noqa: BLE001 - resident worker command boundary
+            emit_prepare(self._failure_payload(error))
+
     def run_session(self, command: dict[str, Any], stop_event: threading.Event) -> None:
         session_id = str(command["session_id"])
         model_id = str(command.get("model_id") or "")
@@ -202,74 +310,12 @@ class ResidentRealtimeWorker:
 
         try:
             arguments = SimpleNamespace(**command)
-            model_path = Path(arguments.model).resolve()
-            index_path = Path(arguments.index).resolve() if arguments.index else None
-            if not model_path.is_file():
-                raise FileNotFoundError(f"model file not found: {model_path}")
-            if index_path and not index_path.is_file():
-                raise FileNotFoundError(f"index file not found: {index_path}")
-
-            input_device = int(arguments.input_device)
-            output_device = int(arguments.output_device)
-            cache_key = str(arguments.cache_key)
-            cached = self.prepared_key == cache_key and self.processor is not None
-            if not cached:
-                self.prepared_key = None
-                self.processor = None
-                next_converter_key = str(arguments.converter_key)
-                emit_session({"ok": True, "event": "warming"})
-                if self.converter_key != next_converter_key:
-                    self.converter = None
-                    self.config = None
-                    self.converter_key = None
-                    _release_cuda(self.torch)
-                    self.config, self.converter = _load_converter(arguments, model_path, index_path)
-                    self.converter_key = next_converter_key
-                if self.vad_model is None:
-                    self.vad_model = _load_vad_model()
-
-                input_info, output_info, hostapi = _validate_audio_devices(
-                    self.sd, input_device, output_device
-                )
-                spec = select_stream_spec(
-                    self.sd,
-                    input_device,
-                    output_device,
-                    input_info,
-                    output_info,
-                    int(self.converter.tgt_sr),
-                    float(arguments.block_seconds),
-                    float(arguments.crossfade_seconds),
-                    float(arguments.extra_seconds),
-                )
-                self.processor = RealtimeAudioProcessor(
-                    np=self.np,
-                    torch=self.torch,
-                    functional=self.functional,
-                    transforms=self.transforms,
-                    sd=self.sd,
-                    converter=self.converter,
-                    vad_model=self.vad_model,
-                    device=self.config.device,
-                    spec=spec,
-                    vad_threshold=float(arguments.vad_threshold),
-                    input_gate_db=float(arguments.input_gate_db),
-                    rms_mix_rate=float(arguments.rms_mix_rate),
-                    f0_method=arguments.f0,
-                )
-                self.processor.warmup()
-                self.prepared_key = cache_key
-            else:
-                _input_info, _output_info, hostapi = _validate_audio_devices(
-                    self.sd, input_device, output_device
-                )
-                spec = self.processor.spec
-
+            spec, hostapi, cached = self._prepare_processor(command, emit_session)
             emit_session(
                 {
                     "ok": True,
                     "event": "ready",
-                    "cache_key": cache_key,
+                    "cache_key": str(arguments.cache_key),
                     "cached": cached,
                     "device": str(self.config.device),
                     "sample_rate": spec.sample_rate,
@@ -280,8 +326,8 @@ class ResidentRealtimeWorker:
                 run_audio_stream(
                     sd=self.sd,
                     processor=self.processor,
-                    input_device=input_device,
-                    output_device=output_device,
+                    input_device=int(arguments.input_device),
+                    output_device=int(arguments.output_device),
                     hostapi=hostapi,
                     block_seconds=float(arguments.block_seconds),
                     test_mode=bool(arguments.test_mode),
@@ -291,19 +337,7 @@ class ResidentRealtimeWorker:
                 self.processor.reset()
             emit_session({"ok": True, "event": "stopped"})
         except Exception as error:  # noqa: BLE001 - resident worker command boundary
-            if self.processor is not None and self.prepared_key is not None:
-                with contextlib.suppress(Exception):
-                    self.processor.reset()
-            emit_session(
-                {
-                    "ok": False,
-                    "event": "failed",
-                    "error_type": type(error).__name__,
-                    "error": str(error),
-                    "model_ready": (self.processor is not None and self.prepared_key is not None),
-                    "cache_key": self.prepared_key,
-                }
-            )
+            emit_session(self._failure_payload(error))
 
 
 class WorkerControl:
@@ -376,7 +410,7 @@ class WorkerControl:
         if not isinstance(payload, dict):
             return True
         command = payload.get("command")
-        if command == "start":
+        if command in {"prepare", "start"}:
             self.commands.put(payload)
         elif command == "stop":
             self.request_stop(str(payload.get("session_id") or ""))
@@ -445,6 +479,9 @@ def run_resident_worker() -> int:
             payload = control.commands.get()
             if payload.get("command") == "shutdown":
                 break
+            if payload.get("command") == "prepare":
+                worker.prepare(payload)
+                continue
             session_id = str(payload.get("session_id") or "")
             if not session_id:
                 continue

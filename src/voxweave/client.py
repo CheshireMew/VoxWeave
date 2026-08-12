@@ -12,6 +12,7 @@ from typing import Any
 
 from .config import Settings
 from .discovery import Discovery, read_discovery
+from .process_control import start_managed_process
 from .protocol import PROTOCOL, PROTOCOL_VERSION
 
 
@@ -53,16 +54,10 @@ def ensure_service(settings: Settings, timeout: float = 120) -> Discovery:
             "stdin": subprocess.DEVNULL,
             "env": os.environ.copy(),
         }
-        if os.name == "nt":
-            kwargs["creationflags"] = (
-                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            )
-        else:
-            kwargs["start_new_session"] = True
         settings.logs_dir.mkdir(parents=True, exist_ok=True)
         startup_log = settings.logs_dir / "service-startup.log"
         with startup_log.open("ab") as log:
-            process = subprocess.Popen(command, stdout=log, stderr=log, **kwargs)
+            process = start_managed_process(command, stdout=log, stderr=log, **kwargs)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             discovery = read_discovery(settings)

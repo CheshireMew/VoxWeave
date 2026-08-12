@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1200 360"
+     role="img"
+     aria-labelledby="title desc">
+  <title id="title">VoxWeave local voice-conversion flow</title>
+  <desc id="desc">Local media, folders, and microphone audio enter one service boundary and become verified offline files or realtime playback.</desc>
+
+  <defs>
+    <marker id="arrow-orange" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#F0A45B"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#79B7F2"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#62D0A3"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="360" rx="8" fill="#0B0D10"/>
+  <path d="M282 112 C350 112 368 152 430 160" fill="none" stroke="#F0A45B" stroke-width="8" marker-end="url(#arrow-orange)"/>
+  <path d="M282 248 C350 248 368 208 430 200" fill="none" stroke="#79B7F2" stroke-width="8" marker-end="url(#arrow-blue)"/>
+  <path d="M770 160 C836 152 850 112 918 112" fill="none" stroke="#62D0A3" stroke-width="8" marker-end="url(#arrow-green)"/>
+  <path d="M770 200 C836 208 850 248 918 248" fill="none" stroke="#79B7F2" stroke-width="8" marker-end="url(#arrow-blue)"/>
+
+  <g id="local-inputs" font-family="Segoe UI, Microsoft YaHei UI, sans-serif">
+    <rect x="64" y="64" width="218" height="96" rx="8" fill="#15191F" stroke="#29313B" stroke-width="3"/>
+    <path d="M92 112 h18 l10 -20 l15 40 l16 -40 l12 20 h68" fill="none" stroke="#F0A45B" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="92" y="145" fill="#A8B0BC" font-size="18" font-weight="600" letter-spacing="2">MEDIA · FOLDERS</text>
+
+    <rect x="64" y="200" width="218" height="96" rx="8" fill="#15191F" stroke="#29313B" stroke-width="3"/>
+    <rect x="108" y="219" width="32" height="46" rx="16" fill="none" stroke="#79B7F2" stroke-width="6"/>
+    <path d="M94 248 C94 274 154 274 154 248 M124 274 V286 M104 286 H144" fill="none" stroke="#79B7F2" stroke-width="6" stroke-linecap="round"/>
+    <text x="170" y="258" fill="#A8B0BC" font-size="18" font-weight="600" letter-spacing="2">MIC</text>
+  </g>
+
+  <g id="shared-core" font-family="Segoe UI, Microsoft YaHei UI, sans-serif">
+    <rect x="430" y="72" width="340" height="216" rx="8" fill="#15191F" stroke="#3A4654" stroke-width="4"/>
+    <path d="M486 130 C538 130 538 230 600 230 C662 230 662 130 714 130" fill="none" stroke="#F0A45B" stroke-width="10" stroke-linecap="round"/>
+    <path d="M486 230 C538 230 538 130 600 130 C662 130 662 230 714 230" fill="none" stroke="#79B7F2" stroke-width="10" stroke-linecap="round"/>
+    <circle cx="600" cy="180" r="13" fill="#F3F0E8" stroke="#15191F" stroke-width="7"/>
+    <text x="600" y="265" text-anchor="middle" fill="#F3F0E8" font-size="24" font-weight="700" letter-spacing="3">ONE LOCAL SERVICE</text>
+  </g>
+
+  <g id="observable-results" font-family="Segoe UI, Microsoft YaHei UI, sans-serif">
+    <rect x="918" y="64" width="218" height="96" rx="8" fill="#15191F" stroke="#29313B" stroke-width="3"/>
+    <path d="M952 86 h45 l18 18 v34 h-63 z M997 86 v18 h18" fill="none" stroke="#62D0A3" stroke-width="5" stroke-linejoin="round"/>
+    <text x="1036" y="118" fill="#F3F0E8" font-size="20" font-weight="700">OFFLINE</text>
+    <text x="1036" y="142" fill="#A8B0BC" font-family="Cascadia Mono, monospace" font-size="16">FILE + SHA-256</text>
+
+    <rect x="918" y="200" width="218" height="96" rx="8" fill="#15191F" stroke="#29313B" stroke-width="3"/>
+    <path d="M954 246 h14 l12 -18 l16 38 l16 -38 l12 18 h18" fill="none" stroke="#79B7F2" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1048" y="238" fill="#F3F0E8" font-size="20" font-weight="700">REALTIME</text>
+    <text x="1048" y="264" fill="#A8B0BC" font-family="Cascadia Mono, monospace" font-size="16">LIVE OUTPUT</text>
+  </g>
+</svg>

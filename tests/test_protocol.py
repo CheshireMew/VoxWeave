@@ -10,7 +10,7 @@ def test_describe_is_complete_and_stable() -> None:
     assert payload["protocol"] == "voxweave-control"
     assert payload["version"] == 1
     assert set(payload["operations"]) == set(OPERATION_SPECS)
-    assert len(payload["operations"]) == 31
+    assert len(payload["operations"]) == 32
     assert payload["operations"]["conversion.run"]["arguments_schema"]["type"] == "object"
 
 
@@ -25,6 +25,15 @@ def test_realtime_requires_valid_devices_and_latency() -> None:
         },
     )
     assert parsed["test_mode"] is True
+    assert parse_arguments(
+        "realtime.prepare",
+        {
+            "model": "voice",
+            "input_device": 1,
+            "output_device": 2,
+            "test_mode": True,
+        },
+    ) == parsed
 
     with pytest.raises(ValueError, match="input_device"):
         parse_arguments(

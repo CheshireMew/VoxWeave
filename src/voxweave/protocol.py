@@ -381,6 +381,7 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
     "media.inspect": OperationSpec(MediaInspectCommand, True),
     "media.analyze": OperationSpec(MediaAnalyzeCommand, True),
     "realtime.devices": OperationSpec(EmptyCommand),
+    "realtime.prepare": OperationSpec(RealtimeStartCommand),
     "realtime.start": OperationSpec(RealtimeStartCommand),
     "realtime.status": OperationSpec(EmptyCommand),
     "realtime.stop": OperationSpec(EmptyCommand),

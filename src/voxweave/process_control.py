@@ -15,8 +15,28 @@ def _command_arguments(command: Command) -> list[str]:
     return [str(value) for value in command]
 
 
-def _creation_flags() -> int:
-    return subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+def _platform_process_options() -> dict[str, Any]:
+    if os.name == "nt":
+        return {
+            "creationflags": (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            )
+        }
+    return {"start_new_session": True}
+
+
+def start_managed_process(command: Command, **kwargs: Any) -> subprocess.Popen[Any]:
+    """Start an application-owned child without exposing a console window."""
+
+    platform_options = _platform_process_options()
+    overlap = platform_options.keys() & kwargs.keys()
+    if overlap:
+        raise ValueError(f"managed process options cannot be overridden: {sorted(overlap)}")
+    return subprocess.Popen(
+        _command_arguments(command),
+        **kwargs,
+        **platform_options,
+    )
 
 
 def run_capture(
@@ -30,7 +50,7 @@ def run_capture(
     """Run a captured child process with the application's cancellation contract."""
 
     arguments = _command_arguments(command)
-    process = subprocess.Popen(
+    process = start_managed_process(
         arguments,
         cwd=cwd,
         env=env,
@@ -40,8 +60,6 @@ def run_capture(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        creationflags=_creation_flags(),
-        start_new_session=os.name != "nt",
     )
     while True:
         try:
@@ -69,7 +87,7 @@ def run_logged(
     with log_path.open("a", encoding="utf-8") as log:
         log.write("\n$ " + subprocess.list2cmdline(arguments) + "\n")
         log.flush()
-        process = subprocess.Popen(
+        process = start_managed_process(
             arguments,
             cwd=cwd,
             env=env,
@@ -77,8 +95,6 @@ def run_logged(
             stdout=log,
             stderr=subprocess.STDOUT,
             text=True,
-            creationflags=_creation_flags(),
-            start_new_session=os.name != "nt",
         )
         while process.poll() is None:
             if cancelled():
@@ -97,6 +113,7 @@ def terminate_process_tree(process: subprocess.Popen[Any], timeout: float = 5.0)
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **_platform_process_options(),
         )
     else:
         try:
