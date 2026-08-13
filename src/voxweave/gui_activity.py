@@ -28,7 +28,7 @@ class TaskActivity(QObject):
         self.task_feed = task_feed
         self.status_callback = status_callback
         self._busy: set[str] = set()
-        self._completions: dict[str, tuple[Any, str]] = {}
+        self._completions: dict[str, tuple[Any, str, Any]] = {}
         self.task_feed.taskUpdated.connect(self._consume_task)
 
     @Property("QVariantList", notify=busyChanged)
@@ -52,24 +52,27 @@ class TaskActivity(QObject):
         action_key: str,
         completed: Any = None,
         submitted: Any = None,
+        failure_callback: Any = None,
     ) -> None:
         self._set_busy(action_key, True)
 
         def accepted(task: dict[str, Any]) -> None:
-            self._completions[task["id"]] = (completed, action_key)
+            self._completions[task["id"]] = (completed, action_key, failure_callback)
             if submitted:
                 submitted(task)
             self.task_feed.accept(task)
 
-        def failed(message: str) -> None:
+        def request_failed(message: str) -> None:
             self._set_busy(action_key, False)
             self.status_callback(message, "danger")
+            if failure_callback:
+                failure_callback(message)
 
         self.requests.submit(
             operation,
             arguments,
             accepted,
-            error_callback=failed,
+            error_callback=request_failed,
             request_key=f"submit:{action_key}",
         )
 
@@ -86,9 +89,11 @@ class TaskActivity(QObject):
             return
         completion = self._completions.pop(task_id, None)
         if completion:
-            callback, action_key = completion
+            callback, action_key, failure_callback = completion
             self._set_busy(action_key, False)
             if state == "completed" and callback:
                 callback(task.get("result"))
+            elif state != "completed" and failure_callback:
+                failure_callback(task_error_summary(task) or f"task {state}")
         if state == "failed" and completion:
             self.status_callback(task_error_summary(task) or "task failed", "danger")

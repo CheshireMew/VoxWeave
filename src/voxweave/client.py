@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from .app import SERVICE_ARGUMENT
 from .config import Settings
 from .discovery import Discovery, read_discovery
 from .process_control import start_managed_process
@@ -21,6 +22,12 @@ class ServiceUnavailable(RuntimeError):
 
 
 _service_start_lock = threading.Lock()
+
+
+def service_command() -> list[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, SERVICE_ARGUMENT]
+    return [sys.executable, "-m", "voxweave.service"]
 
 
 def _handshake(discovery: Discovery) -> bool:
@@ -49,7 +56,7 @@ def ensure_service(settings: Settings, timeout: float = 120) -> Discovery:
         discovery = read_discovery(settings)
         if discovery and _handshake(discovery):
             return discovery
-        command = [sys.executable, "-m", "voxweave.service"]
+        command = service_command()
         kwargs: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
             "env": os.environ.copy(),

@@ -1,0 +1,2 @@
+# Build-only dependency. It is not copied into the Windows release directory.
+pyinstaller==6.22.0

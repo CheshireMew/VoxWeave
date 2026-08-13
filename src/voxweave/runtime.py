@@ -87,11 +87,18 @@ def inspect_runtime(
         )
         if revision.returncode == 0:
             payload["rvc_revision"] = revision.stdout.strip()
+    elif settings.rvc_root:
+        revision_marker = Path(settings.rvc_root) / ".voxweave-rvc-revision"
+        if revision_marker.is_file():
+            payload["rvc_revision"] = revision_marker.read_text(
+                encoding="utf-8"
+            ).strip()
     if python and entry:
         try:
             payload["doctor"] = _run_json(
                 [
                     str(python),
+                    "-B",
                     str(entry),
                     "--rvc-root",
                     settings.rvc_root,
@@ -101,7 +108,7 @@ def inspect_runtime(
                 cancelled=cancelled,
             )
             payload["components"]["python_runtime"] = _run_json(
-                [str(python), str(PACKAGE_ROOT / "runtime_worker.py")],
+                [str(python), "-B", str(PACKAGE_ROOT / "runtime_worker.py")],
                 cwd=entry.parent,
                 cancelled=cancelled,
             )

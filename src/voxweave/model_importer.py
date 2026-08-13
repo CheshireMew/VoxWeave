@@ -83,6 +83,7 @@ class ModelImporter:
                 license_spdx=arguments["license_spdx"],
                 source_url=arguments.get("source_url") or arguments["model"],
                 inspection=inspection,
+                recommended=arguments.get("recommended"),
             )
         except Exception:
             failed_root = self.settings.root / "model-import-failed"
@@ -140,6 +141,7 @@ class ModelImporter:
             license_spdx=arguments.get("license_spdx"),
             source_url=arguments.get("source_url"),
             inspection=self.inspector.inspect(local_model),
+            recommended=arguments.get("recommended"),
         )
 
     def _import_url(
@@ -214,7 +216,7 @@ class ModelImporter:
 
     def install_from_catalog(
         self,
-        catalog_url: str,
+        catalog_url: str | None,
         model_id: str,
         progress: Callable[[float, str, str | None], None],
         cancelled: Callable[[], bool],

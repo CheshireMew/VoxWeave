@@ -9,7 +9,37 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
+
+MODEL_RECOMMENDATION_DEFAULTS = {
+    "pitch": 0,
+    "f0": "rmvpe",
+    "index_rate": 0.72,
+    "rms_mix_rate": 0.25,
+    "protect": 0.33,
+    "content_mode": "clean",
+}
+FEMALE_MODEL_IDS = {
+    "community.zh-female-keke",
+    "community.zh-female-senior",
+    "community.zh-female-yalin",
+}
+MALE_MODEL_IDS = {
+    "community.zh-male-young",
+    "community.zh-male-raspy",
+    "community.zh-male-deep",
+}
+FEMALE_MODEL_FAMILIES = {
+    "public_yujie_v2",
+    "keruan_v1",
+    "guaiguai_v2",
+    "guanguan_v1",
+    "jiazi_v2",
+    "loli_2888",
+    "tingbai_v1",
+    "self_female_v1",
+    "suara_wanita_2",
+}
 
 
 def utc_now() -> str:
@@ -72,6 +102,7 @@ class Database:
                     9: self._migrate_to_9,
                     10: self._migrate_to_10,
                     11: self._migrate_to_11,
+                    12: self._migrate_to_12,
                 }
                 while version < SCHEMA_VERSION:
                     target = version + 1
@@ -472,6 +503,21 @@ class Database:
             "batch_runs",
             "submission_failures_json TEXT NOT NULL DEFAULT '[]'",
         )
+
+    @classmethod
+    def _migrate_to_12(cls, db: sqlite3.Connection) -> None:
+        for row in db.execute("SELECT id,family FROM models").fetchall():
+            if row["id"] in FEMALE_MODEL_IDS or row["family"] in FEMALE_MODEL_FAMILIES:
+                pitch = 9
+            elif row["id"] in MALE_MODEL_IDS:
+                pitch = 0
+            else:
+                continue
+            recommended = {**MODEL_RECOMMENDATION_DEFAULTS, "pitch": pitch}
+            db.execute(
+                "UPDATE models SET recommended_json=? WHERE id=?",
+                (json.dumps(recommended, ensure_ascii=False), row["id"]),
+            )
 
     @classmethod
     def _validate_schema(cls, db: sqlite3.Connection) -> None:

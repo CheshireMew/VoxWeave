@@ -19,9 +19,21 @@ def _schema(name: str) -> dict:
     return json.loads((ROOT / "schemas" / name).read_text(encoding="utf-8"))
 
 
-def test_empty_official_catalog_is_valid() -> None:
+def test_official_catalog_is_valid_and_mirrors_bundled_catalog() -> None:
     catalog = json.loads((ROOT / "catalog" / "catalog.v1.json").read_text(encoding="utf-8"))
     Draft202012Validator(_schema("catalog.v1.schema.json")).validate(catalog)
+    bundled = json.loads(
+        (ROOT / "src" / "voxweave" / "resources" / "catalog.v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert catalog == bundled
+    assert len(catalog["models"]) >= 3
+    assert all(model["model_url"].startswith("https://") for model in catalog["models"])
+    assert all(
+        model["recommended"]["pitch"] == (9 if model["gender"] == "female" else 0)
+        for model in catalog["models"]
+    )
 
 
 def test_rvc_model_contract_validates_registry_output(tmp_path) -> None:

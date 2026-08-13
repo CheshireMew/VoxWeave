@@ -55,6 +55,7 @@ class RvcEngine:
         python, entry = self._runtime()
         command = [
             str(python),
+            "-B",
             str(entry),
             "--rvc-root",
             str(Path(self.settings.rvc_root).resolve()),
@@ -66,6 +67,7 @@ class RvcEngine:
         python, entry = self._runtime()
         command = [
             str(python),
+            "-B",
             str(entry),
             "--rvc-root",
             str(Path(self.settings.rvc_root).resolve()),
@@ -149,6 +151,7 @@ class RvcEngine:
     ) -> list[str]:
         command = [
             str(python),
+            "-B",
             str(entry),
             "--rvc-root",
             str(Path(self.settings.rvc_root).resolve()),

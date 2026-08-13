@@ -1,3 +1,5 @@
-# Official model catalog
+# 默认模型下载目录
 
-The official catalog is intentionally empty until a model has a traceable source, explicit redistribution permission, an SPDX license, exact download sizes, and final SHA-256 hashes. Local models are never promoted into this file automatically. See [`MODEL_POLICY.md`](../MODEL_POLICY.md).
+默认目录面向中文用户，包含 3 个社区中文女声和 3 个社区中文男声。每个条目都锁定上游提交，并记录模型与索引的最终大小和 SHA-256；权重不进入 VoxWeave 源码或 EXE。
+
+上游仓库没有提供明确的模型许可证，因此这些条目统一标记为 `LicenseRef-Unknown`，界面也会显示“授权未说明”，不能把“来源可追溯”表述成“允许任意使用”。本机 RVC 目录中已有的模型由启动扫描直接登记，不会为了出现在下载目录里而伪造来源。参见 [`MODEL_POLICY.md`](../MODEL_POLICY.md)。

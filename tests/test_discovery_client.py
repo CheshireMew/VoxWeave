@@ -72,3 +72,12 @@ def test_concurrent_clients_launch_only_one_service(tmp_path, monkeypatch) -> No
         results = list(executor.map(lambda _index: client.ensure_service(settings), range(8)))
     assert results == [discovery] * 8
     assert launch_count == 1
+
+
+def test_frozen_service_uses_the_desktop_executable(monkeypatch) -> None:
+    monkeypatch.setattr(client.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(client.sys, "executable", r"C:\Apps\VoxWeave\VoxWeave.exe")
+    assert client.service_command() == [
+        r"C:\Apps\VoxWeave\VoxWeave.exe",
+        "--voxweave-service",
+    ]

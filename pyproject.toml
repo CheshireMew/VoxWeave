@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxweave"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first high-quality offline and realtime RVC voice conversion workstation"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -34,6 +34,7 @@ dev = [
 voxweave = "voxweave.cli:main"
 voxweave-service = "voxweave.service:main"
 voxweave-gui = "voxweave.gui:main"
+voxweave-app = "voxweave.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

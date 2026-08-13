@@ -35,9 +35,15 @@ FileDialog {
     readonly property var selectedModel: root.models.length > 0 && libraryModelSelector.currentIndex >= 0
         ? root.models[libraryModelSelector.currentIndex]
         : null
-    ColumnLayout {
+    AppScrollView {
+        id: modelsScroll
         anchors.fill: parent
         anchors.margins: root.theme.pageMargin
+        contentWidth: availableWidth
+        clip: true
+
+        ColumnLayout {
+        width: modelsScroll.availableWidth
         spacing: 12
 
         PageHeader {
@@ -91,7 +97,9 @@ FileDialog {
                         model: root.models
                         textRole: "localized_name"
                         valueRole: "id"
-                        emptyText: root.bridge.text("empty.models.title")
+                        emptyText: root.bridge.activity.busyKeys.includes("model-scan")
+                            ? root.bridge.text("models.discovering_local")
+                            : root.bridge.text("empty.models.title")
                         enabled: root.models.length > 0
                     }
                 }
@@ -117,6 +125,118 @@ FileDialog {
                 font.family: root.theme.uiFont
                 font.pixelSize: 12
             }
+        }
+
+        SectionHeader {
+            Layout.fillWidth: true
+            title: root.bridge.text("models.recommended")
+            badgeText: root.bridge.text("models.verified_badge")
+            badgeTone: "info"
+        }
+
+        GridLayout {
+            id: catalogList
+            objectName: "recommendedModelList"
+            Layout.fillWidth: true
+            columns: width >= 700 ? 2 : 1
+            columnSpacing: 8
+            rowSpacing: 8
+
+            Repeater {
+                model: root.bridge.modelCatalog.catalogItems
+
+                delegate: AppPanel {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 50
+                    padding: 8
+                    contentSpacing: 0
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: modelData.localized_name
+                            color: root.theme.text
+                            font.family: root.theme.uiFont
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
+                            elide: Text.ElideRight
+                        }
+
+                        Label {
+                            text: modelData.download_megabytes + " MiB"
+                            color: root.theme.textDim
+                            font.family: root.theme.monoFont
+                            font.pixelSize: 10
+                        }
+
+                        AppButton {
+                            objectName: "downloadRecommendedModelButton"
+                            Layout.preferredWidth: 96
+                            compact: true
+                            visible: !modelData.downloading
+                            kind: modelData.installed ? "quiet" : "primary"
+                            text: modelData.installed
+                                ? root.bridge.text("models.installed")
+                                : root.bridge.text("models.download")
+                            enabled: !modelData.installed
+                                && root.bridge.maintenance.runtimeReady
+                            onClicked: root.bridge.modelCatalog.installCatalogModel(modelData.id)
+                        }
+
+                        Item {
+                            objectName: "recommendedModelDownloadProgress"
+                            Layout.preferredWidth: 96
+                            Layout.preferredHeight: 34
+                            visible: modelData.downloading
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: root.theme.radiusSmall
+                                color: root.theme.field
+                                border.color: root.theme.border
+                                border.width: 1
+
+                                Rectangle {
+                                    x: 1
+                                    y: 1
+                                    width: Math.max(0, (parent.width - 2) * modelData.download_progress)
+                                    height: parent.height - 2
+                                    radius: root.theme.radiusSmall
+                                    color: root.theme.accent
+
+                                    Behavior on width {
+                                        NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+                                    }
+                                }
+
+                                Label {
+                                    anchors.centerIn: parent
+                                    text: Math.round(modelData.download_progress * 100) + "%"
+                                    color: modelData.download_progress >= 0.55
+                                        ? root.theme.accentInk : root.theme.text
+                                    font.family: root.theme.monoFont
+                                    font.pixelSize: 11
+                                    font.weight: Font.DemiBold
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Label {
+            Layout.fillWidth: true
+            visible: !root.bridge.maintenance.runtimeReady
+            text: root.bridge.text("models.runtime_required")
+            color: root.theme.warning
+            font.family: root.theme.uiFont
+            font.pixelSize: 11
+            wrapMode: Text.Wrap
         }
 
         SectionHeader {
@@ -233,5 +353,6 @@ FileDialog {
         }
 
         Item { Layout.fillHeight: true }
+        }
     }
 }

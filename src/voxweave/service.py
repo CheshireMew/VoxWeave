@@ -186,7 +186,12 @@ def create_app(
                 for row in rows:
                     after_id = max(after_id, int(row["id"]))
                     await websocket.send_json(row)
-                await asyncio.sleep(0.25)
+                try:
+                    message = await asyncio.wait_for(websocket.receive(), timeout=0.25)
+                except TimeoutError:
+                    continue
+                if message["type"] == "websocket.disconnect":
+                    return
         except WebSocketDisconnect:
             return
 
@@ -213,7 +218,14 @@ def main() -> int:
                 server.should_exit = True
 
         app = create_app(settings, discovery.token, request_shutdown)
-        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="info",
+            log_config=None,
+            access_log=False,
+        )
         server = uvicorn.Server(config)
         server.run(sockets=[server_socket])
     finally:

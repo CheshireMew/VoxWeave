@@ -51,6 +51,7 @@ def analyze_audio(
     )
     command = [
         str(python),
+        "-B",
         str(PACKAGE_ROOT / "analysis_worker.py"),
         "--audio",
         str(analysis_audio),
@@ -120,6 +121,7 @@ def separate_audio(
     work_dir.mkdir(parents=True, exist_ok=False)
     command = [
         str(python),
+        "-B",
         str(PACKAGE_ROOT / "separation_worker.py"),
         "--rvc-root",
         str(rvc_root),

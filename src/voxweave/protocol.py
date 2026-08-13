@@ -124,6 +124,15 @@ class ModelResolveCommand(Command):
     voice: NonEmpty
 
 
+class ModelRecommendedParameters(Command):
+    pitch: int = Field(ge=-36, le=36)
+    f0: Literal["rmvpe", "fcpe", "pm"]
+    index_rate: float = Field(ge=0, le=1)
+    rms_mix_rate: float = Field(ge=0, le=1)
+    protect: float = Field(ge=0, le=0.5)
+    content_mode: Literal["clean", "mixed", "singing"]
+
+
 class ModelImportCommand(Command):
     model: NonEmpty
     index: AbsolutePath | None = None
@@ -137,6 +146,7 @@ class ModelImportCommand(Command):
     index_sha256: Sha256 | None = None
     download_size_bytes: int | None = Field(default=None, gt=0)
     index_size_bytes: int | None = Field(default=None, gt=0)
+    recommended: ModelRecommendedParameters | None = None
 
     @model_validator(mode="after")
     def validate_source(self) -> ModelImportCommand:
@@ -163,7 +173,7 @@ class ModelImportCommand(Command):
 
 
 class ModelCatalogInstallCommand(Command):
-    catalog_url: HttpsUrl
+    catalog_url: HttpsUrl | None = None
     model_id: ModelId
 
 
@@ -373,6 +383,7 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
     "runtime.install": OperationSpec(RuntimeInstallCommand, True),
     "model.scan": OperationSpec(ModelScanCommand, True, ModelList),
     "model.list": OperationSpec(EmptyCommand, result=ModelList),
+    "model.catalog.list": OperationSpec(EmptyCommand, result=ObjectList),
     "model.resolve": OperationSpec(ModelResolveCommand, result=ModelRecord),
     "model.import": OperationSpec(ModelImportCommand, True, ModelRecord),
     "model.catalog.install": OperationSpec(ModelCatalogInstallCommand, True, ModelRecord),

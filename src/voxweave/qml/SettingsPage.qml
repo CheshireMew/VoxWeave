@@ -15,6 +15,9 @@ Item {
     readonly property bool realtimeActive: ["starting", "running", "stopping"].indexOf(
         root.bridge.realtime.status.state
     ) >= 0
+    readonly property bool runtimeInspecting: root.bridge.activity.busyKeys.includes(
+        "runtime-inspect"
+    )
     readonly property var inputDevices: (devicePayload.devices || []).filter(function(device) {
         return Number(device.input_channels) > 0
             && Number(device.hostapi_id) === Number(audioHostApi.currentValue)
@@ -328,9 +331,50 @@ Basic.Dialog {
                     Layout.fillWidth: true
                     SectionHeader {
                         Layout.fillWidth: true
-                        title: root.bridge.text("section.runtime")
-                        badgeText: root.bridge.maintenance.runtimeText.length > 2 ? root.bridge.text("badge.loaded") : root.bridge.text("badge.waiting")
-                        badgeTone: root.bridge.maintenance.runtimeText.length > 2 ? "info" : "neutral"
+                        title: root.bridge.text("section.runtime_install")
+                        badgeText: root.runtimeInspecting
+                            ? root.bridge.text("task.state.running")
+                            : root.bridge.maintenance.runtimeReady
+                                ? root.bridge.text("runtime.ready")
+                                : root.bridge.text("runtime.not_ready")
+                        badgeTone: root.runtimeInspecting
+                            ? "info"
+                            : root.bridge.maintenance.runtimeReady ? "success" : "warning"
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: root.bridge.text("runtime.install_detail")
+                        color: root.theme.textMuted
+                        font.family: root.theme.uiFont
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppButton {
+                            objectName: "installRuntimeButton"
+                            text: root.runtimeInspecting
+                                ? root.bridge.text("task.state.running")
+                                : root.bridge.activity.busyKeys.includes("runtime-install")
+                                ? root.bridge.text("runtime.installing")
+                                : root.bridge.maintenance.runtimeReady
+                                    ? root.bridge.text("runtime.installed")
+                                    : root.bridge.text("runtime.install")
+                            kind: "primary"
+                            enabled: !root.bridge.maintenance.runtimeReady
+                                && !root.runtimeInspecting
+                                && !root.bridge.activity.busyKeys.includes("runtime-install")
+                            onClicked: root.bridge.maintenance.installRuntime()
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: root.bridge.activity.busyKeys.includes("runtime-install")
+                            text: root.bridge.text("runtime.install_wait")
+                            color: root.theme.warning
+                            font.family: root.theme.uiFont
+                            font.pixelSize: 11
+                            wrapMode: Text.Wrap
+                        }
                     }
                     AppScrollView {
                         Layout.fillWidth: true
