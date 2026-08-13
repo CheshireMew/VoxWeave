@@ -146,6 +146,7 @@ FileDialog {
                 model: root.bridge.modelCatalog.catalogItems
 
                 delegate: AppPanel {
+                    id: catalogItem
                     required property var modelData
                     Layout.fillWidth: true
                     Layout.preferredHeight: 50
@@ -158,7 +159,7 @@ FileDialog {
 
                         Label {
                             Layout.fillWidth: true
-                            text: modelData.localized_name
+                            text: catalogItem.modelData.localized_name
                             color: root.theme.text
                             font.family: root.theme.uiFont
                             font.pixelSize: 13
@@ -167,7 +168,7 @@ FileDialog {
                         }
 
                         Label {
-                            text: modelData.download_megabytes + " MiB"
+                            text: catalogItem.modelData.download_megabytes + " MiB"
                             color: root.theme.textDim
                             font.family: root.theme.monoFont
                             font.pixelSize: 10
@@ -177,21 +178,21 @@ FileDialog {
                             objectName: "downloadRecommendedModelButton"
                             Layout.preferredWidth: 96
                             compact: true
-                            visible: !modelData.downloading
-                            kind: modelData.installed ? "quiet" : "primary"
-                            text: modelData.installed
+                            visible: !catalogItem.modelData.downloading
+                            kind: catalogItem.modelData.installed ? "quiet" : "primary"
+                            text: catalogItem.modelData.installed
                                 ? root.bridge.text("models.installed")
                                 : root.bridge.text("models.download")
-                            enabled: !modelData.installed
+                            enabled: !catalogItem.modelData.installed
                                 && root.bridge.maintenance.runtimeReady
-                            onClicked: root.bridge.modelCatalog.installCatalogModel(modelData.id)
+                            onClicked: root.bridge.modelCatalog.installCatalogModel(catalogItem.modelData.id)
                         }
 
                         Item {
                             objectName: "recommendedModelDownloadProgress"
                             Layout.preferredWidth: 96
                             Layout.preferredHeight: 34
-                            visible: modelData.downloading
+                            visible: catalogItem.modelData.downloading
 
                             Rectangle {
                                 anchors.fill: parent
@@ -203,7 +204,7 @@ FileDialog {
                                 Rectangle {
                                     x: 1
                                     y: 1
-                                    width: Math.max(0, (parent.width - 2) * modelData.download_progress)
+                                    width: Math.max(0, (parent.width - 2) * catalogItem.modelData.download_progress)
                                     height: parent.height - 2
                                     radius: root.theme.radiusSmall
                                     color: root.theme.accent
@@ -215,8 +216,8 @@ FileDialog {
 
                                 Label {
                                     anchors.centerIn: parent
-                                    text: Math.round(modelData.download_progress * 100) + "%"
-                                    color: modelData.download_progress >= 0.55
+                                    text: Math.round(catalogItem.modelData.download_progress * 100) + "%"
+                                    color: catalogItem.modelData.download_progress >= 0.55
                                         ? root.theme.accentInk : root.theme.text
                                     font.family: root.theme.monoFont
                                     font.pixelSize: 11
