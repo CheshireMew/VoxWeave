@@ -28,6 +28,7 @@ class ModelInspector:
         completed = run_capture(
             [
                 python,
+                "-B",
                 PACKAGE_ROOT / "model_inspect_worker.py",
                 *[model.resolve() for model in models],
             ],

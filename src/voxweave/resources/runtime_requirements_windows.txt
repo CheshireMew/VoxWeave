@@ -1,0 +1,24 @@
+--index-url https://mirrors.pku.edu.cn/pypi/simple
+--extra-index-url https://pypi.org/simple
+--only-binary=:all:
+
+# VoxWeave inference, realtime audio, model inspection, VAD and speaker analysis.
+# The RVC web UI, training stack, TensorBoard and Gradio are intentionally absent.
+setuptools==80.10.2
+wheel==0.47.0
+packaging==26.3
+av==15.1.0
+faiss-cpu==1.14.3
+ffmpeg-python==0.2.0
+librosa==0.10.2.post1
+numpy==1.26.4
+onnxruntime==1.28.0
+praat-parselmouth==0.4.7
+scikit-learn==1.9.0
+scipy==1.17.1
+silero-vad[onnx-cpu]==6.2.1
+sounddevice==0.5.5
+soundfile==0.14.0
+torchfcpe==0.0.4
+transformers==4.49.0
+huggingface-hub==0.36.2

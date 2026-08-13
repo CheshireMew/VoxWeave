@@ -8,8 +8,9 @@ __pycache__/
 htmlcov/
 build/
 dist/
+.archive/
 .venv/
 .voxweave.local.json
+.voxweave/
 *.log
 *.tmp
-

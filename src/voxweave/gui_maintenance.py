@@ -9,10 +9,14 @@ from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 from .config import Settings
 from .gui_activity import TaskActivity
 from .gui_support import local_path
+from .runtime_verification import load_runtime_verification, save_runtime_verification
 
 
 class MaintenanceViewModel(QObject):
     runtimeChanged = Signal()
+    runtimeAvailable = Signal()
+    runtimeInstalled = Signal()
+    runtimeInstallRequested = Signal()
     diagnosticPathChanged = Signal()
 
     def __init__(
@@ -41,6 +45,14 @@ class MaintenanceViewModel(QObject):
     def runtimeText(self) -> str:
         return json.dumps(self._runtime, ensure_ascii=False, indent=2)
 
+    @Property(bool, notify=runtimeChanged)
+    def runtimeReady(self) -> bool:
+        return bool(self._runtime.get("ready"))
+
+    @Property(str, notify=runtimeChanged)
+    def runtimeError(self) -> str:
+        return str(self._runtime.get("error") or "")
+
     @Property(str, notify=diagnosticPathChanged)
     def diagnosticPath(self) -> str:
         return self._diagnostic_path
@@ -49,11 +61,53 @@ class MaintenanceViewModel(QObject):
     def inspectRuntime(self) -> None:
         def update(result: dict[str, Any]) -> None:
             self._runtime = result
+            save_runtime_verification(self.settings, result)
             self.runtimeChanged.emit()
 
+        self.activity.submit("runtime.inspect", {}, action_key="runtime-inspect", completed=update)
+
+    @Slot()
+    def ensureRuntime(self) -> None:
+        """Trust a matching prior verification or run the first full inspection."""
+
+        cached = load_runtime_verification(self.settings)
+        if cached is not None:
+            self._runtime = cached
+            self.runtimeChanged.emit()
+            self.runtimeAvailable.emit()
+            return
+
+        def update(result: dict[str, Any]) -> None:
+            self._runtime = result
+            save_runtime_verification(self.settings, result)
+            self.runtimeChanged.emit()
+            if self.runtimeReady:
+                self.runtimeAvailable.emit()
+                return
+            self.status_callback("检测到运行环境不完整，等待确认安装", "info")
+            self.runtimeInstallRequested.emit()
+
+        self.activity.submit("runtime.inspect", {}, action_key="runtime-inspect", completed=update)
+
+    def _install_runtime(self) -> None:
+        def update(result: dict[str, Any]) -> None:
+            self._runtime = dict(result)
+            save_runtime_verification(self.settings, result)
+            self.runtimeChanged.emit()
+            if self.runtimeReady:
+                self.runtimeInstalled.emit()
+                self.runtimeAvailable.emit()
+
         self.activity.submit(
-            "runtime.inspect", {}, action_key="runtime-inspect", completed=update
+            "runtime.install",
+            {},
+            action_key="runtime-install",
+            completed=update,
         )
+
+    @Slot()
+    def installRuntime(self) -> None:
+        self._install_runtime()
 
     @Slot(str)
     def exportDiagnostics(self, path_value: str) -> None:

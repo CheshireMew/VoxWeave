@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-08-13
+
+- Added a Windows EXE distribution with the VoxWeave application icon, a reproducible PyInstaller build, and a runtime-focused package allowlist that excludes models and development files.
+- Added first-run discovery of existing VoxWeave, RVC, Python, and FFmpeg installations; missing runtime components are downloaded only after user confirmation, and successful verification is reused on later launches.
+- Added a Chinese voice catalog with existing-model discovery, localized names, compact one-line downloads, real progress reporting, model/index hash validation, and recommended male and female conversion parameters.
+- Fixed realtime test-mode playback and audio routing, added model-specific pitch defaults, changed the input gate default to -30 dB, and retained user-selected realtime settings across restarts.
+- Kept executable-local pointers and verification state beside the application while storing large runtimes, models, downloads, logs, caches, and task artifacts in the selected data directory.
+
 - Added service-owned realtime microphone conversion with resident RVC inference, Windows audio-device routing, SOLA block stitching, three latency budgets, persistent session recovery, live performance metrics, protocol operations, and a bilingual desktop page.
 - Unified settings writes under the service, made task state/event commits transactional, and moved restart recovery into the task manager.
 - Changed watched-folder identity to path plus SHA-256, isolated per-file failures, and exposed scan and batch work as cancellable tasks.

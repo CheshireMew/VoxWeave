@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from voxweave.database import SCHEMA_VERSION, Database
+from voxweave.model_registry import ModelRegistry
 
 
 def test_future_database_schema_is_rejected(tmp_path) -> None:
@@ -35,6 +36,41 @@ def test_v8_database_adds_execution_and_index_snapshots(tmp_path) -> None:
     }
     assert "index_sha256" in {
         row["name"] for row in database.fetch_all("PRAGMA table_info(batch_rules)")
+    }
+
+
+def test_v11_database_updates_bundled_voice_recommendations(tmp_path) -> None:
+    path = tmp_path / "v11.sqlite3"
+    database = Database(path)
+    registry = ModelRegistry(database)
+    female_path = tmp_path / "suara_wanita_2.pth"
+    male_path = tmp_path / "male.pth"
+    female_path.write_bytes(b"female")
+    male_path.write_bytes(b"male")
+    female = registry.register(female_path, inspection={"status": "ready"})
+    male = registry.register(
+        male_path,
+        model_id="community.zh-male-deep",
+        inspection={"status": "ready"},
+    )
+    database.execute(
+        "UPDATE models SET recommended_json='{}' WHERE id IN (?,?)",
+        (female["id"], male["id"]),
+    )
+    database.execute(
+        "UPDATE metadata SET value='11' WHERE key='schema_version'"
+    )
+
+    migrated = ModelRegistry(Database(path))
+
+    assert migrated.resolve(female["id"])["recommended"]["pitch"] == 9
+    assert migrated.resolve(male["id"])["recommended"] == {
+        "pitch": 0,
+        "f0": "rmvpe",
+        "index_rate": 0.72,
+        "rms_mix_rate": 0.25,
+        "protect": 0.33,
+        "content_mode": "clean",
     }
 
 

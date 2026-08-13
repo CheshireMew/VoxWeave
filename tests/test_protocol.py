@@ -10,7 +10,7 @@ def test_describe_is_complete_and_stable() -> None:
     assert payload["protocol"] == "voxweave-control"
     assert payload["version"] == 1
     assert set(payload["operations"]) == set(OPERATION_SPECS)
-    assert len(payload["operations"]) == 32
+    assert len(payload["operations"]) == 33
     assert payload["operations"]["conversion.run"]["arguments_schema"]["type"] == "object"
 
 

@@ -14,6 +14,11 @@ Item {
     readonly property var worker: session.worker || ({"state": "not_started", "model_ready": false})
     readonly property var metrics: session.metrics || ({})
     readonly property bool active: ["starting", "running", "stopping"].indexOf(session.state) >= 0
+    readonly property bool canStart: !root.active
+        && root.bridge.maintenance.runtimeReady
+        && realtimeModel.count > 0
+        && realtimeModel.currentIndex >= 0
+        && Boolean(root.bridge.realtime.audioRoute.ready)
 
     objectName: "realtimePage"
 
@@ -54,6 +59,17 @@ Item {
         return -1
     }
 
+    function disabledReason() {
+        if (root.active) return ""
+        if (!root.bridge.maintenance.runtimeReady)
+            return root.bridge.text("realtime.disabled.runtime")
+        if (realtimeModel.count <= 0 || realtimeModel.currentIndex < 0)
+            return root.bridge.text("realtime.disabled.model")
+        if (!Boolean(root.bridge.realtime.audioRoute.ready))
+            return root.bridge.text("realtime.disabled.audio")
+        return ""
+    }
+
     function currentPreferences() {
         var saved = root.bridge.realtime.preferences || ({})
         var route = root.bridge.realtime.audioRoute || ({})
@@ -79,11 +95,30 @@ Item {
         prewarmTimer.restart()
     }
 
+    function applySelectedModelRecommendations() {
+        if (realtimeModel.currentIndex < 0
+                || !root.readyModels[realtimeModel.currentIndex]) return
+        var values = root.readyModels[realtimeModel.currentIndex].recommended || ({})
+        if (values.pitch !== undefined) pitchSlider.value = Number(values.pitch)
+        if (values.f0 !== undefined) {
+            var f0Index = root.comboValueIndex(f0Method, values.f0)
+            if (f0Index >= 0) f0Method.currentIndex = f0Index
+        }
+        if (values.index_rate !== undefined)
+            indexRateSlider.value = Number(values.index_rate) * 100
+        if (values.rms_mix_rate !== undefined)
+            rmsMixSlider.value = Number(values.rms_mix_rate) * 100
+        root.saveCurrentPreferences()
+    }
+
     function restoreModel() {
         var saved = root.bridge.realtime.preferences || ({})
         var index = root.comboValueIndex(realtimeModel, saved.model || "")
         realtimeModel.currentIndex = index >= 0 ? index : (realtimeModel.count > 0 ? 0 : -1)
-        prewarmTimer.restart()
+        if (index < 0 && realtimeModel.currentIndex >= 0)
+            root.applySelectedModelRecommendations()
+        else
+            prewarmTimer.restart()
     }
 
     function prewarmSelectedModel() {
@@ -159,10 +194,7 @@ Item {
                     Layout.fillWidth: true
                     text: root.bridge.text("action.start_realtime")
                     kind: "primary"
-                    enabled: !root.active
-                        && realtimeModel.count > 0
-                        && realtimeModel.currentIndex >= 0
-                        && Boolean(root.bridge.realtime.audioRoute.ready)
+                    enabled: root.canStart
                     onClicked: {
                         root.saveCurrentPreferences()
                         root.bridge.realtime.startSession(
@@ -198,8 +230,20 @@ Item {
                     emptyText: root.bridge.text("empty.models.short")
                     Accessible.name: root.bridge.text("field.model")
                     enabled: !root.active && count > 0
-                    onActivated: root.saveCurrentPreferences()
+                    onActivated: root.applySelectedModelRecommendations()
                 }
+            }
+
+
+            Label {
+                objectName: "realtimeDisabledReason"
+                Layout.fillWidth: true
+                visible: root.disabledReason().length > 0
+                text: root.disabledReason()
+                color: root.theme.warning
+                font.family: root.theme.uiFont
+                font.pixelSize: 11
+                wrapMode: Text.Wrap
             }
 
             AppCheckBox {
@@ -481,7 +525,7 @@ Item {
                                 Layout.fillWidth: true
                                 from: -60
                                 to: -20
-                                value: -40
+                                value: -30
                                 stepSize: 1
                                 suffix: " dB"
                                 accessibleName: root.bridge.text("field.input_gate_db")

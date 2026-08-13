@@ -91,6 +91,14 @@ class OperationRouter:
                 )
             ),
             "model.list": OperationBinding(sync(lambda _arguments: models.list_models())),
+            "model.catalog.list": OperationBinding(
+                sync(
+                    lambda _arguments: [
+                        {**entry, "installed": models.is_registered(entry["id"])}
+                        for entry in importer.catalog.list_entries()
+                    ]
+                )
+            ),
             "model.resolve": OperationBinding(
                 sync(lambda arguments: models.resolve(arguments["voice"]))
             ),
@@ -104,7 +112,7 @@ class OperationRouter:
             ),
             "model.catalog.install": OperationBinding(
                 lambda arguments, context: importer.install_from_catalog(
-                    arguments["catalog_url"],
+                    arguments.get("catalog_url"),
                     arguments["model_id"],
                     context.progress,
                     context.cancelled,

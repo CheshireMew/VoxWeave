@@ -6,6 +6,7 @@ from importlib.metadata import PackageNotFoundError, requires, version
 from pathlib import Path
 
 import pytest
+
 from packaging.requirements import Requirement
 
 ROOT = Path(__file__).parents[1]

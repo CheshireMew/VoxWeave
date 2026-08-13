@@ -17,6 +17,8 @@
         "properties": {
           "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
           "display_name": {"type": "string", "minLength": 1},
+          "gender": {"enum": ["female", "male", "neutral"]},
+          "recommended": {"$ref": "#/$defs/parameters"},
           "aliases": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
           "license_spdx": {"type": "string", "minLength": 1},
           "source_url": {"type": "string", "pattern": "^https://"},
@@ -29,6 +31,21 @@
         },
         "additionalProperties": false
       }
+    }
+  },
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "required": ["pitch", "f0", "index_rate", "rms_mix_rate", "protect", "content_mode"],
+      "properties": {
+        "pitch": {"type": "integer", "minimum": -36, "maximum": 36},
+        "f0": {"enum": ["rmvpe", "fcpe", "pm"]},
+        "index_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "rms_mix_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "protect": {"type": "number", "minimum": 0, "maximum": 0.5},
+        "content_mode": {"enum": ["clean", "mixed", "singing"]}
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

@@ -5,7 +5,12 @@ import json
 import pytest
 
 from voxweave.bootstrap import persist_configuration
-from voxweave.config import Settings, load_settings
+from voxweave.config import (
+    Settings,
+    application_root,
+    load_settings,
+    persist_data_root_pointer,
+)
 from voxweave.discovery import ServiceLock
 
 
@@ -53,6 +58,7 @@ def test_legacy_model_roots_are_migrated_and_removed_from_persisted_settings(
 
 def test_realtime_settings_are_normalized_and_written_atomically(tmp_path) -> None:
     settings = Settings(data_root=str(tmp_path))
+    assert settings.realtime["input_gate_db"] == -30.0
     realtime = {
         **settings.realtime,
         "model": "local.voice.default",
@@ -68,3 +74,20 @@ def test_realtime_settings_are_normalized_and_written_atomically(tmp_path) -> No
     assert settings.updated(language="en").realtime == realtime
     with pytest.raises(ValueError, match="realtime.pitch"):
         settings.updated(realtime={**realtime, "pitch": 60})
+
+
+def test_frozen_application_root_is_next_to_executable(tmp_path, monkeypatch) -> None:
+    executable = tmp_path / "release" / "VoxWeave.exe"
+    monkeypatch.setattr("voxweave.config.sys.frozen", True, raising=False)
+    monkeypatch.setattr("voxweave.config.sys.executable", str(executable))
+    assert application_root() == executable.parent
+
+
+def test_data_root_pointer_is_written_atomically(tmp_path) -> None:
+    pointer = tmp_path / "profile" / "location.json"
+    data_root = tmp_path / "data"
+    persist_data_root_pointer(data_root, pointer)
+    assert json.loads(pointer.read_text(encoding="utf-8")) == {
+        "data_root": str(data_root.resolve())
+    }
+    assert not pointer.with_suffix(".json.tmp").exists()

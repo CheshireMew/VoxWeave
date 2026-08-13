@@ -12,20 +12,26 @@ from .database import Database
 from .hashing import sha256_file
 from .model_files import family_and_epoch
 from .model_repository import ModelRepository
-from .protocol import OperationError
+from .protocol import ModelRecommendedParameters, OperationError
 
 DISPLAY_NAMES = {
     "public_yujie_v2": "公开御姐 V2",
-    "keruan_v1": "Keruan V1",
-    "guaiguai_v2": "Guaiguai V2",
+    "keruan_v1": "可软 V1",
+    "guaiguai_v2": "乖乖 V2",
+    "guanguan_v1": "关关 V1",
+    "jiazi_v2": "夹子 V2",
+    "loli_2888": "萝莉 2888",
     "tingbai_v1": "听白 V1",
     "self_female_v1": "女性版自己 V1",
-    "suara_wanita_2": "Bunga / Suara Wanita 2",
+    "suara_wanita_2": "Bunga 女声 2",
 }
 ALIASES = {
     "public_yujie_v2": ["公开御姐", "Public Yujie", "Public Yujie V2"],
     "keruan_v1": ["Keruan", "可软", "可软 V1"],
     "guaiguai_v2": ["Guaiguai", "乖乖", "乖乖 V2"],
+    "guanguan_v1": ["Guanguan", "关关", "关关 V1"],
+    "jiazi_v2": ["Jiazi", "夹子", "夹子 V2"],
+    "loli_2888": ["Loli 2888", "萝莉", "萝莉 2888"],
     "tingbai_v1": ["听白", "Tingbai"],
     "suara_wanita_2": ["Bunga", "Suara Wanita"],
 }
@@ -33,9 +39,20 @@ RECOMMENDED_PITCH = {
     "public_yujie_v2": 9,
     "keruan_v1": 9,
     "guaiguai_v2": 9,
+    "guanguan_v1": 9,
+    "jiazi_v2": 9,
+    "loli_2888": 9,
     "tingbai_v1": 9,
-    "self_female_v1": 6,
-    "suara_wanita_2": 7,
+    "self_female_v1": 9,
+    "suara_wanita_2": 9,
+}
+DEFAULT_RECOMMENDED = {
+    "pitch": 0,
+    "f0": "rmvpe",
+    "index_rate": 0.72,
+    "rms_mix_rate": 0.25,
+    "protect": 0.33,
+    "content_mode": "clean",
 }
 
 
@@ -75,6 +92,7 @@ class ModelRegistry:
         source_kind: str = "external",
         license_spdx: str | None = None,
         source_url: str | None = None,
+        recommended: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         model = model.expanduser().resolve()
         if model.suffix.casefold() != ".pth" or not model.is_file():
@@ -109,14 +127,13 @@ class ModelRegistry:
             status = "index_choice_required"
         if len(candidates) == 1 and index is None:
             index = candidates[0]
-        recommended = {
-            "pitch": RECOMMENDED_PITCH.get(family, 0),
-            "f0": "rmvpe",
-            "index_rate": 0.72,
-            "rms_mix_rate": 0.25,
-            "protect": 0.33,
-            "content_mode": "clean",
-        }
+        recommended = ModelRecommendedParameters.model_validate(
+            {
+                **DEFAULT_RECOMMENDED,
+                "pitch": RECOMMENDED_PITCH.get(family, 0),
+                **(recommended or {}),
+            }
+        ).model_dump(mode="json")
         now = datetime.now(UTC).isoformat()
         self.repository.save(
             (
@@ -182,9 +199,10 @@ class ModelRegistry:
                     "model_index_missing", f"model index no longer exists: {index_path}"
                 )
             actual_index_hash = sha256_file(index_path)
-            if not expected_index_hash or actual_index_hash.casefold() != str(
-                expected_index_hash
-            ).casefold():
+            if (
+                not expected_index_hash
+                or actual_index_hash.casefold() != str(expected_index_hash).casefold()
+            ):
                 raise OperationError(
                     "model_index_changed",
                     f"model index changed after registration: {model['id']}",

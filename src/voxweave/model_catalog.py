@@ -3,28 +3,57 @@ from __future__ import annotations
 import json
 import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+from .config import PACKAGE_ROOT
 from .protocol import ModelImportCommand
 
 
 class ModelCatalogClient:
+    def __init__(self, bundled_path: Path | None = None) -> None:
+        self.bundled_path = bundled_path or (
+            PACKAGE_ROOT / "resources" / "catalog.v1.json"
+        )
+
+    @staticmethod
+    def _validate(catalog: dict[str, Any]) -> dict[str, Any]:
+        if catalog.get("protocol") != "voxweave-model-catalog" or catalog.get("version") != 1:
+            raise ValueError("unsupported VoxWeave model catalog")
+        models = catalog.get("models")
+        if not isinstance(models, list):
+            raise ValueError("catalog models must be a list")
+        return catalog
+
+    def load(
+        self,
+        catalog_url: str | None,
+        cancelled: Callable[[], bool],
+    ) -> dict[str, Any]:
+        if cancelled():
+            raise InterruptedError("task cancellation requested")
+        if catalog_url:
+            if not catalog_url.lower().startswith("https://"):
+                raise ValueError("catalog URL must use HTTPS")
+            with urllib.request.urlopen(catalog_url, timeout=15) as response:
+                catalog = json.load(response)
+        else:
+            catalog = json.loads(self.bundled_path.read_text(encoding="utf-8"))
+        if cancelled():
+            raise InterruptedError("task cancellation requested")
+        return self._validate(catalog)
+
+    def list_entries(self) -> list[dict[str, Any]]:
+        catalog = self.load(None, lambda: False)
+        return [dict(item) for item in catalog["models"]]
+
     def import_arguments(
         self,
-        catalog_url: str,
+        catalog_url: str | None,
         model_id: str,
         cancelled: Callable[[], bool],
     ) -> dict[str, Any]:
-        if not catalog_url.lower().startswith("https://"):
-            raise ValueError("catalog URL must use HTTPS")
-        if cancelled():
-            raise InterruptedError("task cancellation requested")
-        with urllib.request.urlopen(catalog_url, timeout=15) as response:
-            catalog = json.load(response)
-        if cancelled():
-            raise InterruptedError("task cancellation requested")
-        if catalog.get("protocol") != "voxweave-model-catalog" or catalog.get("version") != 1:
-            raise ValueError("unsupported VoxWeave model catalog")
+        catalog = self.load(catalog_url, cancelled)
         entry = next(
             (item for item in catalog.get("models", []) if item.get("id") == model_id),
             None,
@@ -46,6 +75,7 @@ class ModelCatalogClient:
             "source_url": entry.get("source_url") or catalog_url,
             "model_sha256": entry["model_sha256"],
             "download_size_bytes": entry["model_size_bytes"],
+            "recommended": entry.get("recommended"),
         }
         if entry.get("index_url"):
             missing_index = {"index_sha256", "index_size_bytes"} - set(entry)

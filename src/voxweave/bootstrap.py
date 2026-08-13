@@ -5,7 +5,7 @@ import json
 import shutil
 from pathlib import Path
 
-from .config import LOCAL_POINTER, Settings
+from .config import LOCAL_POINTER, Settings, persist_data_root_pointer
 from .discovery import ServiceLock
 
 
@@ -23,13 +23,7 @@ def persist_configuration(settings: Settings, pointer_path: Path = LOCAL_POINTER
     lock.acquire()
     try:
         settings.update()
-        temporary = pointer_path.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps({"data_root": settings.data_root}, ensure_ascii=False, indent=2)
-            + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(pointer_path)
+        persist_data_root_pointer(Path(settings.data_root), pointer_path)
     finally:
         lock.release()
 

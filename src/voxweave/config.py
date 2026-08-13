@@ -4,14 +4,39 @@ import json
 import os
 import platform
 import shutil
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
-SOURCE_ROOT = PACKAGE_ROOT.parents[1]
-LOCAL_POINTER = SOURCE_ROOT / ".voxweave.local.json"
+
+
+def application_root() -> Path:
+    """Return the user-visible application directory in source and frozen builds."""
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return PACKAGE_ROOT.parents[1]
+
+
+SOURCE_ROOT = application_root()
+
+
+def _user_pointer_path() -> Path:
+    if platform.system() == "Windows":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return base / "VoxWeave" / "location.json"
+    if platform.system() == "Darwin":
+        return Path.home() / "Library" / "Application Support" / "VoxWeave" / "location.json"
+    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return base / "voxweave" / "location.json"
+
+
+PORTABLE_POINTER = SOURCE_ROOT / ".voxweave.local.json"
+USER_POINTER = _user_pointer_path()
+LOCAL_POINTER = PORTABLE_POINTER
 
 DEFAULT_REALTIME_SETTINGS: dict[str, Any] = {
     "model": "",
@@ -23,7 +48,7 @@ DEFAULT_REALTIME_SETTINGS: dict[str, Any] = {
     "index_rate": 0.72,
     "rms_mix_rate": 0.25,
     "vad_threshold": 0.35,
-    "input_gate_db": -40.0,
+    "input_gate_db": -30.0,
     "block_seconds": 0.5,
     "test_mode": False,
 }
@@ -66,9 +91,7 @@ def normalize_realtime_settings(value: Any) -> dict[str, Any]:
             raise ValueError(f"realtime.{name} must be a number")
         number = float(number)
         if not minimum <= number <= maximum:
-            raise ValueError(
-                f"realtime.{name} must be between {minimum} and {maximum}"
-            )
+            raise ValueError(f"realtime.{name} must be between {minimum} and {maximum}")
         result[name] = number
     block_seconds = result["block_seconds"]
     if isinstance(block_seconds, bool) or not isinstance(block_seconds, int | float):
@@ -97,11 +120,39 @@ def resolve_data_root() -> Path:
     if explicit:
         return Path(explicit).expanduser().resolve()
     if LOCAL_POINTER.exists():
-        payload = json.loads(LOCAL_POINTER.read_text(encoding="utf-8"))
-        value = payload.get("data_root")
-        if value:
-            return Path(value).expanduser().resolve()
+        try:
+            payload = json.loads(LOCAL_POINTER.read_text(encoding="utf-8"))
+            value = payload.get("data_root") if isinstance(payload, dict) else None
+            if isinstance(value, str) and value.strip():
+                return Path(value).expanduser().resolve()
+        except (OSError, ValueError):
+            pass
     return _default_data_root().resolve()
+
+
+def data_root_is_configured() -> bool:
+    """Return whether the user deliberately selected a data directory."""
+
+    if os.environ.get("VOXWEAVE_HOME"):
+        return True
+    if not LOCAL_POINTER.is_file():
+        return False
+    try:
+        payload = json.loads(LOCAL_POINTER.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(isinstance(payload, dict) and payload.get("data_root"))
+
+
+def persist_data_root_pointer(data_root: Path, pointer_path: Path = LOCAL_POINTER) -> None:
+    target = data_root.expanduser().resolve()
+    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = pointer_path.with_suffix(pointer_path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps({"data_root": str(target)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(pointer_path)
 
 
 @dataclass(slots=True)
@@ -179,6 +230,10 @@ class Settings:
     @property
     def lock_path(self) -> Path:
         return self.state_dir / "service.lock"
+
+    @property
+    def runtime_verification_path(self) -> Path:
+        return SOURCE_ROOT / ".voxweave" / "runtime-verification.json"
 
     @property
     def config_path(self) -> Path:
