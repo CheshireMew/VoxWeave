@@ -170,6 +170,7 @@ class ModelRegistry:
             model["protocol"] = "voxweave-rvc-model"
             model["version"] = 1
             model["f0"] = bool(model["f0"]) if model["f0"] is not None else None
+            model["archived"] = bool(model.get("archived"))
             results.append(model)
         return results
 
@@ -178,6 +179,12 @@ class ModelRegistry:
 
     def mark_catalog(self, model_id: str) -> None:
         self.repository.mark_catalog(model_id)
+
+    def set_archived(self, model_id: str, archived: bool) -> dict[str, Any]:
+        if not self.repository.get(model_id):
+            raise LookupError(f"model not found: {model_id}")
+        self.repository.set_archived(model_id, archived)
+        return self.resolve(model_id)
 
     @staticmethod
     def verify_snapshot(model: dict[str, Any]) -> None:
@@ -210,6 +217,8 @@ class ModelRegistry:
 
     def resolve_for_execution(self, selector: str) -> dict[str, Any]:
         model = self.resolve(selector)
+        if model.get("archived"):
+            raise OperationError("model_unavailable", f"model is archived: {model['id']}")
         if model["status"] != "ready":
             raise OperationError(
                 "model_unavailable", f"model is not ready: {model['id']} ({model['status']})"

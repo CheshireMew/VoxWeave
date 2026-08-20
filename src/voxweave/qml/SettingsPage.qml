@@ -12,6 +12,7 @@ Item {
     required property var theme
     property var devicePayload: ({"hostapis": [], "devices": []})
     property url pendingArchiveRoot
+    property bool showRuntimeDetails: false
     readonly property bool realtimeActive: ["starting", "running", "stopping"].indexOf(
         root.bridge.realtime.status.state
     ) >= 0
@@ -100,6 +101,7 @@ Basic.Dialog {
     modal: true
     anchors.centerIn: parent
     width: Math.min(420, root.width - 48)
+    height: 180
     title: root.bridge.text("storage.archive.confirm_title")
     standardButtons: Basic.Dialog.Ok | Basic.Dialog.Cancel
     contentItem: Label {
@@ -165,7 +167,7 @@ Basic.Dialog {
 
                     GridLayout {
                         Layout.fillWidth: true
-                        columns: 2
+                        columns: width >= 680 ? 2 : 1
                         columnSpacing: 10
                         rowSpacing: 8
                         ColumnLayout {
@@ -197,6 +199,51 @@ Basic.Dialog {
                                 enabled: !root.realtimeActive && count > 0
                                 onActivated: root.saveCurrentAudioRoute()
                             }
+                        }
+                    }
+
+                    Flow {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: childrenRect.height
+                        spacing: 8
+                        AppButton {
+                            text: root.bridge.realtime.audioTesting
+                                && root.bridge.realtime.audioTest.mode === "input"
+                                ? root.bridge.text("audio.test.running")
+                                : root.bridge.text("audio.test.input")
+                            enabled: !root.realtimeActive && !root.bridge.realtime.audioTesting
+                                && audioInputDevice.currentIndex >= 0
+                            onClicked: root.bridge.realtime.testAudioDevice(
+                                "input", Number(audioInputDevice.currentValue)
+                            )
+                        }
+                        AppButton {
+                            text: root.bridge.realtime.audioTesting
+                                && root.bridge.realtime.audioTest.mode === "output"
+                                ? root.bridge.text("audio.test.running")
+                                : root.bridge.text("audio.test.output")
+                            enabled: !root.realtimeActive && !root.bridge.realtime.audioTesting
+                                && audioOutputDevice.currentIndex >= 0
+                            onClicked: root.bridge.realtime.testAudioDevice(
+                                "output", Number(audioOutputDevice.currentValue)
+                            )
+                        }
+                        StatusPill {
+                            visible: String(root.bridge.realtime.audioTest.state || "").length > 0
+                                && root.bridge.realtime.audioTest.state !== "running"
+                            text: root.bridge.realtime.audioTest.state === "completed"
+                                ? root.bridge.text("audio.test.completed")
+                                : root.bridge.text("audio.test.failed")
+                            tone: root.bridge.realtime.audioTest.state === "completed"
+                                ? "success" : "danger"
+                        }
+                        Label {
+                            visible: root.bridge.realtime.audioTest.mode === "input"
+                                && root.bridge.realtime.audioTest.state === "completed"
+                            text: root.bridge.text("audio.test.level") + " "
+                                + Math.round(Number(root.bridge.realtime.audioTest.peak || 0) * 100) + "%"
+                            color: root.theme.textMuted
+                            font.pixelSize: 11
                         }
                     }
 
@@ -238,6 +285,10 @@ Basic.Dialog {
                                 verticalAlignment: Text.AlignVCenter
                                 wrapMode: Text.WrapAnywhere
                             }
+                        }
+                        AppButton {
+                            text: root.bridge.text("action.open_folder")
+                            onClicked: root.bridge.maintenance.openDataRoot()
                         }
                     }
 
@@ -376,15 +427,70 @@ Basic.Dialog {
                             wrapMode: Text.Wrap
                         }
                     }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: width >= 680 ? 2 : 1
+                        columnSpacing: 10
+                        rowSpacing: 6
+                        Label { text: root.bridge.text("runtime.device") + ": " + root.bridge.maintenance.runtimeInfo.device; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                        Label { text: "Python: " + root.bridge.maintenance.runtimeInfo.python; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                        Label { text: "RVC: " + root.bridge.maintenance.runtimeInfo.rvc_root; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                        Label { text: "FFmpeg: " + root.bridge.maintenance.runtimeInfo.ffmpeg; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                    }
+                    AppCheckBox {
+                        text: root.bridge.text("runtime.show_details")
+                        checked: root.showRuntimeDetails
+                        onToggled: root.showRuntimeDetails = checked
+                    }
                     AppScrollView {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 330
+                        visible: root.showRuntimeDetails
                         clip: true
                         AppTextArea {
                             width: parent.width
                             text: root.bridge.maintenance.runtimeText.length > 2 ? root.bridge.maintenance.runtimeText : root.bridge.text("empty.runtime.detail")
                             readOnly: true
                         }
+                    }
+                }
+
+                AppPanel {
+                    Layout.fillWidth: true
+                    SectionHeader { Layout.fillWidth: true; title: root.bridge.text("section.background_service") }
+                    Label {
+                        Layout.fillWidth: true
+                        text: root.bridge.text("service.exit_behavior")
+                        color: root.theme.textMuted
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
+                    }
+                    AppButton {
+                        text: root.bridge.text("service.stop")
+                        kind: "danger"
+                        enabled: !root.realtimeActive
+                        onClicked: root.bridge.stopBackgroundService()
+                    }
+                }
+
+                AppPanel {
+                    Layout.fillWidth: true
+                    SectionHeader {
+                        Layout.fillWidth: true
+                        title: root.bridge.text("section.about")
+                        badgeText: "v" + root.bridge.applicationVersion
+                        badgeTone: "neutral"
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: root.bridge.text("about.detail")
+                        color: root.theme.textMuted
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
+                    }
+                    AppButton {
+                        text: root.bridge.text("about.project_page")
+                        onClicked: root.bridge.openProjectPage()
                     }
                 }
 

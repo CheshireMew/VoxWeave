@@ -51,8 +51,7 @@ class BatchRepository:
         for row in rows[:limit]:
             item = self.decode_rule(row)
             counts = self.database.fetch_all(
-                "SELECT state,COUNT(*) AS count FROM batch_items "
-                "WHERE batch_id=? GROUP BY state",
+                "SELECT state,COUNT(*) AS count FROM batch_items WHERE batch_id=? GROUP BY state",
                 (item["id"],),
             )
             item["item_counts"] = {count["state"]: count["count"] for count in counts}
@@ -68,13 +67,26 @@ class BatchRepository:
             (int(enabled), utc_now(), batch_id),
         )
 
+    def update_rule(self, batch_id: str, values: tuple[Any, ...]) -> None:
+        self.database.execute(
+            "UPDATE batch_rules SET input_root=?,output_root=?,model_id=?,model_sha256=?,"
+            "index_sha256=?,preset_json=?,preset_name=?,recursive=?,watch_enabled=?,"
+            "extensions_json=?,updated_at=? WHERE id=?",
+            (*values, batch_id),
+        )
+
+    def set_archived(self, batch_id: str, archived: bool) -> None:
+        self.database.execute(
+            "UPDATE batch_rules SET state=?,watch_enabled=0,updated_at=? WHERE id=?",
+            ("archived" if archived else "active", utc_now(), batch_id),
+        )
+
     @staticmethod
     def find_item(
         db: sqlite3.Connection, batch_id: str, source_path: str, source_sha256: str
     ) -> sqlite3.Row | None:
         return db.execute(
-            "SELECT * FROM batch_items WHERE batch_id=? AND source_path=? "
-            "AND source_sha256=?",
+            "SELECT * FROM batch_items WHERE batch_id=? AND source_path=? AND source_sha256=?",
             (batch_id, source_path, source_sha256),
         ).fetchone()
 
@@ -138,8 +150,7 @@ class BatchRepository:
 
     def link_existing_item(self, item_id: str, task_id: str) -> None:
         self.database.execute(
-            "UPDATE batch_items SET task_id=?,state='queued',error=NULL,updated_at=? "
-            "WHERE id=?",
+            "UPDATE batch_items SET task_id=?,state='queued',error=NULL,updated_at=? WHERE id=?",
             (task_id, utc_now(), item_id),
         )
 

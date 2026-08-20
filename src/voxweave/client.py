@@ -49,13 +49,20 @@ def _handshake(discovery: Discovery) -> bool:
 
 
 def ensure_service(settings: Settings, timeout: float = 120) -> Discovery:
+    discovery, _started = ensure_service_with_state(settings, timeout)
+    return discovery
+
+
+def ensure_service_with_state(settings: Settings, timeout: float = 120) -> tuple[Discovery, bool]:
+    """Return the service discovery record and whether this call started it."""
+
     discovery = read_discovery(settings)
     if discovery and _handshake(discovery):
-        return discovery
+        return discovery, False
     with _service_start_lock:
         discovery = read_discovery(settings)
         if discovery and _handshake(discovery):
-            return discovery
+            return discovery, False
         command = service_command()
         kwargs: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
@@ -69,7 +76,7 @@ def ensure_service(settings: Settings, timeout: float = 120) -> Discovery:
         while time.monotonic() < deadline:
             discovery = read_discovery(settings)
             if discovery and _handshake(discovery):
-                return discovery
+                return discovery, True
             if process.poll() is not None:
                 break
             time.sleep(0.15)
@@ -83,6 +90,53 @@ def ensure_service(settings: Settings, timeout: float = 120) -> Discovery:
         if detail.strip():
             message += f": {detail.strip()}"
         raise ServiceUnavailable(message)
+
+
+class ManagedServiceClient:
+    """GUI transport that only shuts down a service it started itself."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self._lock = threading.RLock()
+        self._started_service = False
+        self._closing = False
+
+    @property
+    def started_service(self) -> bool:
+        with self._lock:
+            return self._started_service
+
+    def request(
+        self,
+        settings: Settings,
+        method: str,
+        route: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        discovery = self.ensure()
+        return _request_json(discovery, method, route, payload)
+
+    def ensure(self) -> Discovery:
+        discovery, started = ensure_service_with_state(self.settings)
+        stop_after_start = False
+        if started:
+            with self._lock:
+                if self._closing:
+                    stop_after_start = True
+                else:
+                    self._started_service = True
+        if stop_after_start:
+            shutdown_service(self.settings)
+        return discovery
+
+    def shutdown_if_owned(self) -> dict[str, Any]:
+        with self._lock:
+            self._closing = True
+            owned = self._started_service
+            self._started_service = False
+        if not owned:
+            return {"ok": True, "state": "retained"}
+        return shutdown_service(self.settings)
 
 
 def request_json(

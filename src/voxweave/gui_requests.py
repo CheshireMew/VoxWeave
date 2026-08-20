@@ -17,6 +17,8 @@ class RequestCoordinator(QObject):
         settings: Settings,
         transport: Any,
         status_callback: Any,
+        operation_label: Any | None = None,
+        error_formatter: Any | None = None,
         *,
         parent: QObject | None = None,
     ) -> None:
@@ -24,6 +26,8 @@ class RequestCoordinator(QObject):
         self.settings = settings
         self.transport = transport
         self.status_callback = status_callback
+        self.operation_label = operation_label or (lambda operation: operation)
+        self.error_formatter = error_formatter or (lambda _error_type, message: str(message))
         self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="voxweave-gui")
         self.generations: dict[str, int] = {}
         self.active: dict[str, str] = {}
@@ -38,7 +42,7 @@ class RequestCoordinator(QObject):
     def _refresh_status(self) -> None:
         if self.active:
             latest = next(reversed(self.active))
-            self.status_callback(f"{self.active[latest]} …", "info")
+            self.status_callback(f"{self.operation_label(self.active[latest])} …", "info")
         else:
             self.status_callback("Ready", "success")
 
@@ -55,6 +59,7 @@ class RequestCoordinator(QObject):
             return
         error = item.get("error")
         if error:
+            error = self.error_formatter(item.get("error_type"), error)
             callback = item.get("error_callback")
             if callback:
                 callback(error)
@@ -96,9 +101,7 @@ class RequestCoordinator(QObject):
                 "actor": {"kind": "desktop", "name": "VoxWeave GUI"},
             }
             try:
-                payload = self.transport(
-                    self.settings, "POST", "/v1/execute", request
-                )
+                payload = self.transport(self.settings, "POST", "/v1/execute", request)
             except Exception as exc:  # noqa: BLE001 - UI boundary
                 self._emit_completed(
                     {
@@ -107,6 +110,7 @@ class RequestCoordinator(QObject):
                         "generation": generation,
                         "show_status": show_status,
                         "error": str(exc),
+                        "error_type": "service_unavailable",
                         "error_callback": error_callback,
                     }
                 )
@@ -119,6 +123,7 @@ class RequestCoordinator(QObject):
                         "generation": generation,
                         "show_status": show_status,
                         "error": payload.get("error", "operation failed"),
+                        "error_type": payload.get("error_type", "operation_failed"),
                         "error_callback": error_callback,
                     }
                 )

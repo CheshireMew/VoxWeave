@@ -18,8 +18,8 @@ class ModelRepository:
             INSERT INTO models(
               id,display_name,aliases_json,family,checkpoint_epoch,model_path,model_sha256,
               index_path,index_sha256,index_candidates_json,rvc_version,sample_rate,f0,source_kind,
-              license_spdx,source_url,recommended_json,status,imported_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              license_spdx,source_url,recommended_json,status,imported_at,archived
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
             ON CONFLICT(id) DO UPDATE SET
               display_name=excluded.display_name,aliases_json=excluded.aliases_json,
               model_path=excluded.model_path,index_path=excluded.index_path,
@@ -33,11 +33,10 @@ class ModelRepository:
         )
 
     def list(self) -> list[dict[str, Any]]:
-        return self.database.fetch_all(
-            "SELECT * FROM models ORDER BY family,checkpoint_epoch,id"
-        )
+        return self.database.fetch_all("SELECT * FROM models ORDER BY family,checkpoint_epoch,id")
 
     def mark_catalog(self, model_id: str) -> None:
-        self.database.execute(
-            "UPDATE models SET source_kind='catalog' WHERE id=?", (model_id,)
-        )
+        self.database.execute("UPDATE models SET source_kind='catalog' WHERE id=?", (model_id,))
+
+    def set_archived(self, model_id: str, archived: bool) -> None:
+        self.database.execute("UPDATE models SET archived=? WHERE id=?", (int(archived), model_id))

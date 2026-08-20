@@ -12,6 +12,7 @@ class RealtimeViewModel(QObject):
     devicesChanged = Signal()
     audioRouteChanged = Signal()
     statusChanged = Signal()
+    audioTestChanged = Signal()
 
     def __init__(
         self,
@@ -37,6 +38,8 @@ class RealtimeViewModel(QObject):
             "metrics": {},
         }
         self._refreshing = False
+        self._audio_test: dict[str, Any] = {}
+        self._audio_testing = False
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.refreshStatus)
@@ -69,11 +72,7 @@ class RealtimeViewModel(QObject):
             if default_record is not None:
                 default_host_id = int(default_record.get("hostapi_id", -1))
                 host = next(
-                    (
-                        item
-                        for item in hostapis
-                        if int(item.get("id", -1)) == default_host_id
-                    ),
+                    (item for item in hostapis if int(item.get("id", -1)) == default_host_id),
                     None,
                 )
         if host is None and hostapis:
@@ -93,8 +92,7 @@ class RealtimeViewModel(QObject):
         input_devices = [
             item
             for item in devices
-            if int(item.get("hostapi_id", -1)) == host_id
-            and int(item.get("input_channels", 0)) > 0
+            if int(item.get("hostapi_id", -1)) == host_id and int(item.get("input_channels", 0)) > 0
         ]
         output_devices = [
             item
@@ -108,11 +106,7 @@ class RealtimeViewModel(QObject):
         ) -> dict[str, Any] | None:
             preferred_name = str(self._preferences.get(preference_name, ""))
             selected = next(
-                (
-                    item
-                    for item in candidates
-                    if str(item.get("name", "")) == preferred_name
-                ),
+                (item for item in candidates if str(item.get("name", "")) == preferred_name),
                 None,
             )
             if selected is not None:
@@ -123,24 +117,16 @@ class RealtimeViewModel(QObject):
                 candidates[0] if candidates else None,
             )
 
-        input_device = selected_device(
-            input_devices, "input_device", "default_input_device"
-        )
-        output_device = selected_device(
-            output_devices, "output_device", "default_output_device"
-        )
+        input_device = selected_device(input_devices, "input_device", "default_input_device")
+        output_device = selected_device(output_devices, "output_device", "default_output_device")
         return {
             "ready": input_device is not None and output_device is not None,
             "hostapi_id": host_id,
             "hostapi": str(host.get("name", "")),
             "input_device": int(input_device.get("id", -1)) if input_device else -1,
-            "input_device_name": str(input_device.get("name", ""))
-            if input_device
-            else "",
+            "input_device_name": str(input_device.get("name", "")) if input_device else "",
             "output_device": int(output_device.get("id", -1)) if output_device else -1,
-            "output_device_name": str(output_device.get("name", ""))
-            if output_device
-            else "",
+            "output_device_name": str(output_device.get("name", "")) if output_device else "",
         }
 
     @Property("QVariantMap", notify=audioRouteChanged)
@@ -150,6 +136,14 @@ class RealtimeViewModel(QObject):
     @Property("QVariantMap", notify=statusChanged)
     def status(self) -> dict[str, Any]:
         return self._status
+
+    @Property("QVariantMap", notify=audioTestChanged)
+    def audioTest(self) -> dict[str, Any]:
+        return self._audio_test
+
+    @Property(bool, notify=audioTestChanged)
+    def audioTesting(self) -> bool:
+        return self._audio_testing
 
     preferencesChanged = Signal()
 
@@ -162,7 +156,10 @@ class RealtimeViewModel(QObject):
         try:
             preferences = normalize_realtime_settings(dict(value))
         except (TypeError, ValueError) as exc:
-            self.status_callback(str(exc), "danger")
+            self.status_callback(
+                self.text_callback("error.operation_failed").format(message=exc),
+                "danger",
+            )
             return
         route_changed = any(
             preferences[name] != self._preferences[name]
@@ -220,8 +217,7 @@ class RealtimeViewModel(QObject):
             or output_record is None
             or int(input_record.get("input_channels", 0)) < 1
             or int(output_record.get("output_channels", 0)) < 1
-            or int(input_record.get("hostapi_id", -1))
-            != int(output_record.get("hostapi_id", -1))
+            or int(input_record.get("hostapi_id", -1)) != int(output_record.get("hostapi_id", -1))
         ):
             return
         self.savePreferences(
@@ -258,6 +254,34 @@ class RealtimeViewModel(QObject):
             request_key="realtime-devices",
         )
 
+    @Slot(str, int)
+    def testAudioDevice(self, mode: str, device: int) -> None:
+        if self._audio_testing or mode not in {"input", "output"} or device < 0:
+            return
+        self._audio_testing = True
+        self._audio_test = {"mode": mode, "state": "running"}
+        self.audioTestChanged.emit()
+
+        def update(result: dict[str, Any]) -> None:
+            self._audio_testing = False
+            self._audio_test = {**result, "state": "completed"}
+            self.audioTestChanged.emit()
+            self.status_callback(self.text_callback("audio.test.completed"), "success")
+
+        def failed(message: str) -> None:
+            self._audio_testing = False
+            self._audio_test = {"mode": mode, "state": "failed", "error": message}
+            self.audioTestChanged.emit()
+            self.status_callback(message, "danger")
+
+        self.requests.submit(
+            "realtime.audio_test",
+            {"mode": mode, "device": device, "duration_seconds": 2.0},
+            update,
+            error_callback=failed,
+            request_key="audio-test",
+        )
+
     @Slot()
     def refreshStatus(self) -> None:
         if self._refreshing:
@@ -274,7 +298,13 @@ class RealtimeViewModel(QObject):
             self._set_poll_interval(result.get("state"))
             self.statusChanged.emit()
             if result.get("state") == "failed" and previous_state != "failed":
-                self.status_callback(result.get("error") or "realtime session failed", "danger")
+                self.status_callback(
+                    self.text_callback("error.operation_failed").format(
+                        message=result.get("error")
+                        or self.text_callback("realtime.session_failed")
+                    ),
+                    "danger",
+                )
 
         def failed(message: str) -> None:
             self._refreshing = False
@@ -369,6 +399,28 @@ class RealtimeViewModel(QObject):
             show_status=False,
             error_callback=failed,
             request_key="realtime-prepare",
+        )
+
+    @Slot()
+    def releaseModel(self) -> None:
+        self.requests.invalidate("realtime-prepare")
+        self._last_prepare_arguments = None
+        worker = self._status.get("worker") or {}
+        if worker.get("state") in {None, "", "not_started"}:
+            return
+
+        def update(result: dict[str, Any]) -> None:
+            self._status = result
+            self._set_poll_interval(result.get("state"))
+            self.statusChanged.emit()
+
+        self.requests.submit(
+            "realtime.release",
+            {},
+            update,
+            show_status=False,
+            error_callback=lambda message: self.status_callback(message, "danger"),
+            request_key="realtime-release",
         )
 
     @Slot(str, int, int, int, str, float, float, float, float, float, bool)

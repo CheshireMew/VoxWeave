@@ -65,6 +65,58 @@ def devices(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def audio_test(arguments: argparse.Namespace) -> int:
+    import numpy as np  # noqa: PLC0415
+    import sounddevice as sd  # noqa: PLC0415
+
+    root = Path(arguments.rvc_root).resolve()
+    configure(root)
+    device = int(arguments.device)
+    duration = float(arguments.duration_seconds)
+    info = sd.query_devices(device)
+    sample_rate = int(info["default_samplerate"])
+    if arguments.mode == "input":
+        if int(info["max_input_channels"]) < 1:
+            raise ValueError(f"device is not an audio input: {device}")
+        samples = sd.rec(
+            int(sample_rate * duration),
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            device=device,
+            blocking=True,
+        )
+        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+        rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+        emit(
+            {
+                "ok": True,
+                "command": "audio-test",
+                "mode": "input",
+                "device": device,
+                "sample_rate": sample_rate,
+                "peak": peak,
+                "rms": rms,
+            }
+        )
+        return 0
+    if int(info["max_output_channels"]) < 1:
+        raise ValueError(f"device is not an audio output: {device}")
+    timeline = np.arange(int(sample_rate * duration), dtype="float32") / sample_rate
+    tone = (0.08 * np.sin(2 * np.pi * 440.0 * timeline)).astype("float32")
+    sd.play(tone, samplerate=sample_rate, device=device, blocking=True)
+    emit(
+        {
+            "ok": True,
+            "command": "audio-test",
+            "mode": "output",
+            "device": device,
+            "sample_rate": sample_rate,
+        }
+    )
+    return 0
+
+
 def realtime(arguments: argparse.Namespace) -> int:
     from rvc_realtime_worker import run_resident_worker  # noqa: PLC0415
 
@@ -217,6 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.set_defaults(handler=doctor)
     devices_parser = commands.add_parser("devices")
     devices_parser.set_defaults(handler=devices)
+    audio_test_parser = commands.add_parser("audio-test")
+    audio_test_parser.add_argument("--mode", choices=("input", "output"), required=True)
+    audio_test_parser.add_argument("--device", type=int, required=True)
+    audio_test_parser.add_argument("--duration-seconds", type=float, default=2.0)
+    audio_test_parser.set_defaults(handler=audio_test)
     conversion = commands.add_parser("convert")
     conversion.add_argument("--input", required=True)
     conversion.add_argument("--output", required=True)

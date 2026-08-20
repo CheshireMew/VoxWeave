@@ -479,6 +479,7 @@ for line in sys.stdin:
             "default_output_device": 2,
         }
 
+
 class DelayedStopEngine(ProcessEngine):
     @staticmethod
     def _worker_code() -> str:
@@ -585,6 +586,37 @@ def test_realtime_model_prepares_before_audio_session_starts(tmp_path) -> None:
     ]
     manager.stop()
     wait_for_state(manager, "stopped")
+    manager.shutdown()
+
+
+def test_idle_prepared_realtime_worker_can_be_released(tmp_path) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    database = Database(settings.database_path)
+    register_model(database, tmp_path)
+    manager = RealtimeSessionManager(
+        database,
+        ModelRegistry(database),
+        ProcessEngine(tmp_path),  # type: ignore[arg-type]
+    )
+    manager.prepare(
+        {
+            "model": "voice",
+            "input_device": 1,
+            "output_device": 2,
+            "block_seconds": 0.5,
+        }
+    )
+    assert wait_for_worker_state(manager, "ready")["worker"]["pid"] is not None
+
+    released = manager.release()
+
+    assert released["state"] == "idle"
+    assert released["worker"] == {
+        "state": "not_started",
+        "pid": None,
+        "model_id": None,
+        "model_ready": False,
+    }
     manager.shutdown()
 
 

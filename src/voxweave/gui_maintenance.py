@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 
 from .config import Settings
 from .gui_activity import TaskActivity
@@ -24,12 +25,14 @@ class MaintenanceViewModel(QObject):
         settings: Settings,
         activity: TaskActivity,
         status_callback: Any,
+        text_callback: Any = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.settings = settings
         self.activity = activity
         self.status_callback = status_callback
+        self.text_callback = text_callback or (lambda key: key)
         self._runtime: dict[str, Any] = {}
         self._diagnostic_path = ""
 
@@ -45,9 +48,24 @@ class MaintenanceViewModel(QObject):
     def runtimeText(self) -> str:
         return json.dumps(self._runtime, ensure_ascii=False, indent=2)
 
+    @Property("QVariantMap", notify=runtimeChanged)
+    def runtimeInfo(self) -> dict[str, Any]:
+        doctor = self._runtime.get("doctor") or {}
+        return {
+            "ready": bool(self._runtime.get("ready")),
+            "device": doctor.get("device") or "—",
+            "python": self._runtime.get("rvc_python") or "—",
+            "rvc_root": self._runtime.get("rvc_root") or "—",
+            "ffmpeg": self._runtime.get("ffmpeg") or "—",
+        }
+
     @Property(bool, notify=runtimeChanged)
     def runtimeReady(self) -> bool:
         return bool(self._runtime.get("ready"))
+
+    @Slot()
+    def openDataRoot(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.settings.root)))
 
     @Property(str, notify=runtimeChanged)
     def runtimeError(self) -> str:
@@ -84,7 +102,7 @@ class MaintenanceViewModel(QObject):
             if self.runtimeReady:
                 self.runtimeAvailable.emit()
                 return
-            self.status_callback("检测到运行环境不完整，等待确认安装", "info")
+            self.status_callback(self.text_callback("runtime.install_needed"), "info")
             self.runtimeInstallRequested.emit()
 
         self.activity.submit("runtime.inspect", {}, action_key="runtime-inspect", completed=update)
@@ -115,7 +133,10 @@ class MaintenanceViewModel(QObject):
         if target.suffix.casefold() != ".json":
             target = target.with_suffix(".json")
         if target.exists():
-            self.status_callback(f"diagnostic file already exists: {target}", "danger")
+            self.status_callback(
+                self.text_callback("diagnostics.target_exists").format(path=target),
+                "danger",
+            )
             return
 
         def write(payload: dict[str, Any]) -> None:
@@ -126,7 +147,10 @@ class MaintenanceViewModel(QObject):
             )
             self._diagnostic_path = str(target)
             self.diagnosticPathChanged.emit()
-            self.status_callback(f"diagnostics exported: {target}", "success")
+            self.status_callback(
+                self.text_callback("diagnostics.exported").format(path=target),
+                "success",
+            )
 
         self.activity.submit(
             "diagnostics.snapshot",

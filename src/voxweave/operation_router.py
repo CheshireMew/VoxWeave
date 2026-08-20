@@ -102,6 +102,13 @@ class OperationRouter:
             "model.resolve": OperationBinding(
                 sync(lambda arguments: models.resolve(arguments["voice"]))
             ),
+            "model.archive": OperationBinding(
+                sync(
+                    lambda arguments: models.set_archived(
+                        arguments["model_id"], arguments["archived"]
+                    )
+                )
+            ),
             "model.import": OperationBinding(
                 lambda arguments, context: importer.import_model(
                     arguments,
@@ -124,10 +131,12 @@ class OperationRouter:
             "media.inspect": OperationBinding(media.inspect, (snapshot_input,)),
             "media.analyze": OperationBinding(media.analyze, (snapshot_input,)),
             "realtime.devices": OperationBinding(sync(lambda _arguments: realtime.devices())),
+            "realtime.audio_test": OperationBinding(sync(realtime.audio_test)),
             "realtime.prepare": OperationBinding(sync(realtime.prepare)),
             "realtime.start": OperationBinding(sync(realtime.start)),
             "realtime.status": OperationBinding(sync(lambda _arguments: realtime.status())),
             "realtime.stop": OperationBinding(sync(lambda _arguments: realtime.stop())),
+            "realtime.release": OperationBinding(sync(lambda _arguments: realtime.release())),
             "conversion.preview": OperationBinding(
                 media.preview,
                 (snapshot_model, snapshot_input),
@@ -137,6 +146,8 @@ class OperationRouter:
                 (snapshot_model, snapshot_input),
             ),
             "batch.create": OperationBinding(sync(batch.create)),
+            "batch.update": OperationBinding(sync(batch.update)),
+            "batch.archive": OperationBinding(sync(batch.archive)),
             "batch.get": OperationBinding(sync(lambda arguments: batch.get(arguments["batch_id"]))),
             "batch.list": OperationBinding(
                 sync(lambda arguments: batch.list(arguments["limit"], arguments.get("cursor")))
@@ -208,11 +219,7 @@ class OperationRouter:
             )
 
     def _update_settings(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        changes = {
-            name: arguments[name]
-            for name in ("language", "realtime")
-            if name in arguments
-        }
+        changes = {name: arguments[name] for name in ("language", "realtime") if name in arguments}
         self.settings.update(**changes)
         return {
             "language": self.settings.language,

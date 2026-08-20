@@ -10,6 +10,22 @@ Item {
     required property var bridge
     required property var theme
     property var models: []
+    property bool showAdvancedImport: false
+    property bool showArchived: false
+    signal navigateRequested(int index)
+    readonly property var filteredModels: root.models.filter(function(model) {
+        if (!root.showArchived && model.archived) return false
+        var query = modelSearch.text.trim().toLowerCase()
+        return query.length === 0
+            || String(model.localized_name || "").toLowerCase().includes(query)
+            || String(model.id || "").toLowerCase().includes(query)
+    })
+
+    function statusText(status) {
+        var key = "model.status." + status
+        var value = root.bridge.text(key)
+        return value === key ? status : value
+    }
 
 FolderDialog {
     id: weightRootDialog
@@ -32,8 +48,8 @@ FileDialog {
 
     objectName: "modelsPage"
     property int importTab: 0
-    readonly property var selectedModel: root.models.length > 0 && libraryModelSelector.currentIndex >= 0
-        ? root.models[libraryModelSelector.currentIndex]
+    readonly property var selectedModel: root.filteredModels.length > 0 && libraryModelSelector.currentIndex >= 0
+        ? root.filteredModels[libraryModelSelector.currentIndex]
         : null
     AppScrollView {
         id: modelsScroll
@@ -65,7 +81,7 @@ FileDialog {
             }
             AppIconButton {
                 objectName: "addIndexFolderButton"
-                glyph: "\uE8F4"
+                glyph: "\uE8B7"
                 accessibleName: root.bridge.text("action.scan_indices")
                 enabled: !root.bridge.activity.busyKeys.includes("model-scan")
                 onClicked: indexRootDialog.open()
@@ -82,6 +98,14 @@ FileDialog {
         AppPanel {
             Layout.fillWidth: true
 
+            AppTextField {
+                id: modelSearch
+                objectName: "modelSearchField"
+                Layout.fillWidth: true
+                placeholderText: root.bridge.text("models.search")
+                Accessible.name: root.bridge.text("models.search")
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 10
@@ -94,13 +118,13 @@ FileDialog {
                         id: libraryModelSelector
                         objectName: "libraryModelSelector"
                         Layout.fillWidth: true
-                        model: root.models
+                        model: root.filteredModels
                         textRole: "localized_name"
                         valueRole: "id"
                         emptyText: root.bridge.activity.busyKeys.includes("model-scan")
                             ? root.bridge.text("models.discovering_local")
                             : root.bridge.text("empty.models.title")
-                        enabled: root.models.length > 0
+                        enabled: root.filteredModels.length > 0
                     }
                 }
 
@@ -116,7 +140,9 @@ FileDialog {
                 Layout.fillWidth: true
                 visible: root.selectedModel !== null
                 text: root.selectedModel
-                    ? root.selectedModel.status
+                    ? (root.selectedModel.archived
+                        ? root.bridge.text("model.status.archived")
+                        : root.statusText(root.selectedModel.status))
                         + "  ·  " + (root.selectedModel.rvc_version || "-")
                         + "  ·  " + (root.selectedModel.sample_rate || "-") + " Hz"
                         + "  ·  " + (root.selectedModel.license_spdx || root.bridge.text("models.license_unknown"))
@@ -124,6 +150,31 @@ FileDialog {
                 color: root.theme.textMuted
                 font.family: root.theme.uiFont
                 font.pixelSize: 12
+            }
+            AppButton {
+                visible: root.selectedModel !== null && root.selectedModel.status === "ready"
+                text: root.bridge.text("models.try_in_conversion")
+                enabled: root.selectedModel !== null && !root.selectedModel.archived
+                onClicked: root.navigateRequested(1)
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                AppCheckBox {
+                    text: root.bridge.text("models.show_archived")
+                    checked: root.showArchived
+                    onToggled: root.showArchived = checked
+                }
+                Item { Layout.fillWidth: true }
+                AppButton {
+                    visible: root.selectedModel !== null
+                    enabled: root.selectedModel !== null
+                    text: root.selectedModel && root.selectedModel.archived
+                        ? root.bridge.text("action.restore")
+                        : root.bridge.text("models.archive")
+                    onClicked: root.bridge.modelCatalog.setArchived(
+                        root.selectedModel.id, !root.selectedModel.archived
+                    )
+                }
             }
         }
 
@@ -245,6 +296,12 @@ FileDialog {
             title: root.bridge.text("models.add")
         }
 
+        AppCheckBox {
+            text: root.bridge.text("models.show_advanced")
+            checked: root.showAdvancedImport
+            onToggled: root.showAdvancedImport = checked
+        }
+
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 42
@@ -300,6 +357,7 @@ FileDialog {
                 }
                 GridLayout {
                     Layout.fillWidth: true
+                    visible: root.showAdvancedImport
                     columns: 2
                     columnSpacing: 6
                     rowSpacing: 6
@@ -326,7 +384,7 @@ FileDialog {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 6
-                    AppTextField { id: urlSource; Layout.fillWidth: true; placeholderText: root.bridge.text("placeholder.source_optional") }
+                    AppTextField { id: urlSource; visible: root.showAdvancedImport; Layout.fillWidth: true; placeholderText: root.bridge.text("placeholder.source_optional") }
                     AppTextField { id: urlSize; Layout.preferredWidth: 132; placeholderText: root.bridge.text("placeholder.bytes"); validator: IntValidator { bottom: 1 } }
                 }
                 GridLayout {

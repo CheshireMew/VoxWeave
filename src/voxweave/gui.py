@@ -5,12 +5,14 @@ import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import Property, QLocale, QObject, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from .client import request_json
+from . import __version__
+from .client import ManagedServiceClient, request_json, shutdown_service
 from .config import (
     PACKAGE_ROOT,
     PORTABLE_POINTER,
@@ -45,7 +47,14 @@ class Bridge(QObject):
     statusChanged = Signal()
     languageChanged = Signal()
 
-    def __init__(self, settings: Settings, *, start_background: bool = True):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        start_background: bool = True,
+        transport: object | None = None,
+        service_client: ManagedServiceClient | None = None,
+    ):
         super().__init__()
         self.settings = settings
         self._status = "Ready"
@@ -54,8 +63,21 @@ class Bridge(QObject):
         translations_path = PACKAGE_ROOT / "resources" / "translations.json"
         self.translations = json.loads(translations_path.read_text(encoding="utf-8"))
 
-        self.requests = RequestCoordinator(settings, request_json, self._set_status, parent=self)
-        self._task_feed = TaskFeed(settings, self.requests, self)
+        self._service_client = service_client
+        self.requests = RequestCoordinator(
+            settings,
+            transport or request_json,
+            self._set_status,
+            self._operation_label,
+            self._format_error,
+            parent=self,
+        )
+        self._task_feed = TaskFeed(
+            settings,
+            self.requests,
+            self,
+            self._service_client.ensure if self._service_client is not None else None,
+        )
         self._activity = TaskActivity(self.requests, self._task_feed, self._set_status, self)
 
         def locale_context() -> tuple[str, dict[str, dict[str, str]]]:
@@ -83,7 +105,13 @@ class Bridge(QObject):
         self._batch_rules = BatchRulesViewModel(
             self.requests, self._activity, self._task_feed, self
         )
-        self._maintenance = MaintenanceViewModel(settings, self._activity, self._set_status, self)
+        self._maintenance = MaintenanceViewModel(
+            settings,
+            self._activity,
+            self._set_status,
+            self.text,
+            self,
+        )
         self._maintenance.runtimeInstallRequested.connect(self._confirm_runtime_install)
         self._maintenance.runtimeAvailable.connect(self._realtime.refreshDevices)
         self._maintenance.runtimeAvailable.connect(self._model_catalog.provision)
@@ -92,11 +120,8 @@ class Bridge(QObject):
             QTimer.singleShot(0, self._task_feed.start)
             QTimer.singleShot(0, self._batch_rules.refresh)
             QTimer.singleShot(0, self._realtime.start)
-            if getattr(sys, "frozen", False):
-                QTimer.singleShot(0, self._maintenance.ensureRuntime)
-            else:
-                QTimer.singleShot(0, self._model_catalog.discover)
-                QTimer.singleShot(0, self._maintenance.inspectRuntime)
+            QTimer.singleShot(0, self._model_catalog.discover)
+            QTimer.singleShot(0, self._maintenance.ensureRuntime)
 
     @Property(QObject, constant=True)
     def activity(self) -> TaskActivity:
@@ -126,6 +151,10 @@ class Bridge(QObject):
     def maintenance(self) -> MaintenanceViewModel:
         return self._maintenance
 
+    @Property(str, constant=True)
+    def applicationVersion(self) -> str:
+        return __version__
+
     @Property(str, notify=statusChanged)
     def status(self) -> str:
         return self._status
@@ -138,38 +167,37 @@ class Bridge(QObject):
     def _confirm_runtime_install(self) -> None:
         answer = QMessageBox.question(
             None,
-            "VoxWeave · 准备运行环境",
-            "没有检测到可以直接使用的完整 RVC 运行环境。\n\n"
-            "继续后将把 Python、RVC、FFmpeg 和必要的推理依赖下载到：\n"
-            f"{self.settings.root}\n\n"
-            "完整安装至少需要 12 GiB 可用空间，耗时取决于网络速度。\n"
-            "现在开始安装吗？",
+            self.text("setup.runtime.title"),
+            self.text("setup.runtime.detail").format(root=self.settings.root),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            self._set_status("正在准备运行环境，可在任务中心查看进度", "info")
+            self._set_status(self.text("setup.runtime.started"), "info")
             self._maintenance.installRuntime()
         else:
-            self._set_status("已取消安装；可以稍后在设置页继续", "info")
+            self._set_status(self.text("setup.runtime.cancelled"), "info")
 
     @Slot(object)
     def _confirm_starter_install(self, value: object) -> None:
         model_ids = list(value)  # type: ignore[arg-type]
         details = {
-            "community.zh-male-young": ("青年男声", 83.9),
-            "community.zh-female-senior": ("学姐女声", 177.2),
+            "community.zh-male-young": (self.text("model.name.community.zh-male-young"), 83.9),
+            "community.zh-female-senior": (
+                self.text("model.name.community.zh-female-senior"),
+                177.2,
+            ),
         }
         names = [details[model_id][0] for model_id in model_ids]
         download_size = sum(details[model_id][1] for model_id in model_ids)
         answer = QMessageBox.question(
             None,
-            "VoxWeave · 准备中文声音模型",
-            "没有检测到可以直接使用的声音模型。\n\n"
-            f"建议下载：{'、'.join(names)}\n"
-            f"下载量约 {download_size:.1f} MiB，文件保存到：\n"
-            f"{self.settings.managed_models_dir}\n\n"
-            "现在下载并安装吗？",
+            self.text("setup.models.title"),
+            self.text("setup.models.detail").format(
+                names=self.text("setup.models.separator").join(names),
+                size=download_size,
+                root=self.settings.managed_models_dir,
+            ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
@@ -212,6 +240,31 @@ class Bridge(QObject):
     def text(self, key: str) -> str:
         return self.translations.get(self._language, {}).get(key, key)
 
+    def _operation_label(self, operation: str) -> str:
+        key = f"task.operation.{operation}"
+        translated = self.text(key)
+        return operation if translated == key else translated
+
+    def _format_error(self, error_type: object, message: object) -> str:
+        code = str(error_type or "operation_failed")
+        key = f"error.{code}"
+        translated = self.text(key)
+        if translated == key:
+            translated = self.text("error.operation_failed")
+        return translated.format(message=str(message))
+
+    @Slot()
+    def copyStatus(self) -> None:
+        QApplication.clipboard().setText(self._status)
+
+    @Slot()
+    def dismissStatus(self) -> None:
+            self._set_status("Ready", "success")
+
+    @Slot()
+    def openProjectPage(self) -> None:
+        QDesktopServices.openUrl(QUrl("https://github.com/CheshireMew/VoxWeave"))
+
     def _set_status(self, value: str, kind: str = "info") -> None:
         self._status = value
         self._status_kind = kind
@@ -222,6 +275,22 @@ class Bridge(QObject):
         self._realtime.shutdown()
         self._task_feed.shutdown()
         self.requests.shutdown()
+        if self._service_client is not None:
+            try:
+                self._service_client.shutdown_if_owned()
+            except Exception:
+                pass
+
+    @Slot()
+    def stopBackgroundService(self) -> None:
+        try:
+            result = shutdown_service(self.settings)
+        except Exception as exc:  # noqa: BLE001 - desktop boundary
+            self._set_status(str(exc), "danger")
+            return
+        if result.get("state") in {"stopped", "stopping"} or result.get("ok"):
+            self._set_status(self.text("service.stopped"), "success")
+            QTimer.singleShot(0, QApplication.quit)
 
 
 def _suggested_data_location() -> str:
@@ -234,19 +303,26 @@ def _suggested_data_location() -> str:
     return str(Path.home())
 
 
+def _setup_text(key: str) -> str:
+    translations = json.loads(
+        (PACKAGE_ROOT / "resources" / "translations.json").read_text(encoding="utf-8")
+    )
+    language = "zh-CN" if QLocale.system().name().casefold().startswith("zh") else "en"
+    return translations.get(language, translations["en"]).get(key, key)
+
+
 def _select_initial_data_root() -> Path | None:
     """Fallback used only when automatic discovery cannot choose a safe volume."""
 
     QMessageBox.information(
         None,
-        "VoxWeave · 需要选择数据目录",
-        "没有找到已有 VoxWeave 环境，也没有找到可自动使用且空间充足的磁盘。\n\n"
-        "请选择一个至少有 12 GiB 可用空间的数据目录。",
+        _setup_text("setup.data.title"),
+        _setup_text("setup.data.detail"),
     )
     while True:
         selected = QFileDialog.getExistingDirectory(
             None,
-            "选择 VoxWeave 数据目录",
+            _setup_text("setup.data.choose"),
             _suggested_data_location(),
             QFileDialog.Option.ShowDirsOnly,
         )
@@ -260,9 +336,8 @@ def _select_initial_data_root() -> Path | None:
         if free < MINIMUM_INITIAL_FREE_BYTES:
             QMessageBox.warning(
                 None,
-                "VoxWeave · 空间不足",
-                f"这个目录只有 {free / 1024**3:.1f} GiB 可用空间，"
-                "首次安装至少需要 12 GiB。请换一个目录。",
+                _setup_text("setup.data.space_title"),
+                _setup_text("setup.data.space_detail").format(free=free / 1024**3),
             )
             continue
         return target
@@ -305,8 +380,8 @@ def _initialize_application() -> bool:
         except OSError as exc:
             QMessageBox.warning(
                 None,
-                "VoxWeave · 自动检测未保存",
-                f"已使用数据目录 {target}，但无法保存检测到的运行组件：\n{exc}",
+                _setup_text("setup.detect_failed.title"),
+                _setup_text("setup.detect_failed.detail").format(target=target, error=exc),
             )
         return True
     setup = plan_initial_setup(
@@ -333,8 +408,8 @@ def _initialize_application() -> bool:
     except OSError as exc:
         QMessageBox.critical(
             None,
-            "VoxWeave · 无法创建数据目录",
-            f"无法使用 {target}：\n{exc}",
+            _setup_text("setup.data.create_failed_title"),
+            _setup_text("setup.data.create_failed_detail").format(target=target, error=exc),
         )
         return False
     return True
@@ -350,7 +425,12 @@ def main() -> int:
     settings = load_settings()
     configure_process_environment(settings)
     engine = QQmlApplicationEngine()
-    bridge = Bridge(settings)
+    service_client = ManagedServiceClient(settings)
+    bridge = Bridge(
+        settings,
+        transport=service_client.request,
+        service_client=service_client,
+    )
     engine.setInitialProperties({"bridge": bridge})
     engine.load(QUrl.fromLocalFile(str(PACKAGE_ROOT / "qml" / "Main.qml")))
     if not engine.rootObjects():

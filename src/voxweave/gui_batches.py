@@ -46,9 +46,7 @@ class BatchRulesViewModel(QObject):
         )
 
     @Slot(str, str, str, bool)
-    def create(
-        self, input_root: str, output_root: str, model: str, watch: bool
-    ) -> None:
+    def create(self, input_root: str, output_root: str, model: str, watch: bool) -> None:
         def created(result: dict[str, Any]) -> None:
             self.refresh()
             if not watch:
@@ -70,6 +68,42 @@ class BatchRulesViewModel(QObject):
                 "watch": watch,
             },
             created,
+        )
+
+    @Slot("QVariantMap")
+    def saveRule(self, value: dict[str, Any]) -> None:
+        payload = dict(value)
+        batch_id = str(payload.pop("batch_id", "") or "")
+        watch = bool(payload.get("watch", False))
+        payload["input_root"] = local_path(str(payload["input_root"]))
+        payload["output_root"] = local_path(str(payload["output_root"]))
+        payload.setdefault("preset_name", "custom")
+        payload.setdefault("recursive", True)
+
+        def saved(result: dict[str, Any]) -> None:
+            self.refresh()
+            if not batch_id and not watch:
+                self.activity.submit(
+                    "batch.run",
+                    {"batch_id": result["id"]},
+                    action_key=f"batch-run:{result['id']}",
+                )
+
+        if batch_id:
+            payload["batch_id"] = batch_id
+        self.requests.submit(
+            "batch.update" if batch_id else "batch.create",
+            payload,
+            saved,
+        )
+
+    @Slot(str, bool)
+    def setArchived(self, batch_id: str, archived: bool) -> None:
+        self.requests.submit(
+            "batch.archive",
+            {"batch_id": batch_id, "archived": archived},
+            lambda _result: self.refresh(),
+            request_key=f"batch-archive:{batch_id}",
         )
 
     @Slot(str)

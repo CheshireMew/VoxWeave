@@ -11,6 +11,8 @@ Item {
     required property var theme
     property var readyModels: []
     property var session: ({"state": "idle", "stage": "idle", "metrics": {}})
+    property bool pageActive: false
+    signal navigateRequested(int index)
     readonly property var worker: session.worker || ({"state": "not_started", "model_ready": false})
     readonly property var metrics: session.metrics || ({})
     readonly property bool active: ["starting", "running", "stopping"].indexOf(session.state) >= 0
@@ -123,7 +125,8 @@ Item {
 
     function prewarmSelectedModel() {
         var route = root.bridge.realtime.audioRoute || ({})
-        if (root.active || realtimeModel.currentIndex < 0 || !Boolean(route.ready))
+        if (!root.pageActive || !root.bridge.maintenance.runtimeReady
+                || root.active || realtimeModel.currentIndex < 0 || !Boolean(route.ready))
             return
         root.bridge.realtime.prepareModel(
             String(realtimeModel.currentValue),
@@ -155,12 +158,23 @@ Item {
     }
 
     onReadyModelsChanged: Qt.callLater(restoreModel)
+    onPageActiveChanged: {
+        if (root.pageActive) prewarmTimer.restart()
+        else if (!root.active) root.bridge.realtime.releaseModel()
+    }
     Component.onCompleted: Qt.callLater(restoreControls)
 
     Connections {
         target: root.bridge.realtime
         function onPreferencesChanged() { Qt.callLater(root.restoreControls) }
         function onAudioRouteChanged() { prewarmTimer.restart() }
+    }
+    Connections {
+        target: root.bridge.maintenance
+        function onRuntimeChanged() {
+            if (root.pageActive && root.bridge.maintenance.runtimeReady)
+                prewarmTimer.restart()
+        }
     }
 
     Timer {
@@ -244,6 +258,20 @@ Item {
                 font.family: root.theme.uiFont
                 font.pixelSize: 11
                 wrapMode: Text.Wrap
+            }
+
+            AppButton {
+                Layout.fillWidth: true
+                visible: root.disabledReason().length > 0 && !root.active
+                text: !root.bridge.maintenance.runtimeReady
+                    ? root.bridge.text("realtime.disabled.action.runtime")
+                    : (realtimeModel.count <= 0 || realtimeModel.currentIndex < 0)
+                    ? root.bridge.text("realtime.disabled.action.model")
+                    : root.bridge.text("realtime.disabled.action.audio")
+                onClicked: root.navigateRequested(
+                    !root.bridge.maintenance.runtimeReady ? 5
+                    : (realtimeModel.count <= 0 || realtimeModel.currentIndex < 0) ? 2 : 5
+                )
             }
 
             AppCheckBox {

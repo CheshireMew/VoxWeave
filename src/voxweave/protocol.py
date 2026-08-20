@@ -124,6 +124,11 @@ class ModelResolveCommand(Command):
     voice: NonEmpty
 
 
+class ModelArchiveCommand(Command):
+    model_id: NonEmpty
+    archived: bool = True
+
+
 class ModelRecommendedParameters(Command):
     pitch: int = Field(ge=-36, le=36)
     f0: Literal["rmvpe", "fcpe", "pm"]
@@ -220,6 +225,12 @@ class RealtimeStartCommand(Command):
     test_mode: bool = False
 
 
+class RealtimeAudioTestCommand(Command):
+    mode: Literal["input", "output"]
+    device: int = Field(ge=0)
+    duration_seconds: float = Field(default=2.0, ge=0.5, le=5.0)
+
+
 class ConversionPreviewCommand(Command):
     input: AbsolutePath
     input_sha256: Sha256 | None = None
@@ -273,6 +284,15 @@ class BatchCreateCommand(Command):
     recursive: bool = True
     watch: bool = False
     extensions: list[Extension] = Field(default_factory=list)
+
+
+class BatchUpdateCommand(BatchCreateCommand):
+    batch_id: NonEmpty
+
+
+class BatchArchiveCommand(Command):
+    batch_id: NonEmpty
+    archived: bool = True
 
 
 class BatchIdCommand(Command):
@@ -385,6 +405,7 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
     "model.list": OperationSpec(EmptyCommand, result=ModelList),
     "model.catalog.list": OperationSpec(EmptyCommand, result=ObjectList),
     "model.resolve": OperationSpec(ModelResolveCommand, result=ModelRecord),
+    "model.archive": OperationSpec(ModelArchiveCommand, result=ModelRecord),
     "model.import": OperationSpec(ModelImportCommand, True, ModelRecord),
     "model.catalog.install": OperationSpec(ModelCatalogInstallCommand, True, ModelRecord),
     "preset.list": OperationSpec(PresetListCommand, result=ObjectList),
@@ -392,13 +413,17 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
     "media.inspect": OperationSpec(MediaInspectCommand, True),
     "media.analyze": OperationSpec(MediaAnalyzeCommand, True),
     "realtime.devices": OperationSpec(EmptyCommand),
+    "realtime.audio_test": OperationSpec(RealtimeAudioTestCommand),
     "realtime.prepare": OperationSpec(RealtimeStartCommand),
     "realtime.start": OperationSpec(RealtimeStartCommand),
     "realtime.status": OperationSpec(EmptyCommand),
     "realtime.stop": OperationSpec(EmptyCommand),
+    "realtime.release": OperationSpec(EmptyCommand),
     "conversion.preview": OperationSpec(ConversionPreviewCommand, True),
     "conversion.run": OperationSpec(ConversionRunCommand, True),
     "batch.create": OperationSpec(BatchCreateCommand, result=BatchRecord),
+    "batch.update": OperationSpec(BatchUpdateCommand, result=BatchRecord),
+    "batch.archive": OperationSpec(BatchArchiveCommand, result=BatchRecord),
     "batch.get": OperationSpec(BatchIdCommand, result=BatchRecord),
     "batch.list": OperationSpec(BatchListCommand, result=BatchPage),
     "batch.run": OperationSpec(BatchIdCommand, True),

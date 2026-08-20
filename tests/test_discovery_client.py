@@ -81,3 +81,32 @@ def test_frozen_service_uses_the_desktop_executable(monkeypatch) -> None:
         r"C:\Apps\VoxWeave\VoxWeave.exe",
         "--voxweave-service",
     ]
+
+
+def test_managed_gui_client_only_stops_a_service_it_started(tmp_path, monkeypatch) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    discovery = Discovery(
+        pid=os.getpid(),
+        port=12345,
+        token="token",
+        protocol=PROTOCOL,
+        protocol_version=PROTOCOL_VERSION,
+        created_at=1.0,
+    )
+    stopped = []
+    monkeypatch.setattr(client, "ensure_service_with_state", lambda _settings: (discovery, True))
+    monkeypatch.setattr(
+        client, "shutdown_service", lambda _settings: stopped.append(True) or {"ok": True}
+    )
+
+    managed = client.ManagedServiceClient(settings)
+    assert managed.ensure() is discovery
+    assert managed.started_service is True
+    managed.shutdown_if_owned()
+    assert stopped == [True]
+
+    monkeypatch.setattr(client, "ensure_service_with_state", lambda _settings: (discovery, False))
+    external = client.ManagedServiceClient(settings)
+    assert external.ensure() is discovery
+    external.shutdown_if_owned()
+    assert stopped == [True]

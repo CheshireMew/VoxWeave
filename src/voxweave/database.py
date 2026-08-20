@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 MODEL_RECOMMENDATION_DEFAULTS = {
     "pitch": 0,
@@ -71,9 +71,7 @@ class Database:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
-            stored = db.execute(
-                "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()
+            stored = db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
             version = int(stored["value"]) if stored else 0
             if version > SCHEMA_VERSION:
                 raise RuntimeError(
@@ -103,6 +101,7 @@ class Database:
                     10: self._migrate_to_10,
                     11: self._migrate_to_11,
                     12: self._migrate_to_12,
+                    13: self._migrate_to_13,
                 }
                 while version < SCHEMA_VERSION:
                     target = version + 1
@@ -156,6 +155,7 @@ class Database:
                     source_url TEXT,
                     recommended_json TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0,
                     imported_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS presets (
@@ -461,16 +461,25 @@ class Database:
                 db.execute(
                     "INSERT INTO batch_rules VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        row["id"],row["input_root"],row["output_root"],model_id,
-                        model_sha256,index_sha256,row["preset_json"],row["preset_name"],
+                        row["id"],
+                        row["input_root"],
+                        row["output_root"],
+                        model_id,
+                        model_sha256,
+                        index_sha256,
+                        row["preset_json"],
+                        row["preset_name"],
                         row["recursive"],
-                        row["watch_enabled"],row["extensions_json"],row["last_error"],
-                        row["last_error_at"],state,row["created_at"],row["updated_at"],
+                        row["watch_enabled"],
+                        row["extensions_json"],
+                        row["last_error"],
+                        row["last_error_at"],
+                        state,
+                        row["created_at"],
+                        row["updated_at"],
                     ),
                 )
-            db.execute(
-                "INSERT INTO batch_items SELECT * FROM batch_items_v7"
-            )
+            db.execute("INSERT INTO batch_items SELECT * FROM batch_items_v7")
             db.execute("DROP TABLE batch_items_v7")
             db.execute("DROP TABLE batch_rules_v7")
         else:
@@ -520,9 +529,13 @@ class Database:
             )
 
     @classmethod
+    def _migrate_to_13(cls, db: sqlite3.Connection) -> None:
+        cls._add_column(db, "models", "archived INTEGER NOT NULL DEFAULT 0")
+
+    @classmethod
     def _validate_schema(cls, db: sqlite3.Connection) -> None:
         required = {
-            "models": {"id", "model_sha256", "status"},
+            "models": {"id", "model_sha256", "status", "archived"},
             "tasks": {
                 "id",
                 "state",
@@ -577,7 +590,5 @@ class Database:
             if field not in result:
                 continue
             value = result.pop(field)
-            result[field.removesuffix("_json")] = (
-                json.loads(value) if value is not None else None
-            )
+            result[field.removesuffix("_json")] = json.loads(value) if value is not None else None
         return result

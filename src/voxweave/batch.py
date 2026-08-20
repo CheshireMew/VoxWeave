@@ -91,6 +91,41 @@ class BatchManager:
         )
         return self.get(batch_id)
 
+    def update(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        batch_id = arguments["batch_id"]
+        self.get(batch_id)
+        input_root = Path(arguments["input_root"]).expanduser().resolve()
+        output_root = Path(arguments["output_root"]).expanduser().resolve()
+        if not input_root.is_dir():
+            raise NotADirectoryError(input_root)
+        if output_root == input_root or input_root in output_root.parents:
+            raise ValueError("output_root cannot be the input directory or a child of it")
+        output_root.mkdir(parents=True, exist_ok=True)
+        model = self.resolve_model(arguments["model"])
+        self.repository.update_rule(
+            batch_id,
+            (
+                str(input_root),
+                str(output_root),
+                model["id"],
+                model["model_sha256"],
+                model["index_sha256"],
+                json.dumps(arguments.get("preset") or {}, ensure_ascii=False),
+                _slug(arguments.get("preset_name") or "default"),
+                int(bool(arguments.get("recursive", True))),
+                int(bool(arguments.get("watch", False))),
+                json.dumps(arguments.get("extensions") or DEFAULT_EXTENSIONS),
+                utc_now(),
+            ),
+        )
+        return self.get(batch_id)
+
+    def archive(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        batch_id = arguments["batch_id"]
+        self.get(batch_id)
+        self.repository.set_archived(batch_id, bool(arguments.get("archived", True)))
+        return self.get(batch_id)
+
     def get(self, batch_id: str) -> dict[str, Any]:
         return self.repository.get(batch_id)
 
@@ -143,9 +178,7 @@ class BatchManager:
             else ".wav"
         )
         source_type = source.suffix.casefold().removeprefix(".")
-        name = (
-            f"{source.stem}_{source_type}_{model_slug}_{preset_slug}_{source_hash[:12]}{suffix}"
-        )
+        name = f"{source.stem}_{source_type}_{model_slug}_{preset_slug}_{source_hash[:12]}{suffix}"
         return Path(rule["output_root"]) / relative.parent / name
 
     def _submit_file(self, rule: dict[str, Any], source: Path) -> dict[str, Any]:
@@ -173,9 +206,7 @@ class BatchManager:
             }
             created = False
             with self.database.connect() as db:
-                existing = self.repository.find_item(
-                    db, rule["id"], str(source), source_hash
-                )
+                existing = self.repository.find_item(db, rule["id"], str(source), source_hash)
                 if existing and existing["task_id"]:
                     existing_dict = dict(existing)
                     task = self.tasks.get(existing_dict["task_id"])
@@ -184,8 +215,16 @@ class BatchManager:
                     self.repository.insert_item(
                         db,
                         (
-                            item_id,rule["id"],str(source),after.st_size,after.st_mtime_ns,
-                            source_hash,str(output),"submitting",now,now,
+                            item_id,
+                            rule["id"],
+                            str(source),
+                            after.st_size,
+                            after.st_mtime_ns,
+                            source_hash,
+                            str(output),
+                            "submitting",
+                            now,
+                            now,
                         ),
                     )
                 else:
@@ -288,9 +327,7 @@ class BatchManager:
         items = self.repository.pending_items()
         for item in items:
             task = self.tasks.get(item["task_id"])
-            self.repository.update_item_state(
-                item["id"], task["state"], task.get("error")
-            )
+            self.repository.update_item_state(item["id"], task["state"], task.get("error"))
 
     def _sync_runs(self) -> None:
         runs = self.repository.active_runs()

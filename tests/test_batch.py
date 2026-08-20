@@ -95,6 +95,47 @@ def test_batch_identity_uses_content_hash_even_when_metadata_is_unchanged(tmp_pa
     tasks.shutdown()
 
 
+def test_batch_rule_can_be_edited_archived_and_restored_without_deleting_it(tmp_path) -> None:
+    _database, tasks, batch = _managers(tmp_path)
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    rule = batch.create(
+        {
+            "input_root": str(input_root),
+            "output_root": str(output_root),
+            "model": "model.example",
+            "preset": {"pitch": 0, "content_mode": "clean"},
+            "preset_name": "original",
+            "watch": False,
+        }
+    )
+
+    updated = batch.update(
+        {
+            "batch_id": rule["id"],
+            "input_root": str(input_root),
+            "output_root": str(output_root),
+            "model": "model.example",
+            "preset": {"pitch": 4, "content_mode": "mixed"},
+            "preset_name": "edited",
+            "watch": True,
+        }
+    )
+    assert updated["preset"] == {"pitch": 4, "content_mode": "mixed"}
+    assert updated["preset_name"] == "edited"
+    assert updated["watch_enabled"] is True
+
+    archived = batch.archive({"batch_id": rule["id"], "archived": True})
+    assert archived["state"] == "archived"
+    assert archived["watch_enabled"] is False
+    assert batch.get(rule["id"])["id"] == rule["id"]
+    restored = batch.archive({"batch_id": rule["id"], "archived": False})
+    assert restored["state"] == "active"
+    batch.shutdown()
+    tasks.shutdown()
+
+
 def test_watcher_records_rule_errors_without_stopping(tmp_path) -> None:
     database, tasks, batch = _managers(tmp_path)
     input_root = tmp_path / "input"
@@ -110,9 +151,7 @@ def test_watcher_records_rule_errors_without_stopping(tmp_path) -> None:
             "watch": True,
         }
     )
-    database.execute(
-        "UPDATE batch_rules SET extensions_json='not-json' WHERE id=?", (rule["id"],)
-    )
+    database.execute("UPDATE batch_rules SET extensions_json='not-json' WHERE id=?", (rule["id"],))
     deadline = time.monotonic() + 5
     stored = None
     while time.monotonic() < deadline:
@@ -184,9 +223,7 @@ def test_partial_batch_submission_is_visible_on_parent_task(tmp_path, monkeypatc
     assert failed["state"] == "failed"
     assert failed["error_type"] == "batch_run_failed"
     assert failed["result"]["counts"] == {"completed": 1}
-    assert failed["result"]["submission_failures"][0]["source_path"].endswith(
-        "bad.wav"
-    )
+    assert failed["result"]["submission_failures"][0]["source_path"].endswith("bad.wav")
     batch.shutdown()
     tasks.shutdown()
 
@@ -209,9 +246,7 @@ def test_deferred_batch_parent_recovers_after_service_restart(tmp_path) -> None:
     deadline = time.monotonic() + 2
     child = None
     while time.monotonic() < deadline:
-        item = database.fetch_one(
-            "SELECT task_id FROM batch_items WHERE batch_id=?", (rule["id"],)
-        )
+        item = database.fetch_one("SELECT task_id FROM batch_items WHERE batch_id=?", (rule["id"],))
         if item and item["task_id"]:
             child = _wait_completed(tasks, item["task_id"])
             break
@@ -255,17 +290,13 @@ def test_batch_retry_reuses_failed_item_and_completes_parent(tmp_path) -> None:
     )
     first = tasks.submit("batch.run", {"batch_id": rule["id"]})
     assert _wait_completed(tasks, first["id"])["state"] == "failed"
-    failed_item = database.fetch_one(
-        "SELECT * FROM batch_items WHERE batch_id=?", (rule["id"],)
-    )
+    failed_item = database.fetch_one("SELECT * FROM batch_items WHERE batch_id=?", (rule["id"],))
     assert failed_item and failed_item["state"] == "failed"
     retry = tasks.submit("batch.retry", {"batch_id": rule["id"]})
     completed = _wait_completed(tasks, retry["id"])
     assert completed["state"] == "completed"
     assert completed["result"]["counts"] == {"completed": 1}
-    refreshed = database.fetch_one(
-        "SELECT * FROM batch_items WHERE id=?", (failed_item["id"],)
-    )
+    refreshed = database.fetch_one("SELECT * FROM batch_items WHERE id=?", (failed_item["id"],))
     assert refreshed and refreshed["state"] == "completed"
     assert refreshed["task_id"] != failed_item["task_id"]
     assert Path(refreshed["output_path"]).read_bytes() == b"voice"

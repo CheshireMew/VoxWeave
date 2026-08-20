@@ -10,7 +10,7 @@ def test_describe_is_complete_and_stable() -> None:
     assert payload["protocol"] == "voxweave-control"
     assert payload["version"] == 1
     assert set(payload["operations"]) == set(OPERATION_SPECS)
-    assert len(payload["operations"]) == 33
+    assert len(payload["operations"]) == 38
     assert payload["operations"]["conversion.run"]["arguments_schema"]["type"] == "object"
 
 
@@ -25,15 +25,18 @@ def test_realtime_requires_valid_devices_and_latency() -> None:
         },
     )
     assert parsed["test_mode"] is True
-    assert parse_arguments(
-        "realtime.prepare",
-        {
-            "model": "voice",
-            "input_device": 1,
-            "output_device": 2,
-            "test_mode": True,
-        },
-    ) == parsed
+    assert (
+        parse_arguments(
+            "realtime.prepare",
+            {
+                "model": "voice",
+                "input_device": 1,
+                "output_device": 2,
+                "test_mode": True,
+            },
+        )
+        == parsed
+    )
 
     with pytest.raises(ValueError, match="input_device"):
         parse_arguments(
@@ -87,17 +90,13 @@ def test_settings_update_accepts_one_complete_realtime_profile() -> None:
         "block_seconds": 0.5,
         "test_mode": True,
     }
-    assert parse_arguments("settings.update", {"realtime": realtime}) == {
-        "realtime": realtime
-    }
+    assert parse_arguments("settings.update", {"realtime": realtime}) == {"realtime": realtime}
     with pytest.raises(ValueError, match="at least one setting"):
         parse_arguments("settings.update", {})
     with pytest.raises(ValueError, match="pitch"):
         parse_arguments("settings.update", {"realtime": {**realtime, "pitch": 50}})
     with pytest.raises(ValueError, match="input_gate_db"):
-        parse_arguments(
-            "settings.update", {"realtime": {**realtime, "input_gate_db": -10}}
-        )
+        parse_arguments("settings.update", {"realtime": {**realtime, "input_gate_db": -10}})
 
 
 def test_conversion_requires_absolute_paths() -> None:

@@ -63,6 +63,24 @@ class RvcEngine:
         ]
         return self._run_worker(command, entry, None)
 
+    def audio_test(self, mode: str, device: int, duration_seconds: float) -> dict[str, Any]:
+        python, entry = self._runtime()
+        command = [
+            str(python),
+            "-B",
+            str(entry),
+            "--rvc-root",
+            str(Path(self.settings.rvc_root).resolve()),
+            "audio-test",
+            "--mode",
+            mode,
+            "--device",
+            str(device),
+            "--duration-seconds",
+            str(duration_seconds),
+        ]
+        return self._run_worker(command, entry, None)
+
     def realtime_worker_command(self) -> tuple[list[str], Path]:
         python, entry = self._runtime()
         command = [

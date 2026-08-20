@@ -44,3 +44,21 @@ def test_completed_preview_selects_generated_audio_and_requests_playback(tmp_pat
     assert media.resultAudio.endswith("preview.wav")
     assert media.previewOutputs[0]["output_path"] == str(output)
     assert playback_requests == [True]
+
+
+def test_conversion_paths_are_suggested_and_validated_before_submission(tmp_path) -> None:
+    _app = QGuiApplication.instance() or QGuiApplication([])
+    source = tmp_path / "voice.wav"
+    source.write_bytes(b"RIFF")
+    feed = TaskFeedStub()
+    media = MediaViewModel(None, None, feed)  # type: ignore[arg-type]
+
+    suggested = media.suggestOutput(str(source))
+    assert suggested.endswith("voice-voxweave.wav")
+    assert media.validateConversion(str(source), suggested)["valid"] is True
+
+    output = tmp_path / "voice-voxweave.wav"
+    output.write_bytes(b"existing")
+    validation = media.validateConversion(str(source), str(output))
+    assert validation["code"] == "output_exists"
+    assert validation["suggestion"].endswith("voice-voxweave-2.wav")

@@ -126,6 +126,7 @@ def test_incomplete_runtime_waits_for_confirmation_before_install(tmp_path) -> N
 
 def test_verified_runtime_skips_repeated_startup_inspection(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("voxweave.config.SOURCE_ROOT", tmp_path / "app")
+
     class ImmediateActivity:
         def __init__(self) -> None:
             self.submissions = []
@@ -307,7 +308,7 @@ def test_main_qml_loads(tmp_path) -> None:
     engine.load(QUrl.fromLocalFile(str(qml)))
     assert engine.rootObjects()
     root = engine.rootObjects()[0]
-    assert root.flags() & Qt.WindowType.FramelessWindowHint
+    assert not root.flags() & Qt.WindowType.FramelessWindowHint
     for object_name in [
         "windowTitleBar",
         "minimizeButton",
@@ -319,9 +320,9 @@ def test_main_qml_loads(tmp_path) -> None:
     assert stack is not None
     sidebar = root.findChild(QObject, "appSidebar")
     assert sidebar is not None
-    assert root.width() == 560
+    assert root.width() == 960
     assert root.minimumWidth() == 540
-    assert sidebar.property("width") == 64.0
+    assert sidebar.property("width") == 156.0
     assert root.property("currentPage") == 0
     assert root.findChild(QObject, "navButton0").property("iconName") == "realtime"
     assert root.findChild(QObject, "navButton1").property("iconName") == "convert"
@@ -546,6 +547,8 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(tmp_path, mo
 
         monkeypatch.setattr(gui_module, "request_json", request_json)
         bridge = Bridge(settings, start_background=False)
+        bridge.maintenance._runtime = {"ready": True}
+        bridge.maintenance.runtimeChanged.emit()
         engine = QQmlApplicationEngine()
         engine.setInitialProperties({"bridge": bridge})
         qml = Path(__file__).parents[1] / "src" / "voxweave" / "qml" / "Main.qml"
@@ -792,7 +795,7 @@ def test_task_projection_exposes_safe_error_and_result_actions(tmp_path) -> None
         },
     ]
     projected = bridge.taskList.items
-    assert projected[0]["error_summary"] == "Readable failure"
+    assert projected[0]["error_summary"] == "操作失败：Readable failure"
     assert "Traceback" not in projected[0]["error_summary"]
     assert projected[1]["result_path"].endswith("output.wav")
     bridge.shutdown()

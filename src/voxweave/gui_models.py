@@ -61,9 +61,7 @@ class ModelCatalogViewModel(QObject):
     def _request_catalog(self) -> None:
         def update(result: list[dict[str, Any]]) -> None:
             self._catalog_items = result
-            installed = {
-                str(entry["id"]) for entry in result if bool(entry.get("installed"))
-            }
+            installed = {str(entry["id"]) for entry in result if bool(entry.get("installed"))}
             for model_id in installed:
                 self._catalog_downloads.pop(model_id, None)
             self.catalogItemsChanged.emit()
@@ -148,7 +146,14 @@ class ModelCatalogViewModel(QObject):
 
         def update(result: list[dict[str, Any]]) -> None:
             self._set_items(result)
-            ready = [item for item in result if item.get("status") == "ready"]
+            ready = [
+                item
+                for item in result
+                if item.get("status") == "ready" and not item.get("archived")
+            ]
+            if not ready and any(item.get("archived") for item in result):
+                self._finish_provisioning()
+                return
             installed_starters = {
                 str(item["id"]) for item in ready if item.get("id") in STARTER_MODEL_IDS
             }
@@ -232,6 +237,15 @@ class ModelCatalogViewModel(QObject):
             "model.catalog.install",
             {"model_id": model_id},
             action_key=f"catalog-model:{model_id}",
+        )
+
+    @Slot(str, bool)
+    def setArchived(self, model_id: str, archived: bool) -> None:
+        self.requests.submit(
+            "model.archive",
+            {"model_id": model_id, "archived": archived},
+            lambda _result: self.refresh(),
+            request_key=f"model-archive:{model_id}",
         )
 
     @Slot()

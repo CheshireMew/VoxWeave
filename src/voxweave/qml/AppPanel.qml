@@ -7,6 +7,7 @@ Rectangle {
     default property alias contentData: contentLayout.data
     property int padding: theme.panelPadding
     property int contentSpacing: 9
+    property Component overlay: null
 
     Theme { id: theme }
 
@@ -22,5 +23,11 @@ Rectangle {
         anchors.fill: parent
         anchors.margins: panel.padding
         spacing: panel.contentSpacing
+    }
+
+    Loader {
+        anchors.fill: parent
+        z: 100
+        sourceComponent: panel.overlay
     }
 }

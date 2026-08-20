@@ -8,6 +8,7 @@ from voxweave.model_catalog import ModelCatalogClient
 from voxweave.model_importer import ModelImporter
 from voxweave.model_inspector import ModelInspector
 from voxweave.model_registry import ModelConflictError, ModelRegistry
+from voxweave.protocol import OperationError
 
 
 def _arguments(model_id: str) -> dict[str, object]:
@@ -50,6 +51,29 @@ def test_managed_model_publish_registers_the_published_file(tmp_path) -> None:
     assert result["model_path"] == str(published.resolve())
     assert published.read_bytes() == b"published-model"
     assert not staging.exists()
+
+
+def test_model_registration_can_be_archived_without_deleting_model_files(tmp_path) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    settings.ensure_layout()
+    registry, _importer = _services(settings)
+    model_path = tmp_path / "voice.pth"
+    model_path.write_bytes(b"model")
+    registered = registry.register(
+        model_path,
+        model_id="local.voice",
+        display_name="Voice",
+        inspection={"status": "ready"},
+    )
+
+    archived = registry.set_archived(registered["id"], True)
+
+    assert archived["archived"] is True
+    assert model_path.is_file()
+    with pytest.raises(OperationError, match="archived"):
+        registry.resolve_for_execution(registered["id"])
+    assert registry.set_archived(registered["id"], False)["archived"] is False
+    assert registry.resolve_for_execution(registered["id"])["id"] == registered["id"]
 
 
 def test_managed_model_publish_archives_files_when_registration_conflicts(tmp_path) -> None:
@@ -116,11 +140,7 @@ def test_failed_url_download_archives_partial_staging(tmp_path, monkeypatch) -> 
         )
 
     assert not (settings.downloads_dir / "model-import" / "download-task").exists()
-    failures = list(
-        (settings.root / "model-import-failed").glob(
-            "managed.partial-download-task-*"
-        )
-    )
+    failures = list((settings.root / "model-import-failed").glob("managed.partial-download-task-*"))
     assert len(failures) == 1
     assert (failures[0] / "model.pth").read_bytes() == b"partial-download"
     assert registry.list_models() == []

@@ -74,6 +74,24 @@ def test_v11_database_updates_bundled_voice_recommendations(tmp_path) -> None:
     }
 
 
+def test_v12_database_adds_non_destructive_model_archive_state(tmp_path) -> None:
+    path = tmp_path / "v12.sqlite3"
+    database = Database(path)
+    registry = ModelRegistry(database)
+    model_path = tmp_path / "voice.pth"
+    model_path.write_bytes(b"voice")
+    model = registry.register(model_path, inspection={"status": "ready"})
+    database.execute("ALTER TABLE models DROP COLUMN archived")
+    database.execute(
+        "UPDATE metadata SET value='12' WHERE key='schema_version'"
+    )
+
+    migrated = ModelRegistry(Database(path)).resolve(model["id"])
+
+    assert migrated["archived"] is False
+    assert model_path.is_file()
+
+
 def test_v7_batch_selector_migrates_once_to_locked_model_revision(tmp_path) -> None:
     path = tmp_path / "v7.sqlite3"
     Database(path)

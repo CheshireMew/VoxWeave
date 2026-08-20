@@ -6,6 +6,7 @@ Basic.Button {
 
     property string iconName: "convert"
     property bool selected: false
+    property bool showLabel: false
 
     Theme { id: theme }
 
@@ -13,12 +14,28 @@ Basic.Button {
     focusPolicy: Qt.StrongFocus
     implicitHeight: 44
     implicitWidth: 44
-    leftPadding: 0
-    rightPadding: 0
+    leftPadding: control.showLabel ? 12 : 0
+    rightPadding: control.showLabel ? 10 : 0
 
-    contentItem: NavIcon {
-        kind: control.iconName
-        color: control.selected ? theme.accent : (control.hovered ? theme.text : theme.textMuted)
+    contentItem: Row {
+        spacing: 10
+        NavIcon {
+            width: 24
+            height: 24
+            anchors.verticalCenter: parent.verticalCenter
+            kind: control.iconName
+            color: control.selected ? theme.accent : (control.hovered ? theme.text : theme.textMuted)
+        }
+        Basic.Label {
+            anchors.verticalCenter: parent.verticalCenter
+            visible: control.showLabel
+            text: control.text
+            color: control.selected ? theme.text : theme.textMuted
+            font.family: theme.uiFont
+            font.pixelSize: 12
+            elide: Text.ElideRight
+            width: control.showLabel ? Math.max(0, control.width - 58) : 0
+        }
     }
 
     background: Rectangle {

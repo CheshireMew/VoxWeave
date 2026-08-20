@@ -44,6 +44,12 @@ class TaskActivity(QObject):
         if before != self._busy:
             self.busyChanged.emit()
 
+    def _task_error(self, task: dict[str, Any]) -> str:
+        return self.requests.error_formatter(
+            task.get("error_type"),
+            task_error_summary(task) or f"task {task.get('state', 'failed')}",
+        )
+
     def submit(
         self,
         operation: str,
@@ -94,6 +100,6 @@ class TaskActivity(QObject):
             if state == "completed" and callback:
                 callback(task.get("result"))
             elif state != "completed" and failure_callback:
-                failure_callback(task_error_summary(task) or f"task {state}")
+                failure_callback(self._task_error(task))
         if state == "failed" and completion:
-            self.status_callback(task_error_summary(task) or "task failed", "danger")
+            self.status_callback(self._task_error(task), "danger")

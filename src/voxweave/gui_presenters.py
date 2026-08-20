@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -28,9 +29,7 @@ def localized_task_title(
 ) -> str:
     table = translations.get(language, translations["en"])
     operation = str(task.get("operation") or "")
-    label = table.get(f"task.operation.{operation}") or table.get(
-        "task.operation.default", "Task"
-    )
+    label = table.get(f"task.operation.{operation}") or table.get("task.operation.default", "Task")
     arguments = task.get("arguments") or {}
     subject = ""
     if operation in {"model.import", "model.catalog.install"}:
@@ -62,3 +61,28 @@ def task_result_path(task: dict[str, Any]) -> str:
     if isinstance(outputs, list) and outputs and isinstance(outputs[0], dict):
         return str(outputs[0].get("output_path") or "")
     return ""
+
+
+def localized_task_stage(
+    task: dict[str, Any], language: str, translations: dict[str, dict[str, str]]
+) -> str:
+    table = translations.get(language, translations["en"])
+    stage = str(task.get("stage") or task.get("state") or "")
+    return (
+        table.get(f"task.stage.{stage}")
+        or table.get(f"task.state.{stage}")
+        or stage.replace("_", " ")
+    )
+
+
+def localized_timestamp(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.astimezone()
+        return timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return raw.replace("T", " ")[:19]

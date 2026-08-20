@@ -6,13 +6,19 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Property, QObject, QTimer, QUrl, QUrlQuery, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWebSockets import QWebSocket
 
 from .client import ensure_service
 from .config import Settings
 from .discovery import Discovery
-from .gui_presenters import localized_task_title, task_error_summary, task_result_path
+from .gui_presenters import (
+    localized_task_stage,
+    localized_task_title,
+    localized_timestamp,
+    task_error_summary,
+    task_result_path,
+)
 from .gui_requests import RequestCoordinator
 from .gui_support import local_path
 
@@ -22,9 +28,15 @@ class TaskEventStream(QObject):
     connectionReady = Signal(object)
     connectionFailed = Signal(str)
 
-    def __init__(self, settings: Settings, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        parent: QObject | None = None,
+        discovery_provider: Any = None,
+    ) -> None:
         super().__init__(parent)
         self.settings = settings
+        self.discovery_provider = discovery_provider or (lambda: ensure_service(settings))
         self.socket = QWebSocket(parent=self)
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="voxweave-events")
         self.reconnect = QTimer(self)
@@ -54,7 +66,7 @@ class TaskEventStream(QObject):
 
         def work() -> None:
             try:
-                discovery = ensure_service(self.settings)
+                discovery = self.discovery_provider()
             except Exception as error:  # noqa: BLE001 - event transport boundary
                 self.connectionFailed.emit(str(error))
             else:
@@ -110,13 +122,14 @@ class TaskFeed(QObject):
         settings: Settings,
         requests: RequestCoordinator,
         parent: QObject | None = None,
+        discovery_provider: Any = None,
     ) -> None:
         super().__init__(parent)
         self.requests = requests
         self.items: list[dict[str, Any]] = []
         self.next_cursor: str | None = None
         self.refreshing = False
-        self.events = TaskEventStream(settings, self)
+        self.events = TaskEventStream(settings, self, discovery_provider)
         self.events.eventReceived.connect(self._event)
 
     def start(self) -> None:
@@ -217,17 +230,31 @@ class TaskListViewModel(QObject):
         self.status_callback = status_callback
         self.feed.itemsChanged.connect(self.itemsChanged)
 
+    def _text(self, key: str) -> str:
+        language, translations = self.locale_context()
+        table = translations.get(language, translations["en"])
+        return table.get(key, key)
+
     @Property("QVariantList", notify=itemsChanged)
     def items(self) -> list[dict[str, Any]]:
         language, translations = self.locale_context()
         projected = []
         for task in self.feed.items:
             item = dict(task)
-            item["localized_title"] = localized_task_title(
-                task, language, translations
+            item["localized_title"] = localized_task_title(task, language, translations)
+            error_summary = task_error_summary(task)
+            item["error_summary"] = (
+                self.requests.error_formatter(task.get("error_type"), error_summary)
+                if error_summary
+                else ""
             )
-            item["error_summary"] = task_error_summary(task)
             item["result_path"] = task_result_path(task)
+            item["localized_stage"] = localized_task_stage(task, language, translations)
+            item["localized_timestamp"] = localized_timestamp(task.get("updated_at"))
+            item["is_maintenance"] = str(task.get("operation") or "") in {
+                "runtime.inspect",
+                "diagnostics.snapshot",
+            }
             projected.append(item)
         return projected
 
@@ -248,9 +275,7 @@ class TaskListViewModel(QObject):
 
     @Slot(str)
     def cancel(self, task_id: str) -> None:
-        self.requests.submit(
-            "task.cancel", {"task_id": task_id}, self.feed.accept
-        )
+        self.requests.submit("task.cancel", {"task_id": task_id}, self.feed.accept)
 
     @Slot(str)
     def retry(self, task_id: str) -> None:
@@ -260,7 +285,24 @@ class TaskListViewModel(QObject):
     def openResult(self, path: str) -> None:
         selected = Path(local_path(path)).expanduser().resolve()
         if not selected.exists():
-            self.status_callback(f"file no longer exists: {selected}", "danger")
+            self.status_callback(
+                self._text("error.file_missing").format(path=selected), "danger"
+            )
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(selected))):
-            self.status_callback(f"could not open: {selected}", "danger")
+            self.status_callback(
+                self._text("error.open_failed").format(path=selected), "danger"
+            )
+
+    @Slot(str)
+    def openResultFolder(self, path: str) -> None:
+        selected = Path(local_path(path)).expanduser().resolve()
+        folder = selected if selected.is_dir() else selected.parent
+        if not folder.exists() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            self.status_callback(
+                self._text("error.open_folder_failed").format(path=folder), "danger"
+            )
+
+    @Slot(str)
+    def copyText(self, value: str) -> None:
+        QGuiApplication.clipboard().setText(value)

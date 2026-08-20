@@ -97,6 +97,16 @@ class RealtimeSessionManager:
             "default_output_device": payload["default_output_device"],
         }
 
+    def audio_test(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            if self.repository.active():
+                raise RuntimeError("audio devices cannot be tested during a realtime session")
+        return self.engine.audio_test(
+            str(arguments["mode"]),
+            int(arguments["device"]),
+            float(arguments.get("duration_seconds", 2.0)),
+        )
+
     def _worker_command(
         self, arguments: dict[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -601,6 +611,37 @@ class RealtimeSessionManager:
                 self._active_model = None
                 self._release_offline_dispatch()
             return self.get(session_id)
+
+    def release(self) -> dict[str, Any]:
+        """Release an idle resident worker and its GPU memory."""
+
+        with self._lock:
+            if self.repository.active():
+                return self.status()
+            process = self._process
+            self._prepare_id = None
+            self._preparing_key = None
+            self._prepared_key = None
+            self._model_ready = False
+            self._worker_model_id = None
+            if process and process.poll() is None:
+                try:
+                    self._send_command_locked({"command": "shutdown"})
+                except (BrokenPipeError, OSError, RuntimeError):
+                    terminate_process_tree(process)
+            else:
+                self._process = None
+                self._worker_state = "not_started"
+        reader = self._reader_thread
+        if reader:
+            reader.join(timeout=5)
+        if process and process.poll() is None:
+            terminate_process_tree(process)
+        with self._lock:
+            if self._process is process:
+                self._process = None
+            self._worker_state = "not_started"
+            return self.status()
 
     def events(self, session_id: str, after_id: int = 0) -> list[dict[str, Any]]:
         return self.repository.events(session_id, after_id)

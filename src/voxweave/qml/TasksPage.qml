@@ -9,6 +9,21 @@ Item {
     required property var bridge
     required property var theme
     property var tasks: []
+    property string stateFilter: "all"
+    property bool showMaintenance: false
+    readonly property var filteredTasks: root.tasks.filter(function(task) {
+        if (!root.showMaintenance && task.is_maintenance) return false
+        if (root.stateFilter === "active"
+                && ["queued", "running"].indexOf(task.state) < 0) return false
+        if (root.stateFilter === "failed"
+                && ["failed", "cancelled", "interrupted"].indexOf(task.state) < 0) return false
+        if (root.stateFilter === "completed" && task.state !== "completed") return false
+        var query = searchField.text.trim().toLowerCase()
+        return query.length === 0
+            || String(task.localized_title || "").toLowerCase().includes(query)
+            || String(task.error_summary || "").toLowerCase().includes(query)
+            || String(task.result_path || "").toLowerCase().includes(query)
+    })
 
     function taskTone(state) {
         if (state === "completed") return "success"
@@ -44,6 +59,43 @@ Item {
             }
         }
 
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            AppTextField {
+                id: searchField
+                objectName: "taskSearchField"
+                Layout.fillWidth: true
+                placeholderText: root.bridge.text("task.search")
+                Accessible.name: root.bridge.text("task.search")
+            }
+            Flow {
+                Layout.fillWidth: true
+                Layout.preferredHeight: childrenRect.height
+                spacing: 6
+                Repeater {
+                    model: [
+                        {"value": "all", "label": root.bridge.text("task.filter.all")},
+                        {"value": "active", "label": root.bridge.text("task.filter.active")},
+                        {"value": "failed", "label": root.bridge.text("task.filter.failed")},
+                        {"value": "completed", "label": root.bridge.text("task.filter.completed")}
+                    ]
+                    delegate: AppButton {
+                        required property var modelData
+                        compact: true
+                        kind: root.stateFilter === modelData.value ? "primary" : "quiet"
+                        text: modelData.label
+                        onClicked: root.stateFilter = modelData.value
+                    }
+                }
+                AppCheckBox {
+                    text: root.bridge.text("task.show_maintenance")
+                    checked: root.showMaintenance
+                    onToggled: root.showMaintenance = checked
+                }
+            }
+        }
+
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -52,7 +104,7 @@ Item {
                 id: taskList
                 objectName: "taskList"
                 anchors.fill: parent
-                model: root.tasks
+                model: root.filteredTasks
                 clip: true
                 spacing: 6
                 footer: AppButton {
@@ -66,8 +118,10 @@ Item {
                     id: taskDelegate
                     required property var modelData
                     required property int index
+                    property bool expanded: false
                     width: ListView.view.width
-                    height: 108
+                    height: taskDelegate.expanded ? 176
+                        : taskDelegate.modelData.state === "completed" ? 82 : 112
                     radius: root.theme.radiusMedium
                     color: root.theme.surface
                     border.color: root.theme.border
@@ -125,17 +179,17 @@ Item {
                                     ? taskDelegate.modelData.error_summary
                                     : taskDelegate.modelData.result_path.length > 0
                                         ? taskDelegate.modelData.result_path
-                                        : root.bridge.text("label.stage") + ": " + (taskDelegate.modelData.stage || taskDelegate.modelData.state)
+                                        : root.bridge.text("label.stage") + ": " + taskDelegate.modelData.localized_stage
                                 color: taskDelegate.modelData.error_summary.length > 0 ? root.theme.danger : root.theme.textMuted
                                 font.family: taskDelegate.modelData.result_path.length > 0 ? root.theme.monoFont : root.theme.uiFont
-                                font.pixelSize: 9
+                                font.pixelSize: 11
                                 elide: Text.ElideMiddle
                             }
                             Label {
-                                text: String(taskDelegate.modelData.updated_at || "").replace("T", " ").slice(0, 19)
+                                text: taskDelegate.modelData.localized_timestamp || ""
                                 color: root.theme.textDim
                                 font.family: root.theme.monoFont
-                                font.pixelSize: 8
+                                font.pixelSize: 10
                             }
                             AppButton {
                                 visible: taskDelegate.modelData.result_path.length > 0
@@ -143,9 +197,24 @@ Item {
                                 text: root.bridge.text("action.open_result")
                                 onClicked: root.bridge.taskList.openResult(taskDelegate.modelData.result_path)
                             }
+                            AppButton {
+                                visible: taskDelegate.modelData.result_path.length > 0
+                                compact: true
+                                text: root.bridge.text("action.open_folder")
+                                onClicked: root.bridge.taskList.openResultFolder(taskDelegate.modelData.result_path)
+                            }
+                            AppButton {
+                                visible: taskDelegate.modelData.error_summary.length > 0
+                                compact: true
+                                text: taskDelegate.expanded
+                                    ? root.bridge.text("action.collapse")
+                                    : root.bridge.text("action.details")
+                                onClicked: taskDelegate.expanded = !taskDelegate.expanded
+                            }
                         }
 
                         RowLayout {
+                            visible: !["completed", "failed", "cancelled", "interrupted"].includes(taskDelegate.modelData.state)
                             Layout.fillWidth: true
                             Layout.leftMargin: 26
                             spacing: 8
@@ -159,13 +228,45 @@ Item {
                                 horizontalAlignment: Text.AlignRight
                             }
                         }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            visible: taskDelegate.expanded
+                            radius: root.theme.radiusSmall
+                            color: root.theme.field
+                            Label {
+                                anchors.left: parent.left
+                                anchors.right: copyErrorButton.left
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                anchors.margins: 8
+                                text: String(taskDelegate.modelData.error || taskDelegate.modelData.error_summary || "")
+                                color: root.theme.danger
+                                font.family: root.theme.monoFont
+                                font.pixelSize: 11
+                                wrapMode: Text.WrapAnywhere
+                                elide: Text.ElideRight
+                            }
+                            AppButton {
+                                id: copyErrorButton
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.margins: 6
+                                compact: true
+                                text: root.bridge.text("action.copy")
+                                onClicked: root.bridge.taskList.copyText(
+                                    String(taskDelegate.modelData.error || taskDelegate.modelData.error_summary || "")
+                                )
+                            }
+                        }
                     }
                 }
             }
 
             EmptyState {
                 anchors.centerIn: parent
-                visible: root.tasks.length === 0
+                visible: root.filteredTasks.length === 0
                 title: root.bridge.text("empty.tasks.title")
                 detail: root.bridge.text("empty.tasks.detail")
             }

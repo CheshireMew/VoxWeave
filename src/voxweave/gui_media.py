@@ -11,6 +11,8 @@ from .gui_support import local_path
 from .gui_tasks import TaskFeed
 
 AUDIO_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".aac"}
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm"}
+MEDIA_SUFFIXES = AUDIO_SUFFIXES | VIDEO_SUFFIXES
 
 
 class MediaViewModel(QObject):
@@ -47,6 +49,52 @@ class MediaViewModel(QObject):
     @Property(str, notify=resultAudioChanged)
     def resultAudio(self) -> str:
         return QUrl.fromLocalFile(self._result_audio).toString() if self._result_audio else ""
+
+    @Property(str, notify=resultAudioChanged)
+    def resultAudioPath(self) -> str:
+        return self._result_audio
+
+    @Slot(str, result=str)
+    def localPath(self, value: str) -> str:
+        return local_path(value)
+
+    @Slot(str, result=str)
+    def suggestOutput(self, input_value: str) -> str:
+        input_path = Path(local_path(input_value)).expanduser()
+        if not input_path.name:
+            return ""
+        suffix = input_path.suffix.casefold()
+        if suffix not in MEDIA_SUFFIXES:
+            suffix = ".wav"
+        candidate = input_path.with_name(f"{input_path.stem}-voxweave{suffix}")
+        number = 2
+        while candidate.exists() or candidate == input_path:
+            candidate = input_path.with_name(f"{input_path.stem}-voxweave-{number}{suffix}")
+            number += 1
+        return str(candidate)
+
+    @Slot(str, str, result="QVariantMap")
+    def validateConversion(self, input_value: str, output_value: str) -> dict[str, Any]:
+        if not input_value.strip():
+            return {"valid": False, "code": "input_required", "suggestion": ""}
+        input_path = Path(local_path(input_value)).expanduser()
+        if not input_path.is_file():
+            return {"valid": False, "code": "input_missing", "suggestion": ""}
+        if input_path.suffix.casefold() not in MEDIA_SUFFIXES:
+            return {"valid": False, "code": "input_unsupported", "suggestion": ""}
+        suggestion = self.suggestOutput(input_value)
+        if not output_value.strip():
+            return {"valid": False, "code": "output_required", "suggestion": suggestion}
+        output_path = Path(local_path(output_value)).expanduser()
+        if output_path.suffix.casefold() not in MEDIA_SUFFIXES:
+            return {"valid": False, "code": "output_unsupported", "suggestion": suggestion}
+        if output_path.resolve() == input_path.resolve():
+            return {"valid": False, "code": "same_path", "suggestion": suggestion}
+        if not output_path.parent.is_dir():
+            return {"valid": False, "code": "output_parent_missing", "suggestion": suggestion}
+        if output_path.exists():
+            return {"valid": False, "code": "output_exists", "suggestion": suggestion}
+        return {"valid": True, "code": "ready", "suggestion": suggestion}
 
     @Property("QVariantList", notify=speakersChanged)
     def speakers(self) -> list[dict[str, Any]]:
@@ -138,9 +186,7 @@ class MediaViewModel(QObject):
         }
         if input_sha256:
             arguments["input_sha256"] = input_sha256
-        self.activity.submit(
-            "conversion.run", arguments, action_key="conversion"
-        )
+        self.activity.submit("conversion.run", arguments, action_key="conversion")
 
     @Slot(str, str, int, str, float, float, float, str)
     def preview(
@@ -154,7 +200,67 @@ class MediaViewModel(QObject):
         protect: float,
         mode: str,
     ) -> None:
+        self._submit_preview(
+            input_value,
+            model,
+            pitch,
+            f0,
+            index_rate,
+            rms_mix_rate,
+            protect,
+            mode,
+            2,
+            3,
+        )
+
+    @Slot(str, str, int, str, float, float, float, str, int, int)
+    def previewWithOptions(
+        self,
+        input_value: str,
+        model: str,
+        pitch: int,
+        f0: str,
+        index_rate: float,
+        rms_mix_rate: float,
+        protect: float,
+        mode: str,
+        variant_count: int,
+        pitch_step: int,
+    ) -> None:
+        self._submit_preview(
+            input_value,
+            model,
+            pitch,
+            f0,
+            index_rate,
+            rms_mix_rate,
+            protect,
+            mode,
+            variant_count,
+            pitch_step,
+        )
+
+    def _submit_preview(
+        self,
+        input_value: str,
+        model: str,
+        pitch: int,
+        f0: str,
+        index_rate: float,
+        rms_mix_rate: float,
+        protect: float,
+        mode: str,
+        variant_count: int,
+        pitch_step: int,
+    ) -> None:
         input_path = local_path(input_value)
+        count = max(1, min(4, variant_count))
+        step = pitch_step or 3
+        if not -36 <= pitch + (count - 1) * step <= 36:
+            reversed_step = -step
+            if -36 <= pitch + (count - 1) * reversed_step <= 36:
+                step = reversed_step
+        pitches = [max(-36, min(36, pitch + index * step)) for index in range(count)]
 
         def submitted(task: dict[str, Any]) -> None:
             self._preview_task_id = task["task_id"]
@@ -169,19 +275,13 @@ class MediaViewModel(QObject):
             "content_mode": mode,
             "variants": [
                 {
-                    "pitch": pitch,
+                    "pitch": variant_pitch,
                     "f0": f0,
                     "index_rate": index_rate,
                     "rms_mix_rate": rms_mix_rate,
                     "protect": protect,
-                },
-                {
-                    "pitch": pitch + 3,
-                    "f0": f0,
-                    "index_rate": index_rate,
-                    "rms_mix_rate": rms_mix_rate,
-                    "protect": protect,
-                },
+                }
+                for variant_pitch in pitches
             ],
         }
         input_sha256 = self._known_input_sha256(input_path, mode)

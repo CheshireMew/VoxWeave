@@ -20,6 +20,17 @@ Item {
     property real pendingAudioPosition: -1
     property bool resumeAudioAfterSwitch: false
     property bool playbackPending: false
+    property bool outputAuto: true
+    readonly property var pathValidation: root.bridge.media.validateConversion(
+        inputField.text, outputField.text
+    )
+
+    function setInput(value) {
+        inputField.text = value
+        if (root.outputAuto || outputField.text.length === 0)
+            outputField.text = root.bridge.media.suggestOutput(value)
+        root.outputAuto = true
+    }
 
     function contentMode(index) {
         return ["clean", "mixed", "singing"][index]
@@ -56,23 +67,28 @@ FileDialog {
     nameFilters: [
         root.bridge.text("filter.media") + " (*.wav *.flac *.mp3 *.m4a *.aac *.mp4 *.mkv *.mov *.webm)"
     ]
-    onAccepted: inputField.text = selectedFile
+    onAccepted: root.setInput(root.bridge.media.localPath(selectedFile))
 }
 FileDialog {
     id: outputDialog
     title: root.bridge.text("field.output")
     fileMode: FileDialog.SaveFile
+    options: FileDialog.DontConfirmOverwrite
     nameFilters: [
         root.bridge.text("filter.audio") + " (*.wav *.flac *.mp3 *.m4a *.aac)",
         root.bridge.text("filter.video") + " (*.mp4 *.mkv *.mov *.webm)"
     ]
-    onAccepted: outputField.text = selectedFile
+    onAccepted: {
+        root.outputAuto = false
+        outputField.text = root.bridge.media.localPath(selectedFile)
+    }
 }
 Basic.Dialog {
     id: presetConfirmation
     modal: true
     anchors.centerIn: parent
     width: Math.min(420, root.width - 48)
+    height: 190
     title: root.bridge.text("preset.reconfirm.title")
     standardButtons: Basic.Dialog.Ok | Basic.Dialog.Cancel
     contentItem: Label {
@@ -118,7 +134,19 @@ Basic.Dialog {
                 spacing: 10
 
                 AppPanel {
+                    id: sourcePanel
                     Layout.fillWidth: true
+                    overlay: Component {
+                        DropArea {
+                            anchors.fill: parent
+                            onDropped: function(drop) {
+                                if (drop.urls && drop.urls.length > 0) {
+                                    root.setInput(drop.urls[0])
+                                    drop.acceptProposedAction()
+                                }
+                            }
+                        }
+                    }
                     SectionHeader {
                         Layout.fillWidth: true
                         title: root.bridge.text("section.source")
@@ -128,7 +156,7 @@ Basic.Dialog {
 
                     GridLayout {
                         Layout.fillWidth: true
-                        columns: 2
+                        columns: width >= 680 ? 2 : 1
                         columnSpacing: 10
 
                         ColumnLayout {
@@ -143,7 +171,12 @@ Basic.Dialog {
                                     objectName: "inputField"
                                     Layout.fillWidth: true
                                     placeholderText: root.bridge.text("placeholder.input_media")
-                                    onTextChanged: root.bridge.media.invalidateAnalysis()
+                                    Accessible.name: root.bridge.text("field.input")
+                                    onTextChanged: {
+                                        root.bridge.media.invalidateAnalysis()
+                                        if (root.outputAuto)
+                                            outputField.text = root.bridge.media.suggestOutput(text)
+                                    }
                                 }
                                 AppButton { text: root.bridge.text("action.choose"); onClicked: inputDialog.open() }
                             }
@@ -161,11 +194,33 @@ Basic.Dialog {
                                     objectName: "outputField"
                                     Layout.fillWidth: true
                                     placeholderText: root.bridge.text("placeholder.output_media")
+                                    Accessible.name: root.bridge.text("field.output")
+                                    onTextEdited: root.outputAuto = false
                                 }
                                 AppButton { text: root.bridge.text("action.choose"); onClicked: outputDialog.open() }
                             }
                         }
                     }
+
+                    Label {
+                        Layout.fillWidth: true
+                        visible: inputField.text.length > 0 && !root.pathValidation.valid
+                        text: root.bridge.text("validation." + root.pathValidation.code)
+                        color: root.theme.warning
+                        font.family: root.theme.uiFont
+                        font.pixelSize: 11
+                        wrapMode: Text.Wrap
+                    }
+                    AppButton {
+                        visible: inputField.text.length > 0 && !root.pathValidation.valid
+                            && String(root.pathValidation.suggestion || "").length > 0
+                        text: root.bridge.text("action.use_suggested_output")
+                        onClicked: {
+                            root.outputAuto = true
+                            outputField.text = String(root.pathValidation.suggestion)
+                        }
+                    }
+
                 }
 
                 AppPanel {
@@ -325,8 +380,40 @@ Basic.Dialog {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        Layout.topMargin: 0
                         spacing: 6
+                        Label {
+                            text: root.bridge.text("preview.variants")
+                            color: root.theme.textDim
+                            font.pixelSize: 11
+                        }
+                        AppSpinBox {
+                            id: previewCount
+                            from: 1
+                            to: 4
+                            value: 2
+                            Accessible.name: root.bridge.text("preview.variants")
+                        }
+                        Label {
+                            text: root.bridge.text("preview.pitch_step")
+                            color: root.theme.textDim
+                            font.pixelSize: 11
+                        }
+                        AppSpinBox {
+                            id: previewPitchStep
+                            from: -12
+                            to: 12
+                            value: 3
+                            Accessible.name: root.bridge.text("preview.pitch_step")
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 0
+                        columns: width >= 700 ? 4 : 1
+                        rowSpacing: 6
+                        columnSpacing: 6
                         Label {
                             Layout.fillWidth: true
                             text: root.bridge.text("hint.preview")
@@ -336,6 +423,7 @@ Basic.Dialog {
                             wrapMode: Text.Wrap
                         }
                         AppButton {
+                            Layout.fillWidth: true
                             text: root.bridge.activity.busyKeys.includes("analysis")
                                 ? root.bridge.text("task.state.running") : root.bridge.text("action.analyze")
                             enabled: inputField.text.length > 0 && modeCombo.currentIndex !== 2
@@ -343,18 +431,26 @@ Basic.Dialog {
                             onClicked: root.bridge.media.analyze(inputField.text, root.contentMode(modeCombo.currentIndex))
                         }
                         AppButton {
+                            Layout.fillWidth: true
                             text: root.bridge.activity.busyKeys.includes("preview")
                                 ? root.bridge.text("task.state.running") : root.bridge.text("action.preview")
                             enabled: inputField.text.length > 0 && modelCombo.currentIndex >= 0
                                 && !root.bridge.activity.busyKeys.includes("preview")
-                            onClicked: root.bridge.media.preview(inputField.text, modelCombo.currentValue, pitchSlider.value, f0Combo.currentText.toLowerCase(), indexRateSlider.value, rmsMixSlider.value, protectSlider.value, root.contentMode(modeCombo.currentIndex))
+                            onClicked: root.bridge.media.previewWithOptions(
+                                inputField.text, modelCombo.currentValue, pitchSlider.value,
+                                f0Combo.currentText.toLowerCase(), indexRateSlider.value,
+                                rmsMixSlider.value, protectSlider.value,
+                                root.contentMode(modeCombo.currentIndex),
+                                previewCount.value, previewPitchStep.value
+                            )
                         }
                         AppButton {
                             objectName: "convertButton"
+                            Layout.fillWidth: true
                             text: root.bridge.activity.busyKeys.includes("conversion")
                                 ? root.bridge.text("task.state.running") : root.bridge.text("action.convert")
                             kind: "primary"
-                            enabled: inputField.text.length > 0 && outputField.text.length > 0
+                            enabled: root.pathValidation.valid
                                 && modelCombo.currentIndex >= 0
                                 && !root.bridge.activity.busyKeys.includes("conversion")
                             onClicked: root.bridge.media.convert(inputField.text, outputField.text, modelCombo.currentValue, pitchSlider.value, f0Combo.currentText.toLowerCase(), indexRateSlider.value, rmsMixSlider.value, protectSlider.value, root.contentMode(modeCombo.currentIndex), root.selectedSpeakers, overlapCombo.currentIndex === 0 ? "skip" : "convert")
@@ -475,7 +571,7 @@ Basic.Dialog {
                                 Label {
                                     Layout.fillWidth: true
                                     visible: root.bridge.media.resultAudio.length > 0
-                                    text: root.bridge.media.resultAudio
+                                    text: root.bridge.media.resultAudioPath
                                     color: root.theme.textDim
                                     font.family: root.theme.monoFont
                                     font.pixelSize: 10
