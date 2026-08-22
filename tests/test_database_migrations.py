@@ -17,6 +17,46 @@ def test_future_database_schema_is_rejected(tmp_path) -> None:
         Database(path)
 
 
+def test_latest_schema_contains_growth_indexes(tmp_path) -> None:
+    database = Database(tmp_path / "indexed.sqlite3")
+    indexes = {
+        row["name"]
+        for row in database.fetch_all(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    assert {
+        "task_events_task_id_index",
+        "realtime_sessions_created_index",
+        "realtime_sessions_active_index",
+        "realtime_events_session_index",
+        "batch_rules_watch_index",
+        "batch_items_state_index",
+        "batch_items_pending_index",
+        "batch_runs_state_index",
+    } <= indexes
+    pending_plan = " ".join(
+        row["detail"]
+        for row in database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT batch_items.id FROM batch_items "
+            "JOIN tasks ON tasks.id=batch_items.task_id "
+            "WHERE batch_items.task_id IS NOT NULL "
+            "AND batch_items.state IN ('queued','running')"
+        )
+    )
+    realtime_plan = " ".join(
+        row["detail"]
+        for row in database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT id FROM realtime_sessions "
+            "WHERE state IN ('starting','running','stopping') "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+    )
+    assert "batch_items_pending_index" in pending_plan
+    assert "realtime_sessions_active_index" in realtime_plan
+    assert "TEMP B-TREE" not in realtime_plan
+
+
 def test_v8_database_adds_execution_and_index_snapshots(tmp_path) -> None:
     path = tmp_path / "v8.sqlite3"
     Database(path)

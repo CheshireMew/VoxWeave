@@ -70,16 +70,21 @@ class DiagnosticsService:
         }
         storage = {}
         for index, (name, root) in enumerate(areas.items()):
-            files = []
+            file_count = 0
+            total_bytes = 0
             if root.exists():
                 for path in root.rglob("*"):
                     if context.cancelled():
                         raise InterruptedError("task cancellation requested")
                     if path.is_file():
-                        files.append(path)
+                        try:
+                            total_bytes += path.stat().st_size
+                            file_count += 1
+                        except (FileNotFoundError, PermissionError, OSError):
+                            continue
             storage[name] = {
-                "files": len(files),
-                "bytes": sum(path.stat().st_size for path in files),
+                "files": file_count,
+                "bytes": total_bytes,
             }
             context.progress(
                 0.05 + 0.45 * ((index + 1) / len(areas)),

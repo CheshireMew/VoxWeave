@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
@@ -22,6 +23,7 @@ class ServiceUnavailable(RuntimeError):
 
 
 _service_start_lock = threading.Lock()
+_http_local = threading.local()
 
 
 def service_command() -> list[str]:
@@ -100,6 +102,7 @@ class ManagedServiceClient:
         self._lock = threading.RLock()
         self._started_service = False
         self._closing = False
+        self._discovery: Discovery | None = None
 
     @property
     def started_service(self) -> bool:
@@ -114,19 +117,35 @@ class ManagedServiceClient:
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         discovery = self.ensure()
-        return _request_json(discovery, method, route, payload)
+        try:
+            return _request_json(discovery, method, route, payload)
+        except ServiceUnavailable:
+            with self._lock:
+                self._discovery = None
+            discovery = self.ensure()
+            return _request_json(discovery, method, route, payload)
 
     def ensure(self) -> Discovery:
+        with self._lock:
+            if self._closing:
+                raise ServiceUnavailable("service client is closed")
+            if self._discovery is not None:
+                return self._discovery
         discovery, started = ensure_service_with_state(self.settings)
         stop_after_start = False
-        if started:
-            with self._lock:
-                if self._closing:
-                    stop_after_start = True
-                else:
+        closing = False
+        with self._lock:
+            closing = self._closing
+            if not closing:
+                self._discovery = discovery
+                if started:
                     self._started_service = True
+            elif started:
+                stop_after_start = True
         if stop_after_start:
             shutdown_service(self.settings)
+        if closing:
+            raise ServiceUnavailable("service client is closed")
         return discovery
 
     def shutdown_if_owned(self) -> dict[str, Any]:
@@ -134,6 +153,7 @@ class ManagedServiceClient:
             self._closing = True
             owned = self._started_service
             self._started_service = False
+            self._discovery = None
         if not owned:
             return {"ok": True, "state": "retained"}
         return shutdown_service(self.settings)
@@ -156,19 +176,33 @@ def _request_json(
     payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{discovery.port}{route}",
-        data=data,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {discovery.token}",
-            "Content-Type": "application/json",
-        },
-    )
+    key = (discovery.port, discovery.token)
+    connection = getattr(_http_local, "connection", None)
+    if connection is None or getattr(_http_local, "key", None) != key:
+        if connection is not None:
+            connection.close()
+        connection = http.client.HTTPConnection("127.0.0.1", discovery.port, timeout=60)
+        _http_local.connection = connection
+        _http_local.key = key
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.load(response)
-    except urllib.error.URLError as exc:
+        connection.request(
+            method,
+            route,
+            body=data,
+            headers={
+                "Authorization": f"Bearer {discovery.token}",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        body = response.read()
+        if response.status >= 400:
+            raise ServiceUnavailable(f"service returned HTTP {response.status}")
+        return json.loads(body)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        connection.close()
+        _http_local.connection = None
+        _http_local.key = None
         raise ServiceUnavailable(str(exc)) from exc
 
 

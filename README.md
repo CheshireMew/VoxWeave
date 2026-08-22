@@ -198,7 +198,17 @@ D:\Tools\VoxWeave\.venv\Scripts\python.exe scripts\verify_real_user_chain.py `
   --output-root D:\Tools\VoxWeave\validation\run
 ```
 
-贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。当前项目只验收 Windows，不生成安装器、压缩包或整合运行时。
+贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。当前项目只验收 Windows。正式发布物是免安装的 Windows x64 ZIP；日常贡献流程不生成发布包。
+
+维护者只能从干净提交构建正式发布物，输出目录必须位于仓库和系统盘之外：
+
+```powershell
+.\scripts\build-exe.ps1 `
+  -Python D:\Tools\VoxWeave\.venv\Scripts\python.exe `
+  -OutputRoot D:\Tools\VoxWeave\release-builds
+```
+
+同一版本和提交只允许保留一个构建目录。命令会生成 ZIP、SHA-256、文件清单和发布摘要，并把 ZIP 解压到独立目录逐文件复验和离屏启动；版本、提交、组件许可证、运行 DLL、QML 启动或文件哈希有任何不一致都会失败。完整约束见 [Windows 发布流程](docs/RELEASING.md)。
 
 ## Star History
 
@@ -212,4 +222,4 @@ D:\Tools\VoxWeave\.venv\Scripts\python.exe scripts\verify_real_user_chain.py `
 
 ## 许可证与第三方组件
 
-VoxWeave 源码使用 [AGPL-3.0-only](LICENSE)。RVC、Qt、FFmpeg、Python 依赖、推理组件和模型保持各自许可证；本仓库只发布源码，不随仓库分发这些运行时和权重。完整来源、锁定版本和再分发边界见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+VoxWeave 源码使用 [AGPL-3.0-only](LICENSE)。Windows ZIP 会带上运行桌面应用所需的 CPython、PySide6/Qt 和 Python 依赖，但不带 RVC、托管 RVC Python 环境、FFmpeg、推理权重或声音模型。每个 ZIP 都包含完整许可证目录、Qt/PySide 源码与替换说明及逐文件哈希清单。完整来源、锁定版本和再分发边界见 [第三方说明](THIRD_PARTY_NOTICES.md)。

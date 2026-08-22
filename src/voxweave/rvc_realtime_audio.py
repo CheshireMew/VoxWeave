@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import traceback
@@ -7,6 +8,10 @@ from collections import deque
 from dataclasses import dataclass
 from math import ceil
 from typing import Any
+
+
+class RealtimeInferenceStopTimeout(RuntimeError):
+    """The inference thread did not relinquish the resident worker in time."""
 
 VAD_SAMPLE_RATE = 16000
 VAD_WINDOW_SAMPLES = 512
@@ -334,6 +339,9 @@ class RealtimeAudioProcessor:
             "completed_utterances": 0,
             "playback_active": False,
             "microphone_suppressed": False,
+            "input_overruns": 0,
+            "output_underruns": 0,
+            "pipeline_depth": 0,
         }
 
         buffer_frames = (
@@ -653,7 +661,9 @@ class RealtimeAudioProcessor:
             raise self.sd.CallbackAbort from None
 
     def warmup(self) -> None:
-        probe = self.np.zeros((self.spec.block_frame, self.spec.input_channels), dtype="float32")
+        timeline = self.np.arange(self.spec.block_frame, dtype="float32") / self.spec.sample_rate
+        voiced = (0.08 * self.np.sin(2 * self.np.pi * 220.0 * timeline)).astype("float32")
+        probe = self.np.repeat(voiced[:, None], self.spec.input_channels, axis=1)
         mono = select_mono_channel(self.np, probe)
         self.vad.process(mono)
         block_frame_16k = self._push_input(mono, self.spec.block_frame)
@@ -688,6 +698,9 @@ class RealtimeAudioProcessor:
                 completed_utterances=0,
                 playback_active=False,
                 microphone_suppressed=False,
+                input_overruns=0,
+                output_underruns=0,
+                pipeline_depth=0,
             )
 
     def configure_test_mode(self, enabled: bool) -> None:
@@ -710,6 +723,171 @@ class RealtimeAudioProcessor:
             return dict(self.metrics)
 
 
+class AsyncRealtimeAudioBridge:
+    """Move model inference off PortAudio's real-time callback thread."""
+
+    def __init__(
+        self,
+        processor: RealtimeAudioProcessor,
+        *,
+        slot_count: int = 4,
+        stop_timeout_seconds: float = 5.0,
+    ) -> None:
+        if slot_count < 3:
+            raise ValueError("realtime audio bridge requires at least three slots")
+        if stop_timeout_seconds <= 0:
+            raise ValueError("realtime audio stop timeout must be positive")
+        self.processor = processor
+        self.stop_timeout_seconds = stop_timeout_seconds
+        self.np = processor.np
+        spec = processor.spec
+        self.inputs = [
+            self.np.empty((spec.block_frame, spec.input_channels), dtype="float32")
+            for _ in range(slot_count)
+        ]
+        self.outputs = [
+            self.np.zeros((spec.block_frame, spec.output_channels), dtype="float32")
+            for _ in range(slot_count)
+        ]
+        self.free: queue.Queue[int] = queue.Queue()
+        self.pending: queue.Queue[int | None] = queue.Queue(maxsize=slot_count)
+        self.completed: queue.Queue[int] = queue.Queue(maxsize=slot_count)
+        for index in range(slot_count):
+            self.free.put(index)
+        self.running = threading.Event()
+        self.error: str | None = None
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.thread and self.thread.is_alive():
+            return
+        self.running.set()
+        self.thread = threading.Thread(
+            target=self._work,
+            name="voxweave-realtime-inference",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.running.clear()
+        while True:
+            try:
+                index = self.pending.get_nowait()
+            except queue.Empty:
+                break
+            if index is not None:
+                self.free.put(index)
+        try:
+            self.pending.put_nowait(None)
+        except queue.Full:
+            pass
+        if self.thread:
+            self.thread.join(timeout=self.stop_timeout_seconds)
+            if self.thread.is_alive():
+                raise RealtimeInferenceStopTimeout(
+                    "realtime inference did not stop within "
+                    f"{self.stop_timeout_seconds:g} seconds"
+                )
+
+    def _publish_output(self, index: int) -> None:
+        try:
+            self.completed.put_nowait(index)
+            return
+        except queue.Full:
+            pass
+        try:
+            stale = self.completed.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            self.free.put(stale)
+        self.completed.put_nowait(index)
+
+    def _work(self) -> None:
+        while self.running.is_set() or not self.pending.empty():
+            try:
+                index = self.pending.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if index is None:
+                return
+            try:
+                self.processor.callback(
+                    self.inputs[index],
+                    self.outputs[index],
+                    self.processor.spec.block_frame,
+                    None,
+                    None,
+                )
+            except Exception:  # noqa: BLE001 - inference thread boundary
+                self.error = traceback.format_exc()
+                self.outputs[index].fill(0)
+                self._publish_output(index)
+                self.running.clear()
+                return
+            self._publish_output(index)
+
+    def _latest_output(self) -> int | None:
+        try:
+            latest = self.completed.get_nowait()
+        except queue.Empty:
+            return None
+        while True:
+            try:
+                newer = self.completed.get_nowait()
+            except queue.Empty:
+                return latest
+            self.free.put(latest)
+            latest = newer
+
+    def callback(self, indata: Any, outdata: Any, frames: int, _times: Any, status: Any) -> None:
+        if self.error:
+            outdata.fill(0)
+            raise self.processor.sd.CallbackAbort from None
+        if frames != self.processor.spec.block_frame:
+            outdata.fill(0)
+            self.error = f"unexpected realtime block size: {frames}"
+            raise self.processor.sd.CallbackAbort from None
+
+        output_index = self._latest_output()
+        if output_index is None:
+            outdata.fill(0)
+        else:
+            self.np.copyto(outdata, self.outputs[output_index])
+            self.free.put(output_index)
+
+        dropped_inputs = 0
+        while True:
+            try:
+                stale_input = self.pending.get_nowait()
+            except queue.Empty:
+                break
+            if stale_input is not None:
+                self.free.put(stale_input)
+                dropped_inputs += 1
+        try:
+            input_index = self.free.get_nowait()
+        except queue.Empty:
+            input_index = None
+        if input_index is not None:
+            self.np.copyto(self.inputs[input_index], indata)
+            try:
+                self.pending.put_nowait(input_index)
+            except queue.Full:
+                self.free.put(input_index)
+                input_index = None
+
+        with self.processor.metrics_lock:
+            if status:
+                self.processor.metrics["xruns"] += 1
+            if input_index is None or dropped_inputs:
+                self.processor.metrics["input_overruns"] += max(1, dropped_inputs)
+            if output_index is None:
+                self.processor.metrics["output_underruns"] += 1
+            self.processor.metrics["pipeline_depth"] = self.pending.qsize()
+
+
 def run_audio_stream(
     *,
     sd: Any,
@@ -724,38 +902,41 @@ def run_audio_stream(
 ) -> None:
     spec = processor.spec
     processor.configure_test_mode(test_mode)
-    stream = sd.Stream(
-        device=(input_device, output_device),
-        samplerate=spec.sample_rate,
-        blocksize=spec.block_frame,
-        channels=(spec.input_channels, spec.output_channels),
-        dtype="float32",
-        callback=processor.callback,
-    )
-    stream.start()
-    emit(
-        {
-            "ok": True,
-            "event": "running",
-            "device": str(processor.device),
-            "input_device": input_device,
-            "output_device": output_device,
-            "hostapi": hostapi,
-            "sample_rate": spec.sample_rate,
-            "input_channels": spec.input_channels,
-            "output_channels": spec.output_channels,
-            "block_seconds": spec.block_frame / spec.sample_rate,
-            "test_mode": test_mode,
-            "estimated_latency_ms": int(
-                (spec.block_frame + spec.sola_buffer_frame) / spec.sample_rate * 1000
-            ),
-            "vad": "silero-v6",
-        }
-    )
+    bridge = AsyncRealtimeAudioBridge(processor)
+    stream = None
     try:
+        bridge.start()
+        stream = sd.Stream(
+            device=(input_device, output_device),
+            samplerate=spec.sample_rate,
+            blocksize=spec.block_frame,
+            channels=(spec.input_channels, spec.output_channels),
+            dtype="float32",
+            callback=bridge.callback,
+        )
+        stream.start()
+        emit(
+            {
+                "ok": True,
+                "event": "running",
+                "device": str(processor.device),
+                "input_device": input_device,
+                "output_device": output_device,
+                "hostapi": hostapi,
+                "sample_rate": spec.sample_rate,
+                "input_channels": spec.input_channels,
+                "output_channels": spec.output_channels,
+                "block_seconds": spec.block_frame / spec.sample_rate,
+                "test_mode": test_mode,
+                "estimated_latency_ms": int(
+                    (2 * spec.block_frame + spec.sola_buffer_frame) / spec.sample_rate * 1000
+                ),
+                "vad": "silero-v6",
+            }
+        )
         while not stop_event.wait(0.2):
-            if processor.callback_error:
-                raise RuntimeError(processor.callback_error[-1])
+            if bridge.error or processor.callback_error:
+                raise RuntimeError(bridge.error or processor.callback_error[-1])
             if not stream.active:
                 raise RuntimeError("audio stream stopped unexpectedly")
             snapshot = processor.metrics_snapshot()
@@ -768,5 +949,11 @@ def run_audio_stream(
                 }
             )
     finally:
-        stream.abort()
-        stream.close()
+        try:
+            if stream is not None:
+                try:
+                    stream.abort()
+                finally:
+                    stream.close()
+        finally:
+            bridge.stop()

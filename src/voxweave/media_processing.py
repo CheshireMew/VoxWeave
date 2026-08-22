@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import re
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-
-import numpy as np
-import soundfile as sf
-from scipy.signal import resample_poly
 
 from .config import PACKAGE_ROOT, Settings
 from .hashing import sha256_file
@@ -20,6 +18,30 @@ from .runtime import resolve_rvc_python
 from .rvc_engine import RvcEngine
 
 Progress = Callable[[float, str, str | None], None]
+
+
+class _LazyModule:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.module: Any = None
+        self.lock = threading.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        if self.module is None:
+            with self.lock:
+                if self.module is None:
+                    self.module = importlib.import_module(self.name)
+        return getattr(self.module, name)
+
+
+np = _LazyModule("numpy")
+sf = _LazyModule("soundfile")
+
+
+def resample_poly(*args: Any, **kwargs: Any) -> Any:
+    signal = importlib.import_module("scipy.signal")
+    return signal.resample_poly(*args, **kwargs)
+
 
 def analyze_audio(
     settings: Settings,

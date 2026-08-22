@@ -1,2 +1,10 @@
-# Build-only dependency. It is not copied into the Windows release directory.
+# Complete Windows/Python 3.12 PyInstaller build graph validated on 2026-08-22.
+# PyInstaller's bootloader and runtime hooks enter the release; the other entries are build-only.
+altgraph==0.17.5
+packaging==26.3
+pefile==2024.8.26
 pyinstaller==6.22.0
+pyinstaller-hooks-contrib==2026.6
+pywin32-ctypes==0.2.3
+setuptools==80.9.0
+wheel==0.45.1

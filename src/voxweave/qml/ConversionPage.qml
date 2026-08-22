@@ -11,6 +11,7 @@ Item {
     id: root
     required property var bridge
     required property var theme
+    property bool pageActive: false
     property var readyModels: []
     property var speakers: []
     property var selectedSpeakers: []
@@ -516,7 +517,7 @@ Basic.Dialog {
                     MediaPlayer {
                         id: player
                         objectName: "resultPlayer"
-                        source: root.bridge.media.resultAudio
+                        source: root.pageActive ? root.bridge.media.resultAudio : ""
                         audioOutput: AudioOutput {}
                         onMediaStatusChanged: {
                             if ((mediaStatus === MediaPlayer.LoadedMedia

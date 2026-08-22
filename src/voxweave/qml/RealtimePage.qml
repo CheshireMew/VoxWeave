@@ -12,6 +12,7 @@ Item {
     property var readyModels: []
     property var session: ({"state": "idle", "stage": "idle", "metrics": {}})
     property bool pageActive: false
+    property bool initialized: false
     signal navigateRequested(int index)
     readonly property var worker: session.worker || ({"state": "not_started", "model_ready": false})
     readonly property var metrics: session.metrics || ({})
@@ -92,12 +93,16 @@ Item {
         }
     }
 
-    function saveCurrentPreferences() {
+    function persistCurrentPreferences(prewarm) {
         root.bridge.realtime.savePreferences(root.currentPreferences())
-        prewarmTimer.restart()
+        if (Boolean(prewarm)) prewarmTimer.restart()
     }
 
-    function applySelectedModelRecommendations() {
+    function saveCurrentPreferences() {
+        root.persistCurrentPreferences(true)
+    }
+
+    function applyModelRecommendations(prewarm) {
         if (realtimeModel.currentIndex < 0
                 || !root.readyModels[realtimeModel.currentIndex]) return
         var values = root.readyModels[realtimeModel.currentIndex].recommended || ({})
@@ -110,7 +115,11 @@ Item {
             indexRateSlider.value = Number(values.index_rate) * 100
         if (values.rms_mix_rate !== undefined)
             rmsMixSlider.value = Number(values.rms_mix_rate) * 100
-        root.saveCurrentPreferences()
+        root.persistCurrentPreferences(prewarm)
+    }
+
+    function applySelectedModelRecommendations() {
+        root.applyModelRecommendations(true)
     }
 
     function restoreModel() {
@@ -118,9 +127,7 @@ Item {
         var index = root.comboValueIndex(realtimeModel, saved.model || "")
         realtimeModel.currentIndex = index >= 0 ? index : (realtimeModel.count > 0 ? 0 : -1)
         if (index < 0 && realtimeModel.currentIndex >= 0)
-            root.applySelectedModelRecommendations()
-        else
-            prewarmTimer.restart()
+            root.applyModelRecommendations(false)
     }
 
     function prewarmSelectedModel() {
@@ -159,20 +166,26 @@ Item {
 
     onReadyModelsChanged: Qt.callLater(restoreModel)
     onPageActiveChanged: {
-        if (root.pageActive) prewarmTimer.restart()
+        if (root.initialized && root.pageActive) prewarmTimer.restart()
         else if (!root.active) root.bridge.realtime.releaseModel()
     }
-    Component.onCompleted: Qt.callLater(restoreControls)
+    Component.onCompleted: Qt.callLater(function() {
+        root.restoreControls()
+        root.initialized = true
+    })
 
     Connections {
         target: root.bridge.realtime
         function onPreferencesChanged() { Qt.callLater(root.restoreControls) }
-        function onAudioRouteChanged() { prewarmTimer.restart() }
+        function onAudioRouteChanged() {
+            if (root.worker.state !== "not_started") prewarmTimer.restart()
+        }
     }
     Connections {
         target: root.bridge.maintenance
         function onRuntimeChanged() {
-            if (root.pageActive && root.bridge.maintenance.runtimeReady)
+            if (root.pageActive && root.bridge.maintenance.runtimeReady
+                    && root.worker.state !== "not_started")
                 prewarmTimer.restart()
         }
     }

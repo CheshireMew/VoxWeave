@@ -48,6 +48,7 @@ class Controller:
             RvcEngine(settings),
             self.tasks.pause_dispatch,
             self.tasks.resume_dispatch,
+            self.media.release_engine,
         )
         self.batch = BatchManager(
             self.database,
@@ -116,6 +117,7 @@ class Controller:
         return payload
 
     def shutdown(self) -> None:
-        self.realtime.shutdown()
         self.batch.shutdown()
         self.tasks.shutdown()
+        self.realtime.shutdown()
+        self.media.shutdown()

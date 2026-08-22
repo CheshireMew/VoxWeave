@@ -4,6 +4,7 @@ import sys
 import traceback
 
 SERVICE_ARGUMENT = "--voxweave-service"
+RELEASE_SMOKE_ARGUMENT = "--voxweave-release-smoke"
 
 
 def _record_service_crash() -> None:
@@ -19,6 +20,12 @@ def _record_service_crash() -> None:
 
 def main() -> int:
     """Dispatch the frozen desktop executable or its background service process."""
+
+    if len(sys.argv) > 1 and sys.argv[1] == RELEASE_SMOKE_ARGUMENT:
+        del sys.argv[1]
+        from voxweave.release_smoke import main as release_smoke_main
+
+        return release_smoke_main(sys.argv[1:])
 
     if len(sys.argv) > 1 and sys.argv[1] == SERVICE_ARGUMENT:
         del sys.argv[1]

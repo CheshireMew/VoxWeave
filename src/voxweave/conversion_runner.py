@@ -5,8 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import soundfile as sf
-
 from .artifacts import ArtifactStore
 from .config import Settings
 from .hashing import sha256_file
@@ -265,6 +263,8 @@ class ConversionRunner:
         return analyze_audio(self.settings, vocal, state.work_dir, state.context.cancelled)
 
     def _convert_all_audio(self, state: ConversionState, vocal: Path) -> Path:
+        import soundfile as sf  # noqa: PLC0415
+
         converted_vocal = state.work_dir / "converted-vocal.wav"
         if sf.info(vocal).duration > 90:
             state.segment_results = convert_long_audio(
@@ -379,6 +379,7 @@ class ConversionRunner:
                 prepared_output,
                 False,
                 state.context.cancelled,
+                state.source_media,
             )
         else:
             transcode_audio(

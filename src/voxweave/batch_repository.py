@@ -156,8 +156,11 @@ class BatchRepository:
 
     def pending_items(self) -> list[dict[str, Any]]:
         return self.database.fetch_all(
-            "SELECT id,task_id FROM batch_items WHERE task_id IS NOT NULL "
-            "AND state NOT IN ('completed','failed','cancelled','interrupted')"
+            "SELECT batch_items.id,batch_items.state,batch_items.error,"
+            "tasks.state AS task_state,tasks.error AS task_error "
+            "FROM batch_items JOIN tasks ON tasks.id=batch_items.task_id "
+            "WHERE batch_items.task_id IS NOT NULL "
+            "AND batch_items.state IN ('queued','running')"
         )
 
     def update_item_state(self, item_id: str, state: str, error: str | None) -> None:

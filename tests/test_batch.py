@@ -168,6 +168,41 @@ def test_watcher_records_rule_errors_without_stopping(tmp_path) -> None:
     tasks.shutdown()
 
 
+def test_watcher_uses_changes_and_submits_stable_file_only_once(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("voxweave.batch.WATCH_SETTLE_SECONDS", 0.1)
+    database, tasks, batch = _managers(tmp_path)
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    rule = batch.create(
+        {
+            "input_root": str(input_root),
+            "output_root": str(output_root),
+            "model": "model.example",
+            "preset": {},
+            "recursive": True,
+            "watch": True,
+        }
+    )
+    source = input_root / "new.wav"
+    source.write_bytes(b"voice")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        count = database.fetch_one(
+            "SELECT COUNT(*) AS count FROM tasks WHERE operation='conversion.run'"
+        )["count"]
+        if count == 1 and list(output_root.rglob("*.wav")):
+            break
+        time.sleep(0.02)
+    time.sleep(0.5)
+    assert database.fetch_one(
+        "SELECT COUNT(*) AS count FROM tasks WHERE operation='conversion.run'"
+    )["count"] == 1
+    assert batch.get(rule["id"])["last_error"] is None
+    batch.shutdown()
+    tasks.shutdown()
+
+
 def test_same_stem_different_extensions_publish_distinct_outputs(tmp_path) -> None:
     _database, tasks, batch = _managers(tmp_path)
     input_root = tmp_path / "input"
@@ -212,10 +247,10 @@ def test_partial_batch_submission_is_visible_on_parent_task(tmp_path, monkeypatc
     )
     submit_file = batch._submit_file
 
-    def fail_one(stored_rule, source):
+    def fail_one(stored_rule, source, cancelled=None):
         if source.name == "bad.wav":
             raise OSError("source became unavailable")
-        return submit_file(stored_rule, source)
+        return submit_file(stored_rule, source, cancelled)
 
     monkeypatch.setattr(batch, "_submit_file", fail_one)
     parent = tasks.submit("batch.run", {"batch_id": rule["id"]})

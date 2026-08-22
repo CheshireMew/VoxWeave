@@ -8,8 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import soundfile as sf
-
 from .config import Settings
 from .hashing import sha256_file
 from .media_errors import MediaPipelineError
@@ -225,8 +223,9 @@ def mux_video(
     output: Path,
     overwrite: bool,
     cancelled: Callable[[], bool] | None = None,
+    source_media: dict[str, Any] | None = None,
 ) -> None:
-    media = inspect_media(settings, source, cancelled)
+    media = source_media or inspect_media(settings, source, cancelled)
     converted_index = len(media["audio_streams"])
     _run(
         [
@@ -304,6 +303,8 @@ def match_loudness(
     work_dir: Path,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    import soundfile as sf  # noqa: PLC0415
+
     reference_quality = measure_audio_quality(settings, loudness_reference, cancelled=cancelled)
     before = measure_audio_quality(settings, source, cancelled=cancelled)
     target = reference_quality["integrated_loudness_lufs"]
@@ -363,22 +364,24 @@ def validate_output(
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     media = inspect_media(settings, output, cancelled)
-    _run(
-        [
-            _binary(settings, "ffmpeg"),
-            "-v",
-            "error",
-            "-i",
-            str(output),
-            "-f",
-            "null",
-            "NUL" if os.name == "nt" else "/dev/null",
-        ],
-        cancelled=cancelled,
-    )
-    media["full_decode"] = "passed"
-    media["audio_quality"] = [
+    qualities = [
         measure_audio_quality(settings, output, stream_index, cancelled)
         for stream_index in range(len(media["audio_streams"]))
     ]
+    if media["video_streams"] or not qualities:
+        _run(
+            [
+                _binary(settings, "ffmpeg"),
+                "-v",
+                "error",
+                "-i",
+                str(output),
+                "-f",
+                "null",
+                "NUL" if os.name == "nt" else "/dev/null",
+            ],
+            cancelled=cancelled,
+        )
+    media["full_decode"] = "passed"
+    media["audio_quality"] = qualities
     return media

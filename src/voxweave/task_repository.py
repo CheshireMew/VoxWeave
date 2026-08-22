@@ -164,17 +164,23 @@ class TaskRepository:
             parameters: tuple[Any, ...] = (created_at, created_at, task_id, limit + 1)
         else:
             parameters = (limit + 1,)
-        rows = self.database.fetch_all(
-            f"SELECT * FROM tasks {where} ORDER BY created_at DESC,id DESC LIMIT ?",  # noqa: S608
-            parameters,
-        )
+        with self.database.connect() as db:
+            rows = [
+                dict(row)
+                for row in db.execute(
+                    f"SELECT * FROM tasks {where} ORDER BY created_at DESC,id DESC LIMIT ?",  # noqa: S608
+                    parameters,
+                ).fetchall()
+            ]
+            cursor_row = db.execute("SELECT COALESCE(MAX(id),0) AS id FROM task_events").fetchone()
+            event_cursor = int(cursor_row["id"])
         has_more = len(rows) > limit
         results = [self._decode(row) for row in rows[:limit]]
         next_cursor = None
         if has_more and results:
             last = results[-1]
             next_cursor = encode_cursor(last["created_at"], last["id"])
-        return {"items": results, "next_cursor": next_cursor}
+        return {"items": results, "next_cursor": next_cursor, "event_cursor": event_cursor}
 
     def cancel_requested(self, task_id: str) -> bool:
         current = self.database.fetch_one(

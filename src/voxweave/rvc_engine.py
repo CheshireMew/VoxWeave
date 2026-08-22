@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import queue
+import subprocess
+import threading
+import time
+import uuid
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -9,12 +16,197 @@ from typing import Any
 from .config import Settings
 from .hashing import sha256_file
 from .model_registry import ModelRegistry
-from .process_control import run_capture
+from .process_control import run_capture, start_managed_process, terminate_process_tree
 from .runtime import resolve_rvc_entry, resolve_rvc_python
 
 
 class RvcEngineError(RuntimeError):
     pass
+
+
+LOGGER = logging.getLogger(__name__)
+OFFLINE_IDLE_SECONDS = 60.0
+
+
+class _ResidentOfflineClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.lock = threading.RLock()
+        self.process: subprocess.Popen[str] | None = None
+        self.responses: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.stderr_tail: deque[str] = deque(maxlen=60)
+        self.model_key: str | None = None
+        self.last_used = 0.0
+        self.idle_timer: threading.Timer | None = None
+
+    def _command(self) -> tuple[list[str], Path]:
+        python = resolve_rvc_python(self.settings)
+        entry = resolve_rvc_entry(self.settings)
+        if not python or not entry:
+            raise RvcEngineError("RVC runtime is not configured")
+        return (
+            [
+                str(python),
+                "-B",
+                str(entry),
+                "--rvc-root",
+                str(Path(self.settings.rvc_root).resolve()),
+                "offline",
+            ],
+            entry,
+        )
+
+    @staticmethod
+    def _read_stdout(
+        process: subprocess.Popen[str], responses: queue.Queue[dict[str, Any]]
+    ) -> None:
+        if process.stdout is None:
+            return
+        for line in process.stdout:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                responses.put(payload)
+        responses.put(
+            {
+                "ok": False,
+                "event": "worker_exited",
+                "error": f"resident offline worker exited with code {process.poll()}",
+            }
+        )
+
+    @staticmethod
+    def _read_stderr(process: subprocess.Popen[str], stderr_tail: deque[str]) -> None:
+        if process.stderr is None:
+            return
+        for line in process.stderr:
+            value = line.rstrip()
+            if value:
+                stderr_tail.append(value)
+
+    def _wait(self, request_id: str | None, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
+        while True:
+            if cancelled and cancelled():
+                self._terminate_locked(graceful=False)
+                raise InterruptedError("task cancellation requested")
+            process = self.process
+            if not process or process.poll() is not None:
+                detail = "\n".join(self.stderr_tail) or "resident offline worker exited"
+                self._terminate_locked()
+                raise RvcEngineError(detail)
+            try:
+                payload = self.responses.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if request_id is None and payload.get("event") == "worker_started":
+                return payload
+            if request_id is not None and payload.get("request_id") == request_id:
+                return payload
+            if not payload.get("ok") and payload.get("event") == "worker_exited":
+                detail = payload.get("error") or "\n".join(self.stderr_tail)
+                self._terminate_locked()
+                raise RvcEngineError(str(detail))
+
+    def _start_locked(self) -> None:
+        command, entry = self._command()
+        responses: queue.Queue[dict[str, Any]] = queue.Queue()
+        stderr_tail: deque[str] = deque(maxlen=60)
+        self.responses = responses
+        self.stderr_tail = stderr_tail
+        process = start_managed_process(
+            command,
+            cwd=entry.parent,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+        )
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            terminate_process_tree(process)
+            raise RvcEngineError("resident offline worker pipes are unavailable")
+        self.process = process
+        threading.Thread(
+            target=self._read_stdout,
+            args=(process, responses),
+            name="voxweave-offline-results",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._read_stderr,
+            args=(process, stderr_tail),
+            name="voxweave-offline-stderr",
+            daemon=True,
+        ).start()
+        self._wait(None, None)
+
+    def _terminate_locked(self, *, graceful: bool = True) -> None:
+        timer = self.idle_timer
+        self.idle_timer = None
+        if timer:
+            timer.cancel()
+        process = self.process
+        self.process = None
+        self.model_key = None
+        if not process:
+            return
+        if graceful and process.poll() is None and process.stdin is not None:
+            try:
+                process.stdin.write('{"command":"shutdown"}\n')
+                process.stdin.flush()
+                process.wait(timeout=2)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                pass
+        if process.poll() is None:
+            terminate_process_tree(process)
+
+    def _release_if_idle(self) -> None:
+        with self.lock:
+            if time.monotonic() - self.last_used >= OFFLINE_IDLE_SECONDS:
+                self._terminate_locked()
+
+    def request(
+        self,
+        model_key: str,
+        payload: dict[str, Any],
+        cancelled: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            if self.model_key != model_key:
+                self._terminate_locked()
+            if not self.process or self.process.poll() is not None:
+                self._start_locked()
+                self.model_key = model_key
+            request_id = str(uuid.uuid4())
+            process = self.process
+            if not process or process.stdin is None:
+                raise RvcEngineError("resident offline worker is unavailable")
+            try:
+                process.stdin.write(
+                    json.dumps({**payload, "request_id": request_id}, ensure_ascii=False) + "\n"
+                )
+                process.stdin.flush()
+            except (BrokenPipeError, OSError) as error:
+                self._terminate_locked()
+                raise RvcEngineError(str(error)) from error
+            response = self._wait(request_id, cancelled)
+            self.last_used = time.monotonic()
+            if self.idle_timer:
+                self.idle_timer.cancel()
+            self.idle_timer = threading.Timer(OFFLINE_IDLE_SECONDS, self._release_if_idle)
+            self.idle_timer.daemon = True
+            self.idle_timer.start()
+            if not response.get("ok"):
+                raise RvcEngineError(str(response.get("error") or "RVC conversion failed"))
+            return response
+
+    def release(self) -> None:
+        with self.lock:
+            self._terminate_locked()
 
 
 def _bounded(name: str, value: float, minimum: float, maximum: float) -> float:
@@ -26,6 +218,7 @@ def _bounded(name: str, value: float, minimum: float, maximum: float) -> float:
 class RvcEngine:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._offline = _ResidentOfflineClient(settings)
 
     @staticmethod
     def _parameters(parameters: dict[str, Any]) -> dict[str, Any]:
@@ -200,7 +393,6 @@ class RvcEngine:
         progress: Callable[[float, str, str | None], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
-        python, entry = self._runtime()
         input_path = input_path.expanduser().resolve()
         output_path = output_path.expanduser().resolve()
         if not input_path.is_file():
@@ -209,21 +401,21 @@ class RvcEngine:
             raise FileExistsError(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         values = self._parameters(parameters)
-        command = self._command(python, entry, "convert", model, values)
-        command.extend(
-            [
-                "--input",
-                str(input_path),
-                "--output",
-                str(output_path),
-            ]
-        )
-        if parameters.get("overwrite"):
-            command.append("--overwrite")
         if progress:
             progress(0.35, "converting", f"loading {model['display_name']}")
         ModelRegistry.verify_snapshot(model)
-        payload = self._run_worker(command, entry, cancelled)
+        payload = self._offline.request(
+            f"{model['model_path']}:{model['model_sha256']}",
+            {
+                "command": "convert",
+                "model": model["model_path"],
+                "index": model.get("index_path"),
+                **values,
+                "overwrite": bool(parameters.get("overwrite")),
+                "items": [{"input": str(input_path), "output": str(output_path)}],
+            },
+            cancelled,
+        )
         ModelRegistry.verify_snapshot(model)
         if not output_path.is_file():
             raise RvcEngineError("RVC reported success but output file is missing")
@@ -239,7 +431,7 @@ class RvcEngine:
             },
             "output_path": str(output_path),
             "output_sha256": sha256_file(output_path),
-            "upstream": payload,
+            "upstream": {**payload, **payload["results"][0]},
         }
 
     def convert_batch(
@@ -253,7 +445,6 @@ class RvcEngine:
         if not jobs:
             raise ValueError("RVC batch requires at least one job")
         ModelRegistry.verify_snapshot(model)
-        python, entry = self._runtime()
         values = self._parameters(parameters)
         items = []
         for input_path, output_path in jobs:
@@ -265,21 +456,20 @@ class RvcEngine:
                 raise FileExistsError(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             items.append({"input": str(input_path), "output": str(output_path)})
-        manifest_path = jobs[0][1].parent / "rvc-batch-request.json"
-        manifest_path.write_text(
-            json.dumps(
-                {"protocol": "voxweave-rvc-batch", "version": 1, "items": items},
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        command = self._command(python, entry, "convert-batch", model, values)
-        command.extend(["--manifest", str(manifest_path)])
         if progress:
             progress(0.35, "converting", f"loading {model['display_name']} for {len(jobs)} chunks")
-        payload = self._run_worker(command, entry, cancelled)
+        payload = self._offline.request(
+            f"{model['model_path']}:{model['model_sha256']}",
+            {
+                "command": "convert-batch",
+                "model": model["model_path"],
+                "index": model.get("index_path"),
+                **values,
+                "overwrite": False,
+                "items": items,
+            },
+            cancelled,
+        )
         ModelRegistry.verify_snapshot(model)
         upstream_results = payload.get("results") or []
         if len(upstream_results) != len(jobs):
@@ -304,3 +494,9 @@ class RvcEngine:
         if progress:
             progress(0.78, "converting", f"converted {len(jobs)} verified chunks")
         return results
+
+    def release_offline(self) -> None:
+        self._offline.release()
+
+    def shutdown(self) -> None:
+        self._offline.release()

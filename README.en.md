@@ -29,7 +29,7 @@
 
 <!-- readme-header:end -->
 
-VoxWeave is a source-run RVC voice-conversion workstation for Windows. Give it local media, folders, or microphone audio and use the desktop app for previews, offline conversion, live voice conversion, and batch processing. Completed work, failures, and artifact locations remain visible in one task center.
+VoxWeave is a local RVC voice-conversion workstation for Windows. Give it local media, folders, or microphone audio and use the desktop app for previews, offline conversion, live voice conversion, and batch processing. Completed work, failures, and artifact locations remain visible in one task center.
 
 <p align="center">
   <img src="./assets/readme/hero.svg" width="100%" alt="Media, folders, and microphone audio pass through one local service to verified offline files or realtime playback">
@@ -44,11 +44,15 @@ VoxWeave is a source-run RVC voice-conversion workstation for Windows. Give it l
 | Process folders or watch for new files | Cancellable, retryable, content-deduplicated tasks | Batch & Watch |
 | Drive the workstation from a script or AI tool | A discoverable loopback HTTP/WebSocket contract and stable JSON results | CLI & API |
 
-The validated platform is Windows 11 with NVIDIA CUDA. Linux and macOS boundaries exist in source but have not been validated on physical machines. This repository does not provide voice models, virtual audio devices, model training, GPT-SoVITS, an installer, or a bundled runtime.
+The validated platform is Windows 11 with NVIDIA CUDA. Linux and macOS boundaries exist in source but have not been validated on physical machines. The portable Windows ZIP includes the application interpreter and desktop dependencies, but not RVC, FFmpeg, voice models, virtual audio devices, model training, or GPT-SoVITS. There is no installer.
 
 ## Quick start
 
-### 1. Prepare the source environment
+### 1. Use the Windows ZIP
+
+Download the Windows x64 ZIP and its `.sha256` file from the same release, verify the checksum, extract the complete `VoxWeave` directory, and run `VoxWeave.exe`. The app reuses an existing data directory and RVC environment when possible. Otherwise it selects a non-system drive and asks before downloading the locked RVC, Python, FFmpeg, or starter-model files. Large runtimes, models, caches, logs, and task artifacts remain outside the application directory.
+
+### 2. Prepare the source environment
 
 You need Python 3.12, Git, FFmpeg, and an NVIDIA CUDA GPU. Choose a data directory outside the source checkout. The Python environment, pip cache, temporary files, database, logs, downloads, and task artifacts all live there.
 
@@ -71,7 +75,7 @@ If you already have the pinned-compatible RVC environment, provide it during boo
 
 `requirements.lock` is the validated Windows/Python 3.12 dependency set used by bootstrap and CI. The source checkout retains only an ignored `.voxweave.local.json` pointer to the selected data directory.
 
-### 2. Start the desktop app
+### 3. Start the source desktop app
 
 Double-click `VoxWeave.vbs` in the repository root for a windowless launch. To keep startup errors visible, run:
 
@@ -81,7 +85,7 @@ Double-click `VoxWeave.vbs` in the repository root for a windowless launch. To k
 
 `VoxWeave.bat` only forwards old shortcuts to `VoxWeave.vbs` and exits. After updating the source, run `.\scripts\voxweave.ps1 service stop` before starting again so the authenticated shutdown path can close the old service.
 
-### 3. Install runtime components if needed
+### 4. Install runtime components if needed
 
 Start the desktop app first so the local service is available. Then submit the installation task from a new PowerShell window:
 
@@ -91,7 +95,7 @@ Start the desktop app first so the local service is available. Then submit the i
 
 The task installs the pinned RVC source, an isolated Python environment, and required inference assets under the data directory. It does not download the optional source-separation weight whose redistribution license is unconfirmed. The WeSpeaker ONNX weight is installed under CC-BY-4.0. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
-### 4. Complete your first conversion
+### 5. Complete your first conversion
 
 1. In Model Library, scan local folders or add a `.pth` file and optional `.index` that you are allowed to use.
 2. Open Conversion Studio and choose the input, output location, and target model.
@@ -190,7 +194,17 @@ D:\Tools\VoxWeave\.venv\Scripts\python.exe scripts\verify_real_user_chain.py `
   --output-root D:\Tools\VoxWeave\validation\run
 ```
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. The current project validates Windows only and does not produce an installer, archive, or bundled runtime.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. The current project validates Windows only. Official releases use a portable Windows x64 ZIP; ordinary contribution work does not generate release packages.
+
+Maintainers build only from a clean commit and keep release output outside both the repository and the system drive:
+
+```powershell
+.\scripts\build-exe.ps1 `
+  -Python D:\Tools\VoxWeave\.venv\Scripts\python.exe `
+  -OutputRoot D:\Tools\VoxWeave\release-builds
+```
+
+The command permits one build directory per version and commit. It emits the ZIP, SHA-256, file manifest, and release summary, then extracts the ZIP into a separate directory for file verification and an offscreen application/QML startup. A version, commit, component-license, runtime-DLL, QML-startup, or hash mismatch fails the build. See the [Windows release process](docs/RELEASING.md) for the full contract.
 
 ## Star History
 
@@ -204,4 +218,4 @@ GitHub Actions regenerates the chart on a schedule and publishes it to the dedic
 
 ## License and third-party components
 
-VoxWeave source is licensed under [AGPL-3.0-only](LICENSE). RVC, Qt, FFmpeg, Python dependencies, inference components, and models retain their own terms. This repository distributes source only, not those runtimes or weights. See [third-party notices](THIRD_PARTY_NOTICES.md) for sources, pinned revisions, and redistribution boundaries.
+VoxWeave source is licensed under [AGPL-3.0-only](LICENSE). The Windows ZIP contains CPython, PySide6/Qt, and the Python dependencies needed by the desktop application; it does not contain RVC, the managed RVC Python environment, FFmpeg, inference weights, or voice models. Every ZIP includes the complete license directory, Qt/PySide source and replacement instructions, and a file-by-file hash manifest. See [third-party notices](THIRD_PARTY_NOTICES.md) for sources, pinned revisions, and redistribution boundaries.

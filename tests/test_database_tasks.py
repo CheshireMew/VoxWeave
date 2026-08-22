@@ -96,6 +96,48 @@ def test_terminal_event_is_published_once_with_result_committed(tmp_path) -> Non
     manager.shutdown()
 
 
+def test_progress_updates_are_rate_and_delta_limited(tmp_path) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    manager = TaskManager(database)
+
+    def work(_args, context):
+        started = time.perf_counter()
+        for index in range(2000):
+            context.progress(index / 2000, "working", str(index))
+        return {"done": True, "elapsed_seconds": time.perf_counter() - started}
+
+    manager.register("test.work", work)
+    manager.start()
+    task = manager.submit("test.work", {})
+    completed = wait_terminal(manager, task["id"])
+    assert completed["state"] == "completed"
+    assert completed["result"]["elapsed_seconds"] < 2.0
+    count = database.fetch_one(
+        "SELECT COUNT(*) AS count FROM task_events WHERE task_id=?",
+        (task["id"],),
+    )["count"]
+    assert count < 70
+    manager.shutdown()
+
+
+def test_cancellation_checks_do_not_query_sqlite(tmp_path) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    manager = TaskManager(database)
+
+    def work(_args, context):
+        started = time.perf_counter()
+        assert not any(context.cancelled() for _ in range(5000))
+        return {"elapsed_seconds": time.perf_counter() - started}
+
+    manager.register("test.work", work)
+    manager.start()
+    task = manager.submit("test.work", {})
+    completed = wait_terminal(manager, task["id"])
+    assert completed["state"] == "completed"
+    assert completed["result"]["elapsed_seconds"] < 0.5
+    manager.shutdown()
+
+
 def test_realtime_pause_keeps_new_tasks_queued_and_rejects_an_active_task(tmp_path) -> None:
     database = Database(tmp_path / "state.sqlite3")
     manager = TaskManager(database)

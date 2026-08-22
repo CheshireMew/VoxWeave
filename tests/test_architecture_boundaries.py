@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from voxweave.protocol import OPERATION_SPECS
@@ -225,3 +227,18 @@ def test_realtime_worker_delegates_audio_processing_and_stream_lifecycle() -> No
     assert "def audio_callback" not in worker
     assert "RealtimeAudioProcessor" in worker
     assert "run_audio_stream" in worker
+
+
+def test_service_composition_import_does_not_eagerly_load_scipy() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import voxweave.controller; "
+            "assert 'scipy' not in sys.modules; assert 'numpy' not in sys.modules",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr

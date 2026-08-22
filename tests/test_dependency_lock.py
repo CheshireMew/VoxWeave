@@ -12,14 +12,22 @@ from packaging.requirements import Requirement
 ROOT = Path(__file__).parents[1]
 
 
-def _locked_versions() -> dict[str, str]:
+def _versions_from_lock(path: Path) -> dict[str, str]:
     locked = {}
-    for line in (ROOT / "requirements.lock").read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line or line.startswith("#"):
             continue
         name, expected = line.split("==", 1)
         locked[re.sub(r"[-_.]+", "-", name).casefold()] = expected
     return locked
+
+
+def _locked_versions() -> dict[str, str]:
+    return _versions_from_lock(ROOT / "requirements.lock")
+
+
+def _build_locked_versions() -> dict[str, str]:
+    return _versions_from_lock(ROOT / "requirements-build.lock")
 
 
 def test_all_declared_dependencies_have_exact_lock_entries() -> None:
@@ -52,6 +60,20 @@ def test_transitive_runtime_dependencies_are_all_locked() -> None:
     assert missing == {}
 
 
+def test_transitive_windows_build_dependencies_are_all_locked() -> None:
+    locked = _build_locked_versions()
+    missing: dict[str, list[str]] = {}
+    for package in locked:
+        for value in requires(package) or []:
+            requirement = Requirement(value)
+            if requirement.marker and not requirement.marker.evaluate():
+                continue
+            dependency = re.sub(r"[-_.]+", "-", requirement.name).casefold()
+            if dependency not in locked:
+                missing.setdefault(package, []).append(dependency)
+    assert missing == {}
+
+
 @pytest.mark.parametrize("package,expected", sorted(_locked_versions().items()))
 def test_validated_environment_matches_dependency_lock(package: str, expected: str) -> None:
     if package in {"setuptools", "wheel"}:
@@ -60,4 +82,13 @@ def test_validated_environment_matches_dependency_lock(package: str, expected: s
         actual = version(package)
     except PackageNotFoundError:
         pytest.fail(f"locked runtime package is not installed: {package}")
+    assert actual == expected
+
+
+@pytest.mark.parametrize("package,expected", sorted(_build_locked_versions().items()))
+def test_validated_environment_matches_build_lock(package: str, expected: str) -> None:
+    try:
+        actual = version(package)
+    except PackageNotFoundError:
+        pytest.fail(f"locked build package is not installed: {package}")
     assert actual == expected

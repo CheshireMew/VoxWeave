@@ -52,3 +52,7 @@ A pull request should contain one coherent result and explain:
 请不要为贡献流程生成安装器、压缩包或整合运行时。VoxWeave 源码使用 [AGPL-3.0-only](LICENSE)；提交代码即表示你有权按该许可证提供这些改动。第三方内容必须保留原始许可和来源说明。
 
 Do not build an installer, archive, or bundled runtime for the contribution workflow. VoxWeave source is [AGPL-3.0-only](LICENSE); by contributing, you confirm that you may provide the change under that license. Preserve the original license and source notice for third-party material.
+
+正式发布由维护者从干净提交运行 `scripts\build-exe.ps1`。输出必须放在仓库和系统盘之外；脚本会拒绝同一版本与提交的重复目录，并生成许可证、来源清单、SHA-256 和解压复验结果。贡献者不需要为了提交代码执行这条发布流程。
+
+Maintainers create official releases from a clean commit with `scripts\build-exe.ps1`. Output stays outside the repository and system drive; the script rejects a duplicate version/commit directory and produces license, provenance, SHA-256, and extracted-verification evidence. Contributors do not need to run this release flow for ordinary changes.

@@ -279,6 +279,7 @@ Basic.ApplicationWindow {
                 ConversionPage {
                     bridge: root.bridge
                     theme: theme
+                    pageActive: root.currentPage === 1
                     readyModels: root.readyModels
                     speakers: root.speakers
                     previewOutputs: root.previewOutputs

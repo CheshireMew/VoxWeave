@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 17
 
 MODEL_RECOMMENDATION_DEFAULTS = {
     "pitch": 0,
@@ -51,6 +51,7 @@ class Database:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._journal_configured = False
         self.migrate()
 
     @contextmanager
@@ -59,7 +60,11 @@ class Database:
             connection = sqlite3.connect(self.path, timeout=30)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA busy_timeout=30000")
+            if not self._journal_configured:
+                connection.execute("PRAGMA journal_mode=WAL")
+                self._journal_configured = True
+            connection.execute("PRAGMA synchronous=NORMAL")
             try:
                 yield connection
                 connection.commit()
@@ -102,6 +107,10 @@ class Database:
                     11: self._migrate_to_11,
                     12: self._migrate_to_12,
                     13: self._migrate_to_13,
+                    14: self._migrate_to_14,
+                    15: self._migrate_to_15,
+                    16: self._migrate_to_16,
+                    17: self._migrate_to_17,
                 }
                 while version < SCHEMA_VERSION:
                     target = version + 1
@@ -198,6 +207,8 @@ class Database:
                     detail TEXT,
                     created_at TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS task_events_task_id_index
+                    ON task_events(task_id,id);
                 CREATE TABLE IF NOT EXISTS batch_rules (
                     id TEXT PRIMARY KEY,
                     input_root TEXT NOT NULL,
@@ -231,6 +242,12 @@ class Database:
                     updated_at TEXT NOT NULL,
                     UNIQUE(batch_id, source_path, source_sha256)
                 );
+                CREATE INDEX IF NOT EXISTS batch_rules_watch_index
+                    ON batch_rules(watch_enabled,state);
+                CREATE INDEX IF NOT EXISTS batch_items_state_index
+                    ON batch_items(batch_id,state,updated_at);
+                CREATE INDEX IF NOT EXISTS batch_items_pending_index
+                    ON batch_items(state,task_id,id) WHERE task_id IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS batch_item_history (
                     id TEXT NOT NULL,
                     batch_id TEXT NOT NULL,
@@ -256,6 +273,8 @@ class Database:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS batch_runs_state_index
+                    ON batch_runs(state,updated_at);
                 CREATE TABLE IF NOT EXISTS artifact_archives (
                     task_id TEXT PRIMARY KEY REFERENCES tasks(id),
                     source_path TEXT NOT NULL,
@@ -291,6 +310,13 @@ class Database:
                     metrics_json TEXT,
                     created_at TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS realtime_sessions_created_index
+                    ON realtime_sessions(created_at DESC,id);
+                CREATE INDEX IF NOT EXISTS realtime_sessions_active_index
+                    ON realtime_sessions(created_at DESC,id)
+                    WHERE state IN ('starting','running','stopping');
+                CREATE INDEX IF NOT EXISTS realtime_events_session_index
+                    ON realtime_events(session_id,id);
                 CREATE TABLE IF NOT EXISTS artifacts (
                     id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -531,6 +557,48 @@ class Database:
     @classmethod
     def _migrate_to_13(cls, db: sqlite3.Connection) -> None:
         cls._add_column(db, "models", "archived INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _migrate_to_14(db: sqlite3.Connection) -> None:
+        db.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS task_events_task_id_index
+                ON task_events(task_id,id);
+            CREATE INDEX IF NOT EXISTS realtime_sessions_created_index
+                ON realtime_sessions(created_at DESC,id);
+            CREATE INDEX IF NOT EXISTS realtime_events_session_index
+                ON realtime_events(session_id,id);
+            CREATE INDEX IF NOT EXISTS batch_rules_watch_index
+                ON batch_rules(watch_enabled,state);
+            CREATE INDEX IF NOT EXISTS batch_items_state_index
+                ON batch_items(batch_id,state,updated_at);
+            CREATE INDEX IF NOT EXISTS batch_runs_state_index
+                ON batch_runs(state,updated_at);
+            """
+        )
+
+    @staticmethod
+    def _migrate_to_15(db: sqlite3.Connection) -> None:
+        db.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS batch_items_pending_index
+                ON batch_items(state,task_id,id) WHERE task_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS realtime_sessions_state_index
+                ON realtime_sessions(state,created_at DESC,id);
+            """
+        )
+
+    @staticmethod
+    def _migrate_to_16(db: sqlite3.Connection) -> None:
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS realtime_sessions_active_index "
+            "ON realtime_sessions(created_at DESC,id) "
+            "WHERE state IN ('starting','running','stopping')"
+        )
+
+    @staticmethod
+    def _migrate_to_17(db: sqlite3.Connection) -> None:
+        db.execute("DROP INDEX IF EXISTS realtime_sessions_state_index")
 
     @classmethod
     def _validate_schema(cls, db: sqlite3.Connection) -> None:

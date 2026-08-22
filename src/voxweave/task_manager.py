@@ -4,6 +4,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -36,6 +37,8 @@ class DeferredTask:
 TERMINAL_STATES = {"completed", "failed", "cancelled", "interrupted"}
 LIFECYCLE_STATES = {"queued", "running", *TERMINAL_STATES}
 LOGGER = logging.getLogger(__name__)
+PROGRESS_INTERVAL_SECONDS = 0.1
+PROGRESS_DELTA = 0.02
 
 
 class TaskManager:
@@ -50,6 +53,16 @@ class TaskManager:
         self._dispatch_condition = threading.Condition()
         self._dispatch_pause_reasons: set[str] = set()
         self._executing = False
+        self._cancel_lock = threading.Lock()
+        self._cancel_events: dict[str, threading.Event] = {}
+
+    def _cancel_event(self, task_id: str) -> threading.Event:
+        with self._cancel_lock:
+            return self._cancel_events.setdefault(task_id, threading.Event())
+
+    def _forget_cancel_event(self, task_id: str) -> None:
+        with self._cancel_lock:
+            self._cancel_events.pop(task_id, None)
 
     def register(self, operation: str, handler: Handler) -> None:
         if self.started:
@@ -118,6 +131,7 @@ class TaskManager:
         return self.get(task_id)
 
     def notify_enqueued(self, task_id: str) -> None:
+        self._cancel_event(task_id)
         self.queue.put(task_id)
 
     def _update(
@@ -197,15 +211,35 @@ class TaskManager:
             )
             return
 
+        cancel_event = self._cancel_event(task_id)
+        if row.get("cancel_requested"):
+            cancel_event.set()
+
         def cancelled() -> bool:
-            return self.stop_event.is_set() or self.repository.cancel_requested(task_id)
+            return self.stop_event.is_set() or cancel_event.is_set()
+
+        last_progress_at = 0.0
+        last_progress_value = -1.0
+        last_progress_stage: str | None = None
 
         def progress(value: float, stage: str, detail: str | None = None) -> None:
+            nonlocal last_progress_at, last_progress_value, last_progress_stage
             if cancelled():
                 raise InterruptedError("task cancellation requested")
             if stage in TERMINAL_STATES:
                 raise ValueError("task handlers cannot publish terminal lifecycle states")
+            normalized = max(0.0, min(1.0, value))
+            now = time.monotonic()
+            if (
+                stage == last_progress_stage
+                and now - last_progress_at < PROGRESS_INTERVAL_SECONDS
+                and abs(normalized - last_progress_value) < PROGRESS_DELTA
+            ):
+                return
             self._update(task_id, state="running", progress=value, stage=stage, detail=detail)
+            last_progress_at = now
+            last_progress_value = normalized
+            last_progress_stage = stage
 
         try:
             if cancelled():
@@ -264,6 +298,8 @@ class TaskManager:
             LOGGER.info(
                 "task completed", extra={"task_id": task_id, "operation": operation}
             )
+        finally:
+            self._forget_cancel_event(task_id)
 
     def get(self, task_id: str) -> dict[str, Any]:
         return self.repository.get(task_id)
@@ -276,6 +312,7 @@ class TaskManager:
         if task["state"] in TERMINAL_STATES:
             return task
         if task["state"] == "queued":
+            self._cancel_event(task_id).set()
             self._update(
                 task_id,
                 state="cancelled",
@@ -284,7 +321,9 @@ class TaskManager:
                 error_type="cancelled",
                 error="task cancellation requested before dispatch",
             )
+            self._forget_cancel_event(task_id)
         else:
+            self._cancel_event(task_id).set()
             self.repository.request_cancel(task_id)
         return self.get(task_id)
 
@@ -371,6 +410,7 @@ class TaskManager:
         return self.repository.recent_events(limit)
 
     def shutdown(self) -> None:
+        self.started = False
         self.stop_event.set()
         with self._dispatch_condition:
             self._dispatch_condition.notify_all()

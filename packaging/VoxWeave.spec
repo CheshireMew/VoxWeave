@@ -13,6 +13,7 @@ worker_sources = [
     "rvc_realtime_audio.py",
     "rvc_realtime_worker.py",
     "rvc_worker.py",
+    "release_smoke.py",
     "separation_worker.py",
 ]
 
@@ -40,8 +41,10 @@ analysis = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        "_pytest",
         "httpx",
         "jsonschema",
+        "packaging",
         "pip",
         "pytest",
         "ruff",

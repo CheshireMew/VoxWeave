@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import config
 from .config import Settings
 from .runtime import resolve_rvc_python
 
@@ -42,7 +43,7 @@ def report_identity(report: dict[str, Any]) -> dict[str, Any]:
 def load_runtime_verification(settings: Settings) -> dict[str, Any] | None:
     path = settings.runtime_verification_path
     if not path.is_file():
-        legacy = settings.state_dir / "runtime-verification.json"
+        legacy = config.SOURCE_ROOT / ".voxweave" / "runtime-verification.json"
         if not legacy.is_file():
             return None
         path = legacy

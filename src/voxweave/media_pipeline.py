@@ -46,6 +46,12 @@ class MediaPipeline:
             self.inputs,
         )
 
+    def release_engine(self) -> None:
+        self.engine.release_offline()
+
+    def shutdown(self) -> None:
+        self.engine.shutdown()
+
     def inspect(self, arguments: dict[str, Any], context: TaskContext) -> dict[str, Any]:
         return self.inputs.inspect(Path(arguments["input"]), arguments, context)
 

@@ -110,3 +110,20 @@ def test_managed_gui_client_only_stops_a_service_it_started(tmp_path, monkeypatc
     assert external.ensure() is discovery
     external.shutdown_if_owned()
     assert stopped == [True]
+
+
+def test_managed_gui_client_cannot_restart_after_shutdown(tmp_path, monkeypatch) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    starts: list[bool] = []
+    managed = client.ManagedServiceClient(settings)
+    managed.shutdown_if_owned()
+    monkeypatch.setattr(
+        client,
+        "ensure_service_with_state",
+        lambda _settings: starts.append(True),
+    )
+
+    with pytest.raises(client.ServiceUnavailable, match="closed"):
+        managed.ensure()
+
+    assert starts == []

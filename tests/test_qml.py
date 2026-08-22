@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+import wave
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -25,6 +26,7 @@ from voxweave.gui_presenters import (  # noqa: E402
     localized_task_title,
 )
 from voxweave.onboarding import RuntimeCandidate  # noqa: E402
+from voxweave.release_smoke import run_smoke  # noqa: E402
 from voxweave.service import create_app  # noqa: E402
 
 
@@ -326,6 +328,17 @@ def test_main_qml_loads(tmp_path) -> None:
     assert root.property("currentPage") == 0
     assert root.findChild(QObject, "navButton0").property("iconName") == "realtime"
     assert root.findChild(QObject, "navButton1").property("iconName") == "convert"
+    audio_path = tmp_path / "result.wav"
+    with wave.open(str(audio_path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8000)
+        audio.writeframes(b"\0\0" * 80)
+    bridge.media.selectAudio(str(audio_path))
+    app.processEvents()
+    result_player = root.findChild(QObject, "resultPlayer")
+    assert result_player is not None
+    assert result_player.property("source").isEmpty()
     for index, object_name in enumerate(
         [
             "realtimePage",
@@ -343,6 +356,9 @@ def test_main_qml_loads(tmp_path) -> None:
         assert root.property("currentPage") == index
         assert stack.property("currentIndex") == index
         assert root.findChild(QObject, object_name) is not None
+        if index == 1:
+            assert not result_player.property("source").isEmpty()
+    assert result_player.property("source").isEmpty()
     assert root.findChild(QObject, "realtimeStartButton") is not None
     assert root.findChild(QObject, "realtimeStopButton") is not None
     primary_controls = root.findChild(QObject, "realtimePrimaryControls")
@@ -455,6 +471,20 @@ def test_main_qml_loads(tmp_path) -> None:
     app.processEvents()
 
 
+def test_release_smoke_loads_application_stack_without_starting_services(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("VOXWEAVE_HOME", str(tmp_path / "data"))
+    report_path = tmp_path / "smoke-report.json"
+
+    assert run_smoke(report_path) == 0
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["ok"] is True
+    assert report["root_object_count"] >= 1
+    assert report["platform_plugin"] == "offscreen"
+
+
 def test_realtime_preferences_survive_restart_and_device_id_changes(tmp_path, monkeypatch) -> None:
     app = QGuiApplication.instance() or QGuiApplication([])
     settings = Settings(data_root=str(tmp_path))
@@ -563,6 +593,11 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(tmp_path, mo
             if root.findChild(QObject, "settingsAudioInputDevice").property("currentValue") == 7:
                 break
             time.sleep(0.01)
+        quiet_deadline = time.monotonic() + 0.65
+        while time.monotonic() < quiet_deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert prepare_requests == []
 
         root.findChild(QObject, "realtimeModelSelector").setProperty("currentIndex", 1)
         assert QMetaObject.invokeMethod(page, "applySelectedModelRecommendations")

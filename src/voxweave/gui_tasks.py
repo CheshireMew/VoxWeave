@@ -129,12 +129,20 @@ class TaskFeed(QObject):
         self.items: list[dict[str, Any]] = []
         self.next_cursor: str | None = None
         self.refreshing = False
+        self.pending_events: list[dict[str, Any]] = []
+        self.snapshot_event_cursor = 0
+        self.started = False
         self.events = TaskEventStream(settings, self, discovery_provider)
         self.events.eventReceived.connect(self._event)
 
     def start(self) -> None:
+        self.started = True
         self.refresh()
-        self.events.start()
+
+    def _drain_pending_events(self) -> None:
+        pending, self.pending_events = self.pending_events, []
+        for event in pending:
+            self._apply_event(event)
 
     def accept(self, task: dict[str, Any]) -> None:
         task_id = task["id"]
@@ -157,12 +165,20 @@ class TaskFeed(QObject):
             self.refreshing = False
             self.items = list(result["items"])
             self.next_cursor = result.get("next_cursor")
+            self.snapshot_event_cursor = max(
+                self.snapshot_event_cursor, int(result.get("event_cursor") or 0)
+            )
             self.itemsChanged.emit()
             for task in self.items:
                 self.taskUpdated.emit(task)
+            self._drain_pending_events()
+            if self.started and not self.events.active:
+                self.events.after_id = int(result.get("event_cursor") or 0)
+                self.events.start()
 
         def failed(_message: str) -> None:
             self.refreshing = False
+            self._drain_pending_events()
 
         self.requests.submit(
             "task.list",
@@ -186,20 +202,48 @@ class TaskFeed(QObject):
             self.items.extend(item for item in result["items"] if item["id"] not in known)
             self.next_cursor = result.get("next_cursor")
             self.itemsChanged.emit()
+            self._drain_pending_events()
+
+        def failed(_message: str) -> None:
+            self.refreshing = False
+            self._drain_pending_events()
 
         self.requests.submit(
             "task.list",
             {"limit": 200, "cursor": cursor},
             update,
             show_status=False,
-            error_callback=lambda _message: setattr(self, "refreshing", False),
+            error_callback=failed,
             request_key=f"task-page:{cursor}",
         )
 
     @Slot(object)
     def _event(self, value: object) -> None:
         event = dict(value)
+        if self.refreshing:
+            self.pending_events.append(event)
+            return
+        self._apply_event(event)
+
+    def _apply_event(self, event: dict[str, Any]) -> None:
         task_id = event["task_id"]
+        existing = next((item for item in self.items if item["id"] == task_id), None)
+        if existing is None:
+            if int(event.get("id") or 0) > self.snapshot_event_cursor:
+                self.refresh()
+            return
+        terminal = event.get("state") in {"completed", "failed", "cancelled", "interrupted"}
+        if existing is not None and not terminal:
+            self.accept(
+                {
+                    **existing,
+                    "state": event.get("state", existing.get("state")),
+                    "progress": event.get("progress", existing.get("progress", 0.0)),
+                    "stage": event.get("stage", existing.get("stage")),
+                    "updated_at": event.get("created_at", existing.get("updated_at")),
+                }
+            )
+            return
         self.requests.submit(
             "task.get",
             {"task_id": task_id},
@@ -209,6 +253,7 @@ class TaskFeed(QObject):
         )
 
     def shutdown(self) -> None:
+        self.started = False
         self.events.shutdown()
 
 

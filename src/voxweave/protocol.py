@@ -360,6 +360,7 @@ class TaskRecord(ResultModel):
 class TaskPage(ResultModel):
     items: list[TaskRecord]
     next_cursor: str | None
+    event_cursor: int = 0
 
 
 class ModelRecord(ResultModel):

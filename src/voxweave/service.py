@@ -186,6 +186,8 @@ def create_app(
                 for row in rows:
                     after_id = max(after_id, int(row["id"]))
                     await websocket.send_json(row)
+                if len(rows) >= 500:
+                    continue
                 try:
                     message = await asyncio.wait_for(websocket.receive(), timeout=0.25)
                 except TimeoutError:

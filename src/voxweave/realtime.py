@@ -23,6 +23,7 @@ ACTIVE_STATES = {"starting", "running", "stopping"}
 TERMINAL_STATES = {"stopped", "failed", "interrupted"}
 LIFECYCLE_STATES = ACTIVE_STATES | TERMINAL_STATES
 STOP_TIMEOUT_SECONDS = 10.0
+REALTIME_IDLE_SECONDS = 60.0
 
 
 class RealtimeSessionManager:
@@ -33,6 +34,7 @@ class RealtimeSessionManager:
         engine: RvcEngine,
         pause_offline_dispatch: Callable[[str], bool] | None = None,
         resume_offline_dispatch: Callable[[str], None] | None = None,
+        release_offline_resources: Callable[[], None] | None = None,
     ) -> None:
         self.database = database
         self.repository = RealtimeRepository(database)
@@ -40,6 +42,7 @@ class RealtimeSessionManager:
         self.engine = engine
         self.pause_offline_dispatch = pause_offline_dispatch or (lambda _reason: True)
         self.resume_offline_dispatch = resume_offline_dispatch or (lambda _reason: None)
+        self.release_offline_resources = release_offline_resources or (lambda: None)
         self._lock = threading.RLock()
         self._process: subprocess.Popen[str] | None = None
         self._reader_thread: threading.Thread | None = None
@@ -56,6 +59,9 @@ class RealtimeSessionManager:
         self._preparing_key: str | None = None
         self._service_stopping = False
         self._offline_dispatch_paused = False
+        self._last_heartbeat_at = 0.0
+        self._last_overloaded: bool | None = None
+        self._idle_release_timer: threading.Timer | None = None
         self._recover_interrupted_sessions()
 
     def _recover_interrupted_sessions(self) -> None:
@@ -143,15 +149,21 @@ class RealtimeSessionManager:
                 return self.status()
             if self._prepare_id and self._preparing_key == cache_key:
                 return self.status()
-            self._ensure_worker_locked()
-            prepare_id = str(uuid.uuid4())
-            self._prepare_id = prepare_id
-            self._preparing_key = cache_key
-            self._worker_state = "warming"
-            self._worker_model_id = model["id"]
-            self._model_ready = False
-            self._prepared_key = None
+            if not self._offline_dispatch_paused:
+                if not self.pause_offline_dispatch("realtime"):
+                    raise RuntimeError("cannot prepare realtime while a background task is running")
+                self._offline_dispatch_paused = True
             try:
+                self._cancel_idle_release_locked()
+                self.release_offline_resources()
+                self._ensure_worker_locked()
+                prepare_id = str(uuid.uuid4())
+                self._prepare_id = prepare_id
+                self._preparing_key = cache_key
+                self._worker_state = "warming"
+                self._worker_model_id = model["id"]
+                self._model_ready = False
+                self._prepared_key = None
                 self._send_command_locked(
                     {
                         **worker_command,
@@ -163,6 +175,7 @@ class RealtimeSessionManager:
                 self._prepare_id = None
                 self._preparing_key = None
                 self._worker_state = "failed"
+                self._release_offline_dispatch()
                 raise
             return self.status()
 
@@ -174,9 +187,16 @@ class RealtimeSessionManager:
                 active = self.repository.active()
                 if active:
                     raise RuntimeError(f"realtime session is already active: {active['id']}")
-                if not self.pause_offline_dispatch("realtime"):
-                    raise RuntimeError("cannot start realtime while a background task is running")
-                self._offline_dispatch_paused = True
+                self._cancel_idle_release_locked()
+                self._last_heartbeat_at = 0.0
+                self._last_overloaded = None
+                if not self._offline_dispatch_paused:
+                    if not self.pause_offline_dispatch("realtime"):
+                        raise RuntimeError(
+                            "cannot start realtime while a background task is running"
+                        )
+                    self._offline_dispatch_paused = True
+                self.release_offline_resources()
                 self.repository.create(session_id, model, normalized)
                 self._active_id = session_id
                 self._active_model = model
@@ -354,6 +374,7 @@ class RealtimeSessionManager:
                     self._prepared_key = str(payload.get("cache_key") or "") or None
                     self._prepare_id = None
                     self._preparing_key = None
+                    self._schedule_idle_release_locked()
                 return
 
             session_id = str(payload.get("session_id") or "")
@@ -377,7 +398,10 @@ class RealtimeSessionManager:
                 )
                 self._active_id = None
                 self._active_model = None
-                release_dispatch = True
+                if self._model_ready:
+                    self._schedule_idle_release_locked()
+                else:
+                    release_dispatch = True
             elif event == "warming":
                 self._worker_state = "warming"
                 self._worker_model_id = str(payload.get("model_id") or "") or None
@@ -447,7 +471,7 @@ class RealtimeSessionManager:
                             )
                 self._active_id = None
                 self._active_model = None
-                release_dispatch = True
+                self._schedule_idle_release_locked()
         if release_dispatch:
             self._release_offline_dispatch()
 
@@ -469,6 +493,7 @@ class RealtimeSessionManager:
             self._prepared_key = None
             self._prepare_id = None
             self._preparing_key = None
+            release_dispatch = self._offline_dispatch_paused
             session_id = self._active_id
             if session_id:
                 current = self.repository.get(session_id)
@@ -496,7 +521,6 @@ class RealtimeSessionManager:
                     )
                 self._active_id = None
                 self._active_model = None
-                release_dispatch = True
         if release_dispatch:
             self._release_offline_dispatch()
 
@@ -514,9 +538,39 @@ class RealtimeSessionManager:
             self._offline_dispatch_paused = False
         self.resume_offline_dispatch("realtime")
 
+    def _cancel_idle_release_locked(self) -> None:
+        timer = self._idle_release_timer
+        self._idle_release_timer = None
+        if timer:
+            timer.cancel()
+
+    def _schedule_idle_release_locked(self) -> None:
+        self._cancel_idle_release_locked()
+        if self._service_stopping or self._active_id or not self._process:
+            return
+
+        def release_idle() -> None:
+            with self._lock:
+                if self._active_id or self._service_stopping:
+                    return
+            self.release()
+
+        self._idle_release_timer = threading.Timer(REALTIME_IDLE_SECONDS, release_idle)
+        self._idle_release_timer.daemon = True
+        self._idle_release_timer.start()
+
     def _heartbeat(self, session_id: str, metrics: dict[str, Any]) -> None:
         with self._lock:
+            now = time.monotonic()
+            overloaded = bool(metrics.get("overloaded"))
+            if (
+                self._last_overloaded == overloaded
+                and now - self._last_heartbeat_at < 1.0
+            ):
+                return
             self.repository.heartbeat(session_id, metrics)
+            self._last_heartbeat_at = now
+            self._last_overloaded = overloaded
 
     def _start_stop_watchdog(self, session_id: str, process: subprocess.Popen[str]) -> None:
         with self._lock:
@@ -618,6 +672,7 @@ class RealtimeSessionManager:
         with self._lock:
             if self.repository.active():
                 return self.status()
+            self._cancel_idle_release_locked()
             process = self._process
             self._prepare_id = None
             self._preparing_key = None
@@ -641,7 +696,9 @@ class RealtimeSessionManager:
             if self._process is process:
                 self._process = None
             self._worker_state = "not_started"
-            return self.status()
+            result = self.status()
+        self._release_offline_dispatch()
+        return result
 
     def events(self, session_id: str, after_id: int = 0) -> list[dict[str, Any]]:
         return self.repository.events(session_id, after_id)
@@ -649,6 +706,7 @@ class RealtimeSessionManager:
     def shutdown(self) -> None:
         with self._lock:
             self._service_stopping = True
+            self._cancel_idle_release_locked()
             active_id = self._active_id
             process = self._process
         if active_id:

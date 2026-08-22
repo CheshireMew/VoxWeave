@@ -233,7 +233,7 @@ class Settings:
 
     @property
     def runtime_verification_path(self) -> Path:
-        return SOURCE_ROOT / ".voxweave" / "runtime-verification.json"
+        return self.state_dir / "runtime-verification.json"
 
     @property
     def config_path(self) -> Path:

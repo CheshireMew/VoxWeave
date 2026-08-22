@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Replaced timestamp-based file hash caching with authoritative, stable-handle SHA-256 reads so restored timestamps or concurrent writes cannot reuse stale model, checkpoint, archive, or media identities.
+- Made realtime audio shutdown bounded and fatal on timeout; an unhealthy resident worker can no longer report a clean stop, reuse its prepared processor, or accept another session.
+- Added a clean-commit Windows x64 release pipeline that locks the complete PyInstaller build graph, compares the actual PyInstaller module inventory with the license authority, collects CPython/PyInstaller/Python-package licenses, includes Qt/PySide LGPL source and replacement instructions, creates a deterministic ZIP with SHA-256, and verifies a fresh extracted tree file by file.
+- Moved release work outside the repository and limited output to one directory per version and commit, preventing repeated builds from silently growing `.archive`.
+- Aligned the Chinese, English, and Japanese release, runtime, and licensing descriptions with the actual portable ZIP boundary.
+
 ## 0.2.0 — 2026-08-13
 
 - Added a Windows EXE distribution with the VoxWeave application icon, a reproducible PyInstaller build, and a runtime-focused package allowlist that excludes models and development files.
@@ -26,4 +32,4 @@
 - Added low-energy long-audio chunking with one-load RVC batch inference for full-length media.
 - Added Simplified Chinese and English resources, source bootstraps, diagnostics, license notices, model policy, schemas, and Windows CI.
 
-Windows CUDA is the only platform validated for this release. No installer, bundled runtime, voice model, or telemetry is included.
+Windows CUDA is the only platform validated for this release. The portable ZIP includes the desktop application's CPython/PySide/Qt runtime, but no installer, managed RVC runtime, FFmpeg, voice model, or telemetry.

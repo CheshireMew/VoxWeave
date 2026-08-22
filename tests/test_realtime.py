@@ -18,15 +18,22 @@ from voxweave.model_registry import ModelRegistry
 from voxweave.realtime import RealtimeSessionManager
 from voxweave.rvc_engine import RvcEngine
 from voxweave.rvc_realtime_audio import (
+    AsyncRealtimeAudioBridge,
     RealtimeAudioProcessor,
+    RealtimeInferenceStopTimeout,
     UtteranceTestMode,
     VoiceActivityDecision,
     VoiceActivityState,
+    run_audio_stream,
     select_mono_channel,
     select_stream_spec,
     should_process_audio,
 )
-from voxweave.rvc_realtime_worker import WorkerControl, select_default_audio_route
+from voxweave.rvc_realtime_worker import (
+    ResidentRealtimeWorker,
+    WorkerControl,
+    select_default_audio_route,
+)
 
 
 class AudioSettingsProbe:
@@ -262,6 +269,212 @@ def test_input_level_prevents_vad_from_muting_audible_microphone_audio() -> None
     assert should_process_audio(rejected, -29.0, -30.0) is True
     assert should_process_audio(rejected, -37.4, -30.0) is False
     assert should_process_audio(accepted, -90.0, -30.0) is True
+
+
+def test_async_audio_bridge_keeps_slow_inference_off_callback_thread() -> None:
+    class Processor:
+        def __init__(self) -> None:
+            self.np = np
+            self.spec = SimpleNamespace(block_frame=8, input_channels=1, output_channels=1)
+            self.sd = SimpleNamespace(CallbackAbort=RuntimeError)
+            self.metrics_lock = threading.Lock()
+            self.metrics = {
+                "xruns": 0,
+                "input_overruns": 0,
+                "output_underruns": 0,
+                "pipeline_depth": 0,
+            }
+
+        @staticmethod
+        def callback(_indata, outdata, _frames, _times, _status):
+            time.sleep(0.1)
+            outdata.fill(0.5)
+
+    processor = Processor()
+    bridge = AsyncRealtimeAudioBridge(processor)  # type: ignore[arg-type]
+    bridge.start()
+    input_block = np.ones((8, 1), dtype="float32")
+    first_output = np.empty((8, 1), dtype="float32")
+    started = time.perf_counter()
+    bridge.callback(input_block, first_output, 8, None, None)
+    callback_elapsed = time.perf_counter() - started
+    assert callback_elapsed < 0.03
+    assert np.all(first_output == 0)
+    time.sleep(0.15)
+    second_output = np.empty((8, 1), dtype="float32")
+    bridge.callback(input_block, second_output, 8, None, None)
+    assert np.all(second_output == 0.5)
+    bridge.stop()
+
+
+def test_async_audio_bridge_refuses_to_report_a_stuck_thread_as_stopped() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Processor:
+        def __init__(self) -> None:
+            self.np = np
+            self.spec = SimpleNamespace(block_frame=8, input_channels=1, output_channels=1)
+            self.sd = SimpleNamespace(CallbackAbort=RuntimeError)
+            self.metrics_lock = threading.Lock()
+            self.metrics = {
+                "xruns": 0,
+                "input_overruns": 0,
+                "output_underruns": 0,
+                "pipeline_depth": 0,
+            }
+
+        @staticmethod
+        def callback(_indata, _outdata, _frames, _times, _status):
+            entered.set()
+            release.wait(timeout=2)
+
+    processor = Processor()
+    bridge = AsyncRealtimeAudioBridge(
+        processor,  # type: ignore[arg-type]
+        stop_timeout_seconds=0.05,
+    )
+    bridge.start()
+    bridge.callback(
+        np.ones((8, 1), dtype="float32"),
+        np.empty((8, 1), dtype="float32"),
+        8,
+        None,
+        None,
+    )
+    assert entered.wait(timeout=1)
+    with pytest.raises(RealtimeInferenceStopTimeout, match="did not stop"):
+        bridge.stop()
+    assert bridge.thread and bridge.thread.is_alive()
+    release.set()
+    bridge.thread.join(timeout=1)
+    assert not bridge.thread.is_alive()
+
+
+def test_resident_worker_marks_stop_timeout_fatal_without_reusing_processor(
+    monkeypatch,
+) -> None:
+    resets: list[str] = []
+    emitted: list[dict[str, Any]] = []
+    processor = SimpleNamespace(reset=lambda: resets.append("reset"))
+    worker = ResidentRealtimeWorker(
+        np=np,
+        sd=SimpleNamespace(),
+        torch=SimpleNamespace(),
+        functional=SimpleNamespace(),
+        transforms=SimpleNamespace(),
+    )
+    worker.processor = processor  # type: ignore[assignment]
+    worker.config = SimpleNamespace(device="cpu")
+    worker.prepared_key = "prepared"
+    monkeypatch.setattr(
+        worker,
+        "_prepare_processor",
+        lambda _command, _emit: (SimpleNamespace(sample_rate=48000, block_frame=8), "WASAPI", True),
+    )
+    monkeypatch.setattr(
+        "voxweave.rvc_realtime_worker.run_audio_stream",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RealtimeInferenceStopTimeout("inference thread remained active")
+        ),
+    )
+    monkeypatch.setattr("voxweave.rvc_realtime_worker._emit", emitted.append)
+
+    healthy = worker.run_session(
+        {
+            "session_id": "session-timeout",
+            "model_id": "voice",
+            "cache_key": "prepared",
+            "input_device": 1,
+            "output_device": 2,
+            "block_seconds": 0.5,
+            "test_mode": False,
+        },
+        threading.Event(),
+    )
+
+    assert healthy is False
+    assert resets == []
+    assert worker.prepared_key is None
+    assert emitted[-1] == {
+        "ok": False,
+        "event": "failed",
+        "error_type": "RealtimeInferenceStopTimeout",
+        "error": "inference thread remained active",
+        "model_ready": False,
+        "cache_key": None,
+        "session_id": "session-timeout",
+        "model_id": "voice",
+    }
+
+
+def test_audio_stream_start_failure_stops_async_bridge(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class Bridge:
+        error = None
+
+        def __init__(self, _processor) -> None:
+            self.callback = lambda *_args: None
+
+        def start(self) -> None:
+            calls.append("bridge.start")
+
+        def stop(self) -> None:
+            calls.append("bridge.stop")
+
+    class Stream:
+        active = False
+
+        def start(self) -> None:
+            calls.append("stream.start")
+            raise RuntimeError("device unavailable")
+
+        def abort(self) -> None:
+            calls.append("stream.abort")
+
+        def close(self) -> None:
+            calls.append("stream.close")
+
+    class Processor:
+        device = "cpu"
+        callback_error: list[str] = []
+        spec = SimpleNamespace(
+            sample_rate=48000,
+            block_frame=12000,
+            sola_buffer_frame=2400,
+            input_channels=1,
+            output_channels=1,
+        )
+
+        @staticmethod
+        def configure_test_mode(_enabled: bool) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "voxweave.rvc_realtime_audio.AsyncRealtimeAudioBridge", Bridge
+    )
+    sd = SimpleNamespace(Stream=lambda **_kwargs: Stream())
+    with pytest.raises(RuntimeError, match="device unavailable"):
+        run_audio_stream(
+            sd=sd,
+            processor=Processor(),  # type: ignore[arg-type]
+            input_device=1,
+            output_device=2,
+            hostapi="WASAPI",
+            block_seconds=0.25,
+            test_mode=False,
+            emit=lambda _payload: None,
+            stop_event=threading.Event(),
+        )
+
+    assert calls == [
+        "bridge.start",
+        "stream.start",
+        "stream.abort",
+        "stream.close",
+        "bridge.stop",
+    ]
 
 
 def test_realtime_stream_spec_uses_a_rate_supported_by_both_devices() -> None:
@@ -506,6 +719,19 @@ for line in sys.stdin:
 """
 
 
+class CrashingPrepareEngine(ProcessEngine):
+    @staticmethod
+    def _worker_code() -> str:
+        return """
+import json
+import sys
+
+print(json.dumps({"ok": True, "event": "worker_started"}), flush=True)
+json.loads(sys.stdin.readline())
+raise RuntimeError("prepare crashed")
+"""
+
+
 class IgnoringStopEngine(ProcessEngine):
     @staticmethod
     def _worker_code() -> str:
@@ -617,6 +843,39 @@ def test_idle_prepared_realtime_worker_can_be_released(tmp_path) -> None:
         "model_id": None,
         "model_ready": False,
     }
+    manager.shutdown()
+
+
+def test_crashed_idle_prepare_resumes_offline_dispatch(tmp_path) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    database = Database(settings.database_path)
+    register_model(database, tmp_path)
+    lifecycle: list[str] = []
+    resumed = threading.Event()
+    manager = RealtimeSessionManager(
+        database,
+        ModelRegistry(database),
+        CrashingPrepareEngine(tmp_path),  # type: ignore[arg-type]
+        pause_offline_dispatch=lambda reason: lifecycle.append(f"pause:{reason}") or True,
+        resume_offline_dispatch=lambda reason: (
+            lifecycle.append(f"resume:{reason}"),
+            resumed.set(),
+        ),
+        release_offline_resources=lambda: lifecycle.append("release"),
+    )
+
+    manager.prepare(
+        {
+            "model": "voice",
+            "input_device": 1,
+            "output_device": 2,
+            "block_seconds": 0.5,
+        }
+    )
+
+    assert resumed.wait(timeout=5)
+    assert lifecycle == ["pause:realtime", "release", "resume:realtime"]
+    assert manager.status()["worker"]["pid"] is None
     manager.shutdown()
 
 

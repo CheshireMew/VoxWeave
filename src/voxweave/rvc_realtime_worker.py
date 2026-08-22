@@ -15,12 +15,14 @@ from typing import Any
 if __package__:
     from .rvc_realtime_audio import (
         RealtimeAudioProcessor,
+        RealtimeInferenceStopTimeout,
         run_audio_stream,
         select_stream_spec,
     )
 else:
     from rvc_realtime_audio import (  # type: ignore[no-redef]
         RealtimeAudioProcessor,
+        RealtimeInferenceStopTimeout,
         run_audio_stream,
         select_stream_spec,
     )
@@ -265,17 +267,26 @@ class ResidentRealtimeWorker:
             spec = self.processor.spec
         return spec, hostapi, cached
 
-    def _failure_payload(self, error: Exception) -> dict[str, Any]:
-        if self.processor is not None and self.prepared_key is not None:
+    def _failure_payload(
+        self,
+        error: Exception,
+        *,
+        reset_processor: bool = True,
+        model_ready: bool | None = None,
+    ) -> dict[str, Any]:
+        if reset_processor and self.processor is not None and self.prepared_key is not None:
             with contextlib.suppress(Exception):
                 self.processor.reset()
+        ready = self.processor is not None and self.prepared_key is not None
+        if model_ready is not None:
+            ready = model_ready
         return {
             "ok": False,
             "event": "failed",
             "error_type": type(error).__name__,
             "error": str(error),
-            "model_ready": self.processor is not None and self.prepared_key is not None,
-            "cache_key": self.prepared_key,
+            "model_ready": ready,
+            "cache_key": self.prepared_key if ready else None,
         }
 
     def prepare(self, command: dict[str, Any]) -> None:
@@ -301,7 +312,7 @@ class ResidentRealtimeWorker:
         except Exception as error:  # noqa: BLE001 - resident worker command boundary
             emit_prepare(self._failure_payload(error))
 
-    def run_session(self, command: dict[str, Any], stop_event: threading.Event) -> None:
+    def run_session(self, command: dict[str, Any], stop_event: threading.Event) -> bool:
         session_id = str(command["session_id"])
         model_id = str(command.get("model_id") or "")
 
@@ -336,8 +347,19 @@ class ResidentRealtimeWorker:
                 )
                 self.processor.reset()
             emit_session({"ok": True, "event": "stopped"})
+        except RealtimeInferenceStopTimeout as error:
+            self.prepared_key = None
+            emit_session(
+                self._failure_payload(
+                    error,
+                    reset_processor=False,
+                    model_ready=False,
+                )
+            )
+            return False
         except Exception as error:  # noqa: BLE001 - resident worker command boundary
             emit_session(self._failure_payload(error))
+        return True
 
 
 class WorkerControl:
@@ -474,6 +496,8 @@ def run_resident_worker() -> int:
     original_argv = sys.argv[:]
     sys.argv = [original_argv[0], "--pycmd", sys.executable, "--noautoopen"]
     _emit({"ok": True, "event": "worker_started"})
+    safe_to_release = True
+    exit_code = 0
     try:
         while True:
             payload = control.commands.get()
@@ -486,12 +510,18 @@ def run_resident_worker() -> int:
             if not session_id:
                 continue
             stop_event = control.begin_session(session_id)
-            worker.run_session(payload, stop_event)
+            healthy = worker.run_session(payload, stop_event)
             control.end_session(session_id)
+            if not healthy:
+                safe_to_release = False
+                exit_code = 1
+                break
             if control.shutdown_requested:
                 break
     finally:
         sys.argv = original_argv
-        worker.close()
-    _emit({"ok": True, "event": "worker_stopped"})
-    return 0
+        if safe_to_release:
+            worker.close()
+    if exit_code == 0:
+        _emit({"ok": True, "event": "worker_stopped"})
+    return exit_code

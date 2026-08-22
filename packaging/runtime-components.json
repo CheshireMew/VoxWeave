@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "python": {
+    "distribution": "CPython",
+    "version": "3.12",
+    "license_expression": "PSF-2.0",
+    "source_url": "https://www.python.org/downloads/source/"
+  },
+  "components": [
+    {"distribution": "annotated-types", "version": "0.8.0", "license_expression": "MIT", "source_url": "https://github.com/annotated-types/annotated-types"},
+    {"distribution": "anyio", "version": "4.14.2", "license_expression": "MIT", "source_url": "https://github.com/agronholm/anyio"},
+    {"distribution": "cffi", "version": "2.1.1", "license_expression": "MIT", "source_url": "https://foss.heptapod.net/pypy/cffi"},
+    {"distribution": "click", "version": "8.4.2", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/pallets/click"},
+    {"distribution": "colorama", "version": "0.4.6", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/tartley/colorama"},
+    {"distribution": "fastapi", "version": "0.116.1", "license_expression": "MIT", "source_url": "https://github.com/fastapi/fastapi"},
+    {"distribution": "h11", "version": "0.16.0", "license_expression": "MIT", "source_url": "https://github.com/python-hyper/h11"},
+    {"distribution": "idna", "version": "3.18", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/kjd/idna"},
+    {"distribution": "numpy", "version": "1.26.4", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/numpy/numpy"},
+    {"distribution": "pycparser", "version": "3.0", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/eliben/pycparser"},
+    {"distribution": "pydantic", "version": "2.11.7", "license_expression": "MIT", "source_url": "https://github.com/pydantic/pydantic"},
+    {"distribution": "pydantic-core", "version": "2.33.2", "license_expression": "MIT", "source_url": "https://github.com/pydantic/pydantic-core"},
+    {"distribution": "PyInstaller", "version": "6.22.0", "license_expression": "GPL-2.0-only WITH Bootloader-exception", "source_url": "https://github.com/pyinstaller/pyinstaller", "bundled_kind": "bootloader-and-runtime-hooks"},
+    {"distribution": "PySide6", "version": "6.11.1", "license_expression": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only", "source_url": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/"},
+    {"distribution": "PySide6-Addons", "version": "6.11.1", "license_expression": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only", "source_url": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/"},
+    {"distribution": "PySide6-Essentials", "version": "6.11.1", "license_expression": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only", "source_url": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/"},
+    {"distribution": "scipy", "version": "1.17.1", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/scipy/scipy"},
+    {"distribution": "shiboken6", "version": "6.11.1", "license_expression": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only", "source_url": "https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.1-src/"},
+    {"distribution": "soundfile", "version": "0.14.0", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/bastibe/python-soundfile"},
+    {"distribution": "starlette", "version": "0.47.3", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/Kludex/starlette"},
+    {"distribution": "typing-extensions", "version": "4.16.0", "license_expression": "PSF-2.0", "source_url": "https://github.com/python/typing_extensions"},
+    {"distribution": "typing-inspection", "version": "0.4.2", "license_expression": "MIT", "source_url": "https://github.com/pydantic/typing-inspection"},
+    {"distribution": "uvicorn", "version": "0.35.0", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/encode/uvicorn"},
+    {"distribution": "websockets", "version": "15.0.1", "license_expression": "BSD-3-Clause", "source_url": "https://github.com/python-websockets/websockets"}
+  ]
+}

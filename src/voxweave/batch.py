@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import re
 import stat as stat_module
 import threading
@@ -21,6 +22,151 @@ from .task_manager import DeferredTask, TaskContext, TaskManager
 DEFAULT_EXTENSIONS = [".wav", ".flac", ".mp3", ".m4a", ".aac", ".mp4", ".mkv", ".mov", ".webm"]
 TEMP_SUFFIXES = (".tmp", ".part", ".crdownload", ".download")
 LOGGER = logging.getLogger(__name__)
+WATCH_SETTLE_SECONDS = 5.0
+WATCH_RECONCILE_SECONDS = 300.0
+WATCH_LOOP_SECONDS = 0.25
+
+
+class _WindowsDirectoryWatcher:
+    """ReadDirectoryChangesW adapter with overflow recovery signalling."""
+
+    def __init__(self, root: Path, recursive: bool) -> None:
+        self.root = root.resolve()
+        self.recursive = recursive
+        self.changes: queue.Queue[Path] = queue.Queue(maxsize=8192)
+        self.overflow = threading.Event()
+        self.stop_event = threading.Event()
+        self._handle: int | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"voxweave-directory-watch-{uuid.uuid4().hex[:8]}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    @property
+    def alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def drain(self) -> tuple[list[Path], bool]:
+        paths: list[Path] = []
+        overflow = self.overflow.is_set()
+        self.overflow.clear()
+        while True:
+            try:
+                item = self.changes.get_nowait()
+            except queue.Empty:
+                break
+            paths.append(item)
+        return paths, overflow
+
+    def _record(self, path: Path) -> None:
+        try:
+            self.changes.put_nowait(path)
+        except queue.Full:
+            self.overflow.set()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        handle = self._handle
+        if handle not in {None, -1}:
+            import ctypes
+            from ctypes import wintypes
+
+            cancel_io = ctypes.WinDLL("kernel32", use_last_error=True).CancelIoEx
+            cancel_io.argtypes = (wintypes.HANDLE, wintypes.LPVOID)
+            cancel_io.restype = wintypes.BOOL
+            cancel_io(wintypes.HANDLE(handle), None)
+        self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        read_changes = kernel32.ReadDirectoryChangesW
+        read_changes.argtypes = (
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+            wintypes.LPDWORD,
+            wintypes.LPVOID,
+            wintypes.LPVOID,
+        )
+        read_changes.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        handle = create_file(
+            str(self.root),
+            0x0001,  # FILE_LIST_DIRECTORY
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,  # OPEN_EXISTING
+            0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            self.overflow.set()
+            return
+        self._handle = int(handle)
+        buffer = ctypes.create_string_buffer(64 * 1024)
+        returned = wintypes.DWORD()
+        notify_filter = 0x00000001 | 0x00000002 | 0x00000008 | 0x00000010 | 0x00000040
+        try:
+            while not self.stop_event.is_set():
+                ok = read_changes(
+                    handle,
+                    buffer,
+                    len(buffer),
+                    self.recursive,
+                    notify_filter,
+                    ctypes.byref(returned),
+                    None,
+                    None,
+                )
+                if not ok:
+                    error = ctypes.get_last_error()
+                    if self.stop_event.is_set() or error == 995:  # ERROR_OPERATION_ABORTED
+                        return
+                    self.overflow.set()
+                    time.sleep(0.25)
+                    continue
+                if returned.value == 0:
+                    self.overflow.set()
+                    continue
+                offset = 0
+                data = buffer.raw[: returned.value]
+                while offset + 12 <= len(data):
+                    next_offset = int.from_bytes(data[offset : offset + 4], "little")
+                    name_length = int.from_bytes(data[offset + 8 : offset + 12], "little")
+                    name = data[offset + 12 : offset + 12 + name_length].decode(
+                        "utf-16-le", errors="replace"
+                    )
+                    self._record(self.root / name)
+                    if next_offset == 0:
+                        break
+                    offset += next_offset
+        finally:
+            self._handle = None
+            close_handle(handle)
 
 
 def _slug(value: str) -> str:
@@ -49,6 +195,8 @@ class BatchManager:
         self.resolve_model = resolve_model
         self.stop_event = threading.Event()
         self.observed: dict[tuple[str, str], tuple[int, int, float]] = {}
+        self.settled: dict[tuple[str, str], tuple[int, int]] = {}
+        self.watchers: dict[str, tuple[tuple[Any, ...], _WindowsDirectoryWatcher, float]] = {}
         self.submission_lock = threading.RLock()
         self.thread: threading.Thread | None = None
 
@@ -143,30 +291,127 @@ class BatchManager:
         self, rule: dict[str, Any], cancelled: Callable[[], bool] | None = None
     ) -> list[Path]:
         root = Path(rule["input_root"])
-        iterator = root.rglob("*") if rule["recursive"] else root.glob("*")
         extensions = {value.casefold() for value in rule["extensions"]}
+        files: list[Path] = []
+        pending = [root]
+        while pending:
+            if cancelled and cancelled():
+                raise InterruptedError("task cancellation requested")
+            current = pending.pop()
+            try:
+                entries = list(os.scandir(current))
+            except (FileNotFoundError, NotADirectoryError, PermissionError):
+                continue
+            for entry in entries:
+                path = Path(entry.path)
+                try:
+                    hidden = entry.name.startswith(".") or _is_hidden(path)
+                    if hidden:
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if rule["recursive"]:
+                            pending.append(path)
+                    elif (
+                        entry.is_file(follow_symlinks=False)
+                        and path.suffix.casefold() in extensions
+                        and not path.name.casefold().endswith(TEMP_SUFFIXES)
+                    ):
+                        files.append(path)
+                except (FileNotFoundError, PermissionError, OSError):
+                    continue
+        return sorted(files)
 
-        def visible(path: Path) -> bool:
+    @staticmethod
+    def _watch_signature(rule: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            rule["input_root"],
+            bool(rule["recursive"]),
+            tuple(sorted(value.casefold() for value in rule["extensions"])),
+            rule["model_id"],
+            rule["model_sha256"],
+            rule.get("index_sha256"),
+            rule["preset_name"],
+            json.dumps(rule["preset"], sort_keys=True, ensure_ascii=False),
+            rule["output_root"],
+        )
+
+    def _matches_rule(self, rule: dict[str, Any], path: Path) -> bool:
+        root = Path(rule["input_root"])
+        try:
             relative = path.relative_to(root)
-            current = root
+        except ValueError:
+            return False
+        if not rule["recursive"] and len(relative.parts) != 1:
+            return False
+        if (
+            path.suffix.casefold()
+            not in {value.casefold() for value in rule["extensions"]}
+            or path.name.casefold().endswith(TEMP_SUFFIXES)
+        ):
+            return False
+        current = root
+        try:
             for part in relative.parts:
                 current /= part
                 if _is_hidden(current):
                     return False
-            return True
+            return path.is_file()
+        except (FileNotFoundError, PermissionError, OSError):
+            return False
 
-        files = []
-        for path in iterator:
-            if cancelled and cancelled():
-                raise InterruptedError("task cancellation requested")
-            if (
-                path.is_file()
-                and visible(path)
-                and path.suffix.casefold() in extensions
-                and not path.name.casefold().endswith(TEMP_SUFFIXES)
-            ):
-                files.append(path)
-        return sorted(files)
+    def _observe_path(self, rule: dict[str, Any], path: Path, *, force: bool) -> None:
+        key = (rule["id"], str(path))
+        if not self._matches_rule(rule, path):
+            self.observed.pop(key, None)
+            self.settled.pop(key, None)
+            return
+        try:
+            file_stat = path.stat()
+        except (FileNotFoundError, PermissionError, OSError):
+            self.observed.pop(key, None)
+            self.settled.pop(key, None)
+            return
+        identity = (file_stat.st_size, file_stat.st_mtime_ns)
+        previous = self.observed.get(key)
+        if force or self.settled.get(key) != identity:
+            self.settled.pop(key, None)
+            if force or not previous or previous[:2] != identity:
+                self.observed[key] = (*identity, time.monotonic())
+
+    def _reconcile_rule(self, rule: dict[str, Any]) -> None:
+        files = self._files(rule)
+        seen = {(rule["id"], str(path)) for path in files}
+        for mapping in (self.observed, self.settled):
+            for key in [key for key in mapping if key[0] == rule["id"] and key not in seen]:
+                mapping.pop(key, None)
+        for path in files:
+            self._observe_path(rule, path, force=False)
+
+    def _submit_stable_paths(self, rule: dict[str, Any]) -> None:
+        now = time.monotonic()
+        for key, previous in list(self.observed.items()):
+            if key[0] != rule["id"]:
+                continue
+            path = Path(key[1])
+            if not self._matches_rule(rule, path):
+                self.observed.pop(key, None)
+                self.settled.pop(key, None)
+                continue
+            try:
+                file_stat = path.stat()
+            except (FileNotFoundError, PermissionError, OSError):
+                self.observed.pop(key, None)
+                self.settled.pop(key, None)
+                continue
+            identity = (file_stat.st_size, file_stat.st_mtime_ns)
+            if previous[:2] != identity:
+                self.observed[key] = (*identity, now)
+                continue
+            if now - previous[2] < WATCH_SETTLE_SECONDS:
+                continue
+            self._submit_file(rule, path, self.stop_event.is_set)
+            self.observed.pop(key, None)
+            self.settled[key] = identity
 
     def _output(self, rule: dict[str, Any], source: Path, source_hash: str) -> Path:
         relative = source.relative_to(Path(rule["input_root"]))
@@ -181,11 +426,20 @@ class BatchManager:
         name = f"{source.stem}_{source_type}_{model_slug}_{preset_slug}_{source_hash[:12]}{suffix}"
         return Path(rule["output_root"]) / relative.parent / name
 
-    def _submit_file(self, rule: dict[str, Any], source: Path) -> dict[str, Any]:
+    def _submit_file(
+        self,
+        rule: dict[str, Any],
+        source: Path,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> str:
         with self.submission_lock:
+            if cancelled and cancelled():
+                raise InterruptedError("batch submission cancelled")
             before = source.stat()
-            source_hash = sha256_file(source)
+            source_hash = sha256_file(source, cancelled=cancelled)
             after = source.stat()
+            if cancelled and cancelled():
+                raise InterruptedError("batch submission cancelled")
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise RuntimeError(f"source changed while hashing: {source}")
             output = self._output(rule, source, source_hash)
@@ -208,9 +462,7 @@ class BatchManager:
             with self.database.connect() as db:
                 existing = self.repository.find_item(db, rule["id"], str(source), source_hash)
                 if existing and existing["task_id"]:
-                    existing_dict = dict(existing)
-                    task = self.tasks.get(existing_dict["task_id"])
-                    return {"batch_item": existing_dict, "task": task}
+                    return str(existing["id"])
                 if not existing:
                     self.repository.insert_item(
                         db,
@@ -252,18 +504,14 @@ class BatchManager:
                 self.repository.link_item(db, item_id, task_id)
             if created:
                 self.tasks.notify_enqueued(task_id)
-            task = self.tasks.get(task_id)
-            return {
-                "batch_item": self.repository.get_item(item_id),
-                "task": task,
-            }
+            return str(item_id)
 
     def run(self, arguments: dict[str, Any], context: TaskContext) -> dict[str, Any] | DeferredTask:
         batch_id = arguments["batch_id"]
         rule = self.get(batch_id)
         if rule["state"] != "active":
             raise ValueError(f"batch rule is not active: {batch_id}")
-        tasks = []
+        item_ids: list[str] = []
         failures = []
         files = self._files(rule, context.cancelled)
         total = max(1, len(files))
@@ -272,11 +520,10 @@ class BatchManager:
                 raise InterruptedError("task cancellation requested")
             context.progress(index / total, "enumerating", f"{index}/{len(files)} files")
             try:
-                tasks.append(self._submit_file(rule, path))
+                item_ids.append(self._submit_file(rule, path, context.cancelled))
             except Exception as error:  # noqa: BLE001 - isolate each source file
                 failures.append({"source_path": str(path), "error": str(error)})
-        item_ids = [item["batch_item"]["id"] for item in tasks]
-        result = {"batch": rule, "tasks": tasks, "failures": failures}
+        result = {"batch": rule, "tasks": [], "failures": failures}
         if not item_ids:
             if failures:
                 raise OperationError(
@@ -326,8 +573,12 @@ class BatchManager:
     def _sync_items(self) -> None:
         items = self.repository.pending_items()
         for item in items:
-            task = self.tasks.get(item["task_id"])
-            self.repository.update_item_state(item["id"], task["state"], task.get("error"))
+            if item["state"] != item["task_state"] or item.get("error") != item.get(
+                "task_error"
+            ):
+                self.repository.update_item_state(
+                    item["id"], item["task_state"], item.get("task_error")
+                )
 
     def _sync_runs(self) -> None:
         runs = self.repository.active_runs()
@@ -371,43 +622,89 @@ class BatchManager:
             self.repository.finish_run(run["id"], state)
 
     def _watch_loop(self) -> None:
-        while not self.stop_event.wait(2.0):
+        next_sync = 0.0
+        rules: list[dict[str, Any]] = []
+        while not self.stop_event.wait(WATCH_LOOP_SECONDS):
             try:
-                self._sync_items()
-                self._sync_runs()
-                rules = self.repository.watched_rules()
+                now = time.monotonic()
+                if now >= next_sync:
+                    self._sync_items()
+                    self._sync_runs()
+                    rules = self.repository.watched_rules()
+                    next_sync = now + 2.0
             except Exception:  # noqa: BLE001 - a watcher must remain supervised
                 LOGGER.exception("batch watcher synchronization failed")
                 continue
+            active_rule_ids = {str(raw["id"]) for raw in rules}
+            for rule_id in set(self.watchers) - active_rule_ids:
+                _signature, watcher, _reconciled = self.watchers.pop(rule_id)
+                watcher.stop()
+                self.observed = {
+                    key: value
+                    for key, value in self.observed.items()
+                    if key[0] != rule_id
+                }
+                self.settled = {
+                    key: value
+                    for key, value in self.settled.items()
+                    if key[0] != rule_id
+                }
             for raw in rules:
                 try:
                     rule = Database.decode_json_row(raw, ("preset_json", "extensions_json"))
                     rule["recursive"] = bool(rule["recursive"])
-                    files = self._files(rule)
-                    seen = {(rule["id"], str(path)) for path in files}
-                    for key in [
-                        key for key in self.observed if key[0] == rule["id"] and key not in seen
-                    ]:
-                        self.observed.pop(key, None)
-                    for path in files:
-                        key = (rule["id"], str(path))
-                        stat = path.stat()
-                        previous = self.observed.get(key)
-                        now = time.time()
-                        stable = (
-                            previous
-                            and previous[:2] == (stat.st_size, stat.st_mtime_ns)
-                            and now - previous[2] >= 5.0
+                    signature = self._watch_signature(rule)
+                    watcher_record = self.watchers.get(rule["id"])
+                    if (
+                        not watcher_record
+                        or watcher_record[0] != signature
+                        or not watcher_record[1].alive
+                    ):
+                        if watcher_record:
+                            watcher_record[1].stop()
+                        self.observed = {
+                            key: value
+                            for key, value in self.observed.items()
+                            if key[0] != rule["id"]
+                        }
+                        self.settled = {
+                            key: value
+                            for key, value in self.settled.items()
+                            if key[0] != rule["id"]
+                        }
+                        watcher = _WindowsDirectoryWatcher(
+                            Path(rule["input_root"]), bool(rule["recursive"])
                         )
-                        if stable:
-                            self._submit_file(rule, path)
-                            self.observed.pop(key, None)
-                        elif not previous or previous[:2] != (stat.st_size, stat.st_mtime_ns):
-                            self.observed[key] = (stat.st_size, stat.st_mtime_ns, now)
-                    self.repository.clear_rule_error(rule["id"])
+                        watcher.start()
+                        self._reconcile_rule(rule)
+                        watcher_record = (signature, watcher, time.monotonic())
+                        self.watchers[rule["id"]] = watcher_record
+                    _signature, watcher, last_reconcile = watcher_record
+                    changed_paths, overflow = watcher.drain()
+                    for path in set(changed_paths):
+                        self._observe_path(rule, path, force=True)
+                        if path.is_dir():
+                            self._reconcile_rule(rule)
+                    if overflow or time.monotonic() - last_reconcile >= WATCH_RECONCILE_SECONDS:
+                        self._reconcile_rule(rule)
+                        self.watchers[rule["id"]] = (
+                            signature,
+                            watcher,
+                            time.monotonic(),
+                        )
+                    self._submit_stable_paths(rule)
+                    if rule.get("last_error") is not None:
+                        self.repository.clear_rule_error(rule["id"])
+                        rule["last_error"] = None
+                except InterruptedError:
+                    if not self.stop_event.is_set():
+                        LOGGER.exception("batch watch rule was interrupted: %s", raw.get("id"))
                 except Exception as error:  # noqa: BLE001 - isolate each watched rule
                     LOGGER.exception("batch watch rule failed: %s", raw.get("id"))
                     self.repository.record_rule_error(raw["id"], str(error))
+        for _signature, watcher, _reconciled in list(self.watchers.values()):
+            watcher.stop()
+        self.watchers.clear()
 
     def shutdown(self) -> None:
         self.stop_event.set()

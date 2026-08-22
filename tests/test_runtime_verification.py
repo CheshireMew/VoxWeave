@@ -75,27 +75,26 @@ def test_failed_manual_verification_invalidates_previous_success(tmp_path, monke
     assert load_runtime_verification(settings) is None
 
 
-def test_legacy_data_root_verification_moves_to_application_directory(
+def test_legacy_application_verification_moves_to_data_root(
     tmp_path, monkeypatch
 ) -> None:
-    application_root = tmp_path / "app"
     generator_root = tmp_path / "generator"
     monkeypatch.setattr("voxweave.config.SOURCE_ROOT", generator_root)
     python = tmp_path / "python.exe"
     python.write_bytes(b"")
-    settings = Settings(
-        data_root=str(tmp_path / "old-data"),
+    source_settings = Settings(
+        data_root=str(tmp_path / "source-data"),
         rvc_root=str(tmp_path / "rvc"),
         rvc_python=str(python),
         ffmpeg=str(tmp_path / "ffmpeg.exe"),
         ffprobe=str(tmp_path / "ffprobe.exe"),
     )
-    save_runtime_verification(settings, runtime_report(settings))
-    payload = settings.runtime_verification_path.read_text(encoding="utf-8")
-    legacy = settings.state_dir / "runtime-verification.json"
-    legacy.parent.mkdir(parents=True)
+    save_runtime_verification(source_settings, runtime_report(source_settings))
+    payload = source_settings.runtime_verification_path.read_text(encoding="utf-8")
+    legacy = generator_root / ".voxweave" / "runtime-verification.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text(payload, encoding="utf-8")
-    monkeypatch.setattr("voxweave.config.SOURCE_ROOT", application_root)
+    settings = source_settings.updated(data_root=str(tmp_path / "new-data"))
     local_target = settings.runtime_verification_path
 
     assert load_runtime_verification(settings) is not None

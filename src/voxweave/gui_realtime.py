@@ -40,6 +40,7 @@ class RealtimeViewModel(QObject):
         self._refreshing = False
         self._audio_test: dict[str, Any] = {}
         self._audio_testing = False
+        self._closed = False
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.refreshStatus)
@@ -361,6 +362,8 @@ class RealtimeViewModel(QObject):
         input_gate_db: float,
         block_seconds: float,
     ) -> None:
+        if self._closed:
+            return
         arguments = self._session_arguments(
             model,
             input_device,
@@ -403,6 +406,8 @@ class RealtimeViewModel(QObject):
 
     @Slot()
     def releaseModel(self) -> None:
+        if self._closed:
+            return
         self.requests.invalidate("realtime-prepare")
         self._last_prepare_arguments = None
         worker = self._status.get("worker") or {}
@@ -438,6 +443,8 @@ class RealtimeViewModel(QObject):
         block_seconds: float,
         test_mode: bool,
     ) -> None:
+        if self._closed:
+            return
         input_record = self._device(input_device)
         output_record = self._device(output_device)
         remembered = {
@@ -489,6 +496,8 @@ class RealtimeViewModel(QObject):
 
     @Slot()
     def stopSession(self) -> None:
+        if self._closed:
+            return
         def update(result: dict[str, Any]) -> None:
             self._status = result
             self._set_poll_interval(result.get("state"))
@@ -497,6 +506,10 @@ class RealtimeViewModel(QObject):
         self.requests.submit("realtime.stop", {}, update, request_key="realtime-control")
 
     def shutdown(self) -> None:
+        self._closed = True
         self.timer.stop()
         self.preferences_timer.stop()
+        self.requests.invalidate("realtime-prepare")
+        self.requests.invalidate("realtime-control")
+        self.requests.invalidate("realtime-release")
         self._persist_preferences()
