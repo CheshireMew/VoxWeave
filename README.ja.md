@@ -218,4 +218,4 @@ Pull Request の前に [CONTRIBUTING.md](CONTRIBUTING.md) を確認してくだ�
 
 ## ライセンスと第三者コンポーネント
 
-VoxWeave のソースは [AGPL-3.0-only](LICENSE) です。Windows ZIP にはデスクトップアプリに必要な CPython、PySide6/Qt、Python 依存関係が含まれますが、RVC、管理対象の RVC Python 環境、FFmpeg、推論ウェイト、音声モデルは含まれません。各 ZIP には完全なライセンスディレクトリ、Qt/PySide のソース取得・差し替え手順、全ファイルのハッシュマニフェストが入ります。出典、固定版、再配布境界は [第三者コンポーネント](THIRD_PARTY_NOTICES.md) を参照してください。
+VoxWeave のソースは [AGPL-3.0-or-later](LICENSE-NOTICE.md) です。完全なライセンス説明は [LICENSING.md](LICENSING.md) を参照してください。Windows ZIP にはデスクトップアプリに必要な CPython、PySide6/Qt、Python 依存関係が含まれますが、RVC、管理対象の RVC Python 環境、FFmpeg、推論ウェイト、音声モデルは含まれません。各 ZIP には完全なライセンスディレクトリ、Qt/PySide のソース取得・差し替え手順、全ファイルのハッシュマニフェストが入ります。出典、固定版、再配布境界は [第三者コンポーネント](THIRD_PARTY_NOTICES.md) を参照してください。

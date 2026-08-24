@@ -23,6 +23,8 @@ datas = [
     (str(package_root / "qml"), "voxweave/qml"),
     (str(package_root / "resources"), "voxweave/resources"),
     (str(project_root / "LICENSE"), "."),
+    (str(project_root / "LICENSE-NOTICE.md"), "."),
+    (str(project_root / "LICENSING.md"), "."),
     (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
 ]
 datas.extend((str(package_root / name), "voxweave") for name in worker_sources)

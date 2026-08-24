@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
             "offline and realtime RVC workstation"
         ),
         epilog=(
-            "AGPL-3.0-only; ABSOLUTELY NO WARRANTY. Source: https://github.com/CheshireMew/VoxWeave"
+            "AGPL-3.0-or-later; ABSOLUTELY NO WARRANTY. Source: https://github.com/CheshireMew/VoxWeave"
         ),
     )
     parser.add_argument(

@@ -222,4 +222,4 @@ D:\Tools\VoxWeave\.venv\Scripts\python.exe scripts\verify_real_user_chain.py `
 
 ## 许可证与第三方组件
 
-VoxWeave 源码使用 [AGPL-3.0-only](LICENSE)。Windows ZIP 会带上运行桌面应用所需的 CPython、PySide6/Qt 和 Python 依赖，但不带 RVC、托管 RVC Python 环境、FFmpeg、推理权重或声音模型。每个 ZIP 都包含完整许可证目录、Qt/PySide 源码与替换说明及逐文件哈希清单。完整来源、锁定版本和再分发边界见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+VoxWeave 源码使用 [AGPL-3.0-or-later](LICENSE-NOTICE.md)，完整许可说明见 [LICENSING.md](LICENSING.md)。Windows ZIP 会带上运行桌面应用所需的 CPython、PySide6/Qt 和 Python 依赖，但不带 RVC、托管 RVC Python 环境、FFmpeg、推理权重或声音模型。每个 ZIP 都包含完整许可证目录、Qt/PySide 源码与替换说明及逐文件哈希清单。完整来源、锁定版本和再分发边界见 [第三方说明](THIRD_PARTY_NOTICES.md)。

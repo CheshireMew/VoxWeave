@@ -2,7 +2,7 @@
 
 The Windows ZIP uses the community builds of PySide6 and Qt 6.11.1 under the
 GNU Lesser General Public License version 3 (LGPL-3.0-only). VoxWeave itself
-remains licensed under AGPL-3.0-only. No commercial Qt license is claimed.
+remains licensed under AGPL-3.0-or-later. No commercial Qt license is claimed.
 
 The Qt and PySide6 shared libraries remain separate files below
 `_internal/PySide6`; they are not statically linked into `VoxWeave.exe`.

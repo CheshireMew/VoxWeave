@@ -1,6 +1,6 @@
 # Third-party notices
 
-VoxWeave 源码使用 AGPL-3.0-only。以下项目没有因此改用 VoxWeave 许可证；分发者仍须遵守各项目的原始条款。Windows ZIP 附带启动桌面应用所需的 CPython 3.12、PySide6/Qt 和 Python 依赖，但不附带 RVC、托管 RVC Python 环境、FFmpeg、推理权重或声音模型。首次安装功能只在用户确认后从锁定的上游地址下载并校验这些大体积运行文件，再放入用户选择的数据目录。
+VoxWeave 源码使用 AGPL-3.0-or-later。以下项目没有因此改用 VoxWeave 许可证；分发者仍须遵守各项目的原始条款。Windows ZIP 附带启动桌面应用所需的 CPython 3.12、PySide6/Qt 和 Python 依赖，但不附带 RVC、托管 RVC Python 环境、FFmpeg、推理权重或声音模型。首次安装功能只在用户确认后从锁定的上游地址下载并校验这些大体积运行文件，再放入用户选择的数据目录。
 
 | 组件 | 用途 | 许可证/状态 | 来源 |
 | --- | --- | --- | --- |

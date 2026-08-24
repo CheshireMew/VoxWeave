@@ -37,6 +37,15 @@ def test_windows_package_keeps_required_runtime_sources() -> None:
         assert f'"{name}"' in specification
 
 
+def test_project_license_is_consistent_and_packaged() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    specification = (ROOT / "packaging" / "VoxWeave.spec").read_text(encoding="utf-8")
+
+    assert project["project"]["license"]["text"] == "AGPL-3.0-or-later"
+    assert 'project_root / "LICENSE-NOTICE.md"' in specification
+    assert 'project_root / "LICENSING.md"' in specification
+
+
 def test_windows_package_excludes_development_dependencies() -> None:
     specification = (ROOT / "packaging" / "VoxWeave.spec").read_text(encoding="utf-8")
     assert '"_pytest"' in specification
@@ -178,6 +187,10 @@ def test_release_flow_collects_licenses_and_verifies_extracted_zip(tmp_path: Pat
         for component in qt_components
     )
     extracted = Path(result["verification"]) / "VoxWeave"
+    assert (extracted / "LICENSE-NOTICE.md").is_file()
+    assert (extracted / "LICENSING.md").is_file()
+    assert (extracted / "licenses" / "VoxWeave" / "LICENSE-NOTICE.md").is_file()
+    assert (extracted / "licenses" / "VoxWeave" / "LICENSING.md").is_file()
     assert (extracted / "licenses" / "GNU" / "LGPL-3.0.txt").is_file()
     assert (extracted / "licenses" / "CPython" / "LICENSE.txt").is_file()
 

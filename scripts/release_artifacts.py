@@ -256,15 +256,18 @@ def _copy_release_licenses(
         shutil.copy2(source, destination)
 
     project_license = repository / "LICENSE"
+    project_notice = repository / "LICENSE-NOTICE.md"
+    project_licensing = repository / "LICENSING.md"
     notices = repository / "THIRD_PARTY_NOTICES.md"
     qt_notice = repository / "packaging" / "QT_PYSIDE_COMPLIANCE.md"
-    for source in (project_license, notices, qt_notice):
+    for source in (project_license, project_notice, project_licensing, notices, qt_notice):
         if not source.is_file():
             raise ReleaseValidationError(f"Required release notice is missing: {source}")
-    project_license_target = license_root / "VoxWeave" / "LICENSE"
-    project_license_target.parent.mkdir(parents=True)
-    shutil.copy2(project_license, project_license_target)
-    shutil.copy2(project_license, bundle_root / "LICENSE")
+    project_license_root = license_root / "VoxWeave"
+    project_license_root.mkdir(parents=True)
+    for source in (project_license, project_notice, project_licensing):
+        shutil.copy2(source, project_license_root / source.name)
+        shutil.copy2(source, bundle_root / source.name)
     shutil.copy2(notices, bundle_root / notices.name)
     shutil.copy2(qt_notice, bundle_root / qt_notice.name)
 
@@ -389,8 +392,13 @@ def verify_bundle(bundle_root: Path, *, version: str, commit: str) -> dict[str, 
             raise ReleaseValidationError(f"Required Windows runtime file is missing: {relative}")
     required_notices = {
         "LICENSE",
+        "LICENSE-NOTICE.md",
+        "LICENSING.md",
         "THIRD_PARTY_NOTICES.md",
         "QT_PYSIDE_COMPLIANCE.md",
+        "licenses/VoxWeave/LICENSE",
+        "licenses/VoxWeave/LICENSE-NOTICE.md",
+        "licenses/VoxWeave/LICENSING.md",
         "licenses/GNU/GPL-3.0.txt",
         "licenses/GNU/LGPL-3.0.txt",
         "licenses/CPython/LICENSE.txt",

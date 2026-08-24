@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Local-first high-quality offline and realtime RVC voice conversion workstation"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = {text = "AGPL-3.0-only"}
+license = {text = "AGPL-3.0-or-later"}
 authors = [{name = "CheshireMew"}]
 dependencies = [
   "fastapi==0.116.1",

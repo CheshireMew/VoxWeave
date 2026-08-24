@@ -49,9 +49,9 @@ A pull request should contain one coherent result and explain:
 3. Which checks actually ran and which environment-dependent checks did not.
 4. Whether the protocol, schemas, database migrations, licenses, model policy, or public documentation changed.
 
-请不要为贡献流程生成安装器、压缩包或整合运行时。VoxWeave 源码使用 [AGPL-3.0-only](LICENSE)；提交代码即表示你有权按该许可证提供这些改动。第三方内容必须保留原始许可和来源说明。
+请不要为贡献流程生成安装器、压缩包或整合运行时。VoxWeave 源码使用 [AGPL-3.0-or-later](LICENSE-NOTICE.md)；提交代码即表示你有权按该许可证提供这些改动。第三方内容必须保留原始许可和来源说明。
 
-Do not build an installer, archive, or bundled runtime for the contribution workflow. VoxWeave source is [AGPL-3.0-only](LICENSE); by contributing, you confirm that you may provide the change under that license. Preserve the original license and source notice for third-party material.
+Do not build an installer, archive, or bundled runtime for the contribution workflow. VoxWeave source is [AGPL-3.0-or-later](LICENSE-NOTICE.md); by contributing, you confirm that you may provide the change under that license. Preserve the original license and source notice for third-party material.
 
 正式发布由维护者从干净提交运行 `scripts\build-exe.ps1`。输出必须放在仓库和系统盘之外；脚本会拒绝同一版本与提交的重复目录，并生成许可证、来源清单、SHA-256 和解压复验结果。贡献者不需要为了提交代码执行这条发布流程。
 
