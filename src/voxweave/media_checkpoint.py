@@ -6,10 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .hashing import sha256_file
+from .hashing import FileVerificationLedger, VerifiedFile, sha256_file
 
 
-def _file_record(path: Path) -> dict[str, Any]:
+def _file_record(
+    path: Path,
+    ledger: FileVerificationLedger | None = None,
+) -> dict[str, Any]:
+    if ledger is not None:
+        return ledger.verify(path).record()
     return {
         "path": str(path.resolve()),
         "sha256": sha256_file(path),
@@ -52,10 +57,19 @@ def _publish_prepared_output(
     checkpoint: dict[str, Any],
     checkpoint_path: Path,
     result: dict[str, Any],
-) -> None:
+    verified: VerifiedFile | None = None,
+    ledger: FileVerificationLedger | None = None,
+) -> VerifiedFile:
+    prepared_verified = verified or (
+        ledger.verify(prepared_output) if ledger is not None else None
+    )
     checkpoint["stages"]["publication"] = {
         "state": "prepared",
-        "prepared_output": _file_record(prepared_output),
+        "prepared_output": (
+            prepared_verified.record()
+            if prepared_verified is not None
+            else _file_record(prepared_output)
+        ),
         "result": result,
     }
     _write_checkpoint(checkpoint_path, checkpoint)
@@ -64,12 +78,26 @@ def _publish_prepared_output(
     if output.exists() and not overwrite:
         raise FileExistsError(output)
     prepared_output.replace(output)
+    published_verified = (
+        ledger.rebind(prepared_verified, output)
+        if ledger is not None and prepared_verified is not None
+        else prepared_verified.rebind(output)
+        if prepared_verified is not None
+        else None
+    )
     checkpoint["stages"]["publication"] = {
         "state": "published",
-        "prepared_output": _file_record(output),
+        "prepared_output": (
+            published_verified.record()
+            if published_verified is not None
+            else _file_record(output)
+        ),
         "result": result,
     }
     _write_checkpoint(checkpoint_path, checkpoint)
+    return published_verified or (
+        ledger.verify(output) if ledger is not None else FileVerificationLedger().verify(output)
+    )
 
 
 def _load_resume_checkpoint(

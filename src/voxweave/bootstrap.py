@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import LOCAL_POINTER, Settings, persist_data_root_pointer
 from .discovery import ServiceLock
+from .settings_file_store import SettingsFileStore
 
 
 def optional_path(value: str | None, label: str) -> str | None:
@@ -22,7 +23,7 @@ def persist_configuration(settings: Settings, pointer_path: Path = LOCAL_POINTER
     lock = ServiceLock(settings.lock_path)
     lock.acquire()
     try:
-        settings.update()
+        SettingsFileStore(settings).ensure_persisted(settings)
         persist_data_root_pointer(Path(settings.data_root), pointer_path)
     finally:
         lock.release()

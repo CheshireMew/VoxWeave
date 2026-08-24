@@ -10,10 +10,7 @@ from typing import Any
 from .config import PACKAGE_ROOT, Settings
 from .hashing import sha256_file
 from .process_control import run_capture
-
-PINNED_RVC_REVISION = "4338f12c3c28c80b3ac015e2d0df66c41592746d"
-PINNED_ASSET_REVISION = "e6d0c1a17da07c33557852f9dfa2bd44cc75737d"
-RVC_REPOSITORY = "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git"
+from .runtime_contract import runtime_contract
 
 
 class RuntimeErrorDetail(RuntimeError):
@@ -64,6 +61,7 @@ def resolve_rvc_entry(settings: Settings) -> Path | None:
 def inspect_runtime(
     settings: Settings, cancelled: Callable[[], bool] | None = None
 ) -> dict[str, Any]:
+    contract = runtime_contract()
     python = resolve_rvc_python(settings)
     entry = resolve_rvc_entry(settings)
     payload: dict[str, Any] = {
@@ -121,40 +119,41 @@ def inspect_runtime(
             )
         except (RuntimeErrorDetail, ValueError) as exc:
             payload["error"] = str(exc)
+    separation = contract.source_separation
     separation_model = (
-        Path(settings.rvc_root)
-        / "assets"
-        / "pymss_weights"
-        / "model_bs_roformer_ep_368_sdr_12.9628.ckpt"
+        Path(settings.rvc_root) / "assets" / separation.model_file
         if settings.rvc_root
         else None
     )
     payload["components"]["source_separation"] = {
-        "backend": settings.separation_backend,
-        "model_id": settings.separation_model_id,
+        "backend": separation.backend,
+        "model_id": separation.model_id,
         "ready": bool(separation_model and separation_model.is_file()),
         "model_path": str(separation_model) if separation_model else None,
         "model_sha256": sha256_file(separation_model)
         if separation_model and separation_model.is_file()
         else None,
-        "source": "https://huggingface.co/baicai1145/pymss",
-        "code_license_spdx": "MIT",
-        "model_license_spdx": "LicenseRef-Unknown",
+        "source": separation.source,
+        "code_license_spdx": separation.code_license_spdx,
+        "model_license_spdx": separation.model_license_spdx,
     }
+    speaker = contract.speaker_embedding
     speaker_model = Path(settings.wespeaker_model) if settings.wespeaker_model else None
     payload["components"]["speaker_embedding"] = {
-        "backend": "wespeaker-onnx",
+        "backend": speaker.backend,
         "ready": bool(speaker_model and speaker_model.is_file()),
         "model_path": str(speaker_model) if speaker_model else None,
         "model_sha256": sha256_file(speaker_model)
         if speaker_model and speaker_model.is_file()
         else None,
-        "code_license_spdx": "Apache-2.0",
-        "model_license_spdx": "CC-BY-4.0",
-        "source": "https://huggingface.co/Wespeaker/wespeaker-resnet34-LM",
-        "revision": "f0c48c298fd835726c27956a5d617bad7115627e",
+        "code_license_spdx": speaker.code_license_spdx,
+        "model_license_spdx": speaker.model_license_spdx,
+        "source": speaker.source,
+        "revision": speaker.revision,
     }
-    payload["pinned_rvc_revision"] = PINNED_RVC_REVISION
-    payload["pinned_asset_revision"] = PINNED_ASSET_REVISION
-    payload["rvc_revision_matches_pin"] = payload["rvc_revision"] == PINNED_RVC_REVISION
+    payload["pinned_rvc_revision"] = contract.rvc_source.revision
+    payload["pinned_asset_revision"] = contract.runtime_assets.revision
+    payload["rvc_revision_matches_pin"] = (
+        payload["rvc_revision"] == contract.rvc_source.revision
+    )
     return payload

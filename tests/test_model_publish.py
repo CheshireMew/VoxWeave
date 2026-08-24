@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from voxweave.config import Settings
 from voxweave.database import Database
+from voxweave.hashing import verify_file
 from voxweave.model_catalog import ModelCatalogClient
 from voxweave.model_importer import ModelImporter
 from voxweave.model_inspector import ModelInspector
@@ -112,20 +115,11 @@ def test_failed_url_download_archives_partial_staging(tmp_path, monkeypatch) -> 
     settings.ensure_layout()
     registry, importer = _services(settings)
 
-    def fail_download(
-        _url,
-        target,
-        _expected_size,
-        _expected_sha256,
-        _progress,
-        _cancelled,
-        _progress_start,
-        _progress_end,
-    ):
+    def fail_download(_spec, target, **_kwargs):
         target.write_bytes(b"partial-download")
         raise ValueError("download hash mismatch")
 
-    monkeypatch.setattr(importer, "_download", fail_download)
+    monkeypatch.setattr("voxweave.model_importer.download_verified", fail_download)
     arguments = {
         **_arguments("managed.partial"),
         "download_size_bytes": 100,
@@ -144,3 +138,92 @@ def test_failed_url_download_archives_partial_staging(tmp_path, monkeypatch) -> 
     assert len(failures) == 1
     assert (failures[0] / "model.pth").read_bytes() == b"partial-download"
     assert registry.list_models() == []
+
+
+def test_catalog_state_reports_a_registered_model_with_missing_files_as_repairable(
+    tmp_path,
+) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    settings.ensure_layout()
+    registry, _importer = _services(settings)
+    model_path = tmp_path / "catalog-model.pth"
+    model_path.write_bytes(b"catalog")
+    registry.register(
+        model_path,
+        model_id="catalog.missing",
+        display_name="Catalog missing",
+        source_kind="catalog",
+        inspection={"status": "ready"},
+    )
+    model_path.replace(tmp_path / "archived-catalog-model.pth")
+
+    state = registry.catalog_state(
+        {
+            "id": "catalog.missing",
+            "model_sha256": hashlib.sha256(b"catalog").hexdigest(),
+        }
+    )
+
+    assert state == {
+        "registered": True,
+        "installed": False,
+        "available": False,
+        "archived": False,
+        "status": "missing",
+        "repairable": True,
+    }
+
+
+def test_catalog_repair_archives_the_old_install_and_registers_verified_replacement(
+    tmp_path, monkeypatch
+) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    settings.ensure_layout()
+    registry, importer = _services(settings)
+    target = settings.managed_models_dir / "catalog.repair"
+    target.mkdir(parents=True)
+    old_bytes = b"old-catalog-model"
+    new_bytes = b"new-catalog-model"
+    (target / "model.pth").write_bytes(old_bytes)
+    registry.register(
+        target / "model.pth",
+        model_id="catalog.repair",
+        display_name="Catalog repair",
+        source_kind="catalog",
+        inspection={"status": "ready"},
+    )
+
+    def fake_download(spec, download_target, **_kwargs):
+        download_target.write_bytes(new_bytes)
+        return verify_file(download_target, expected_sha256=spec.sha256)
+
+    monkeypatch.setattr("voxweave.model_importer.download_verified", fake_download)
+    monkeypatch.setattr(
+        importer.inspector,
+        "inspect",
+        lambda _path: {"status": "ready", "version": "v2", "sample_rate": 40000},
+    )
+    new_hash = hashlib.sha256(new_bytes).hexdigest()
+
+    result = importer.import_model(
+        {
+            "id": "catalog.repair",
+            "model": "https://models.example/replacement.pth",
+            "display_name": "Catalog repair",
+            "license_spdx": "CC-BY-4.0",
+            "source_url": "https://models.example/catalog.repair",
+            "download_size_bytes": len(new_bytes),
+            "model_sha256": new_hash,
+            "source_kind": "catalog",
+        },
+        lambda *_args: None,
+        lambda: False,
+        "repair-task",
+    )
+
+    assert (target / "model.pth").read_bytes() == new_bytes
+    assert result["model_sha256"] == new_hash
+    assert result["source_kind"] == "catalog"
+    archived = list((settings.root / "model-import-failed").glob("catalog.repair-repair-*"))
+    assert len(archived) == 1
+    assert (archived[0] / "model.pth").read_bytes() == old_bytes

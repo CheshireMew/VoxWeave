@@ -1,22 +1,27 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 
+from .bounded_ids import BoundedIdSet
+from .capabilities import AUDIO_EXTENSIONS, MEDIA_EXTENSIONS, VIDEO_EXTENSIONS
 from .gui_activity import TASK_TERMINAL_STATES, TaskActivity
 from .gui_requests import RequestCoordinator
 from .gui_support import local_path
 from .gui_tasks import TaskFeed
 
-AUDIO_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".aac"}
-VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm"}
-MEDIA_SUFFIXES = AUDIO_SUFFIXES | VIDEO_SUFFIXES
+AUDIO_SUFFIXES = frozenset(AUDIO_EXTENSIONS)
+VIDEO_SUFFIXES = frozenset(VIDEO_EXTENSIONS)
+MEDIA_SUFFIXES = frozenset(MEDIA_EXTENSIONS)
 
 
 class MediaViewModel(QObject):
     resultAudioChanged = Signal()
+    resultChanged = Signal()
     playbackRequested = Signal()
     speakersChanged = Signal()
     previewOutputsChanged = Signal()
@@ -28,11 +33,19 @@ class MediaViewModel(QObject):
         activity: TaskActivity,
         task_feed: TaskFeed,
         parent: QObject | None = None,
+        *,
+        status_callback: Callable[[str, str], None] | None = None,
+        text_callback: Callable[[str], str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.requests = requests
         self.activity = activity
+        self._status_callback = status_callback or getattr(
+            requests, "status_callback", lambda *_args: None
+        )
+        self._text_callback = text_callback or (lambda key: key)
         self._result_audio = ""
+        self._result_path = ""
         self._speakers: list[dict[str, Any]] = []
         self._preview_outputs: list[dict[str, Any]] = []
         self._presets: list[dict[str, Any]] = []
@@ -42,7 +55,8 @@ class MediaViewModel(QObject):
         self._analysis_mode: str | None = None
         self._analysis_sha256: str | None = None
         self._preview_task_id: str | None = None
-        self._handled_audio_tasks: set[str] = set()
+        self._conversion_task_id: str | None = None
+        self._handled_audio_tasks = BoundedIdSet()
         self._latest_audio_task_created = ""
         task_feed.taskUpdated.connect(self._consume_task)
 
@@ -53,6 +67,14 @@ class MediaViewModel(QObject):
     @Property(str, notify=resultAudioChanged)
     def resultAudioPath(self) -> str:
         return self._result_audio
+
+    @Property(str, notify=resultChanged)
+    def resultPath(self) -> str:
+        return self._result_path
+
+    @Property(bool, notify=resultChanged)
+    def resultIsAudio(self) -> bool:
+        return Path(self._result_path).suffix.casefold() in AUDIO_SUFFIXES
 
     @Slot(str, result=str)
     def localPath(self, value: str) -> str:
@@ -75,13 +97,10 @@ class MediaViewModel(QObject):
 
     @Slot(str, str, result="QVariantMap")
     def validateConversion(self, input_value: str, output_value: str) -> dict[str, Any]:
-        if not input_value.strip():
-            return {"valid": False, "code": "input_required", "suggestion": ""}
+        input_validation = self.validateInput(input_value)
+        if not input_validation["valid"]:
+            return {**input_validation, "suggestion": ""}
         input_path = Path(local_path(input_value)).expanduser()
-        if not input_path.is_file():
-            return {"valid": False, "code": "input_missing", "suggestion": ""}
-        if input_path.suffix.casefold() not in MEDIA_SUFFIXES:
-            return {"valid": False, "code": "input_unsupported", "suggestion": ""}
         suggestion = self.suggestOutput(input_value)
         if not output_value.strip():
             return {"valid": False, "code": "output_required", "suggestion": suggestion}
@@ -95,6 +114,17 @@ class MediaViewModel(QObject):
         if output_path.exists():
             return {"valid": False, "code": "output_exists", "suggestion": suggestion}
         return {"valid": True, "code": "ready", "suggestion": suggestion}
+
+    @Slot(str, result="QVariantMap")
+    def validateInput(self, input_value: str) -> dict[str, Any]:
+        if not input_value.strip():
+            return {"valid": False, "code": "input_required"}
+        input_path = Path(local_path(input_value)).expanduser()
+        if not input_path.is_file():
+            return {"valid": False, "code": "input_missing"}
+        if input_path.suffix.casefold() not in MEDIA_SUFFIXES:
+            return {"valid": False, "code": "input_unsupported"}
+        return {"valid": True, "code": "ready"}
 
     @Property("QVariantList", notify=speakersChanged)
     def speakers(self) -> list[dict[str, Any]]:
@@ -143,6 +173,37 @@ class MediaViewModel(QObject):
     def invalidateAnalysis(self) -> None:
         self._reset_analysis(cancel_active=True)
 
+    def _reset_results(self, *, cancel_active: bool) -> None:
+        for task_id, request_key in (
+            (self._preview_task_id, "preview"),
+            (self._conversion_task_id, "conversion"),
+        ):
+            if cancel_active and task_id:
+                self.requests.submit(
+                    "task.cancel",
+                    {"task_id": task_id},
+                    show_status=False,
+                )
+            self.activity.abandon(request_key)
+        self._preview_task_id = None
+        self._conversion_task_id = None
+        had_audio = bool(self._result_audio)
+        had_result = bool(self._result_path)
+        had_previews = bool(self._preview_outputs)
+        self._result_audio = ""
+        self._result_path = ""
+        self._preview_outputs = []
+        if had_audio:
+            self.resultAudioChanged.emit()
+        if had_result:
+            self.resultChanged.emit()
+        if had_previews:
+            self.previewOutputsChanged.emit()
+
+    @Slot()
+    def invalidateResults(self) -> None:
+        self._reset_results(cancel_active=True)
+
     def _known_input_sha256(self, input_path: str, mode: str) -> str | None:
         resolved = str(Path(input_path).expanduser().resolve())
         return (
@@ -151,22 +212,21 @@ class MediaViewModel(QObject):
             else None
         )
 
-    @Slot(str, str, str, int, str, float, float, float, str, object, str)
-    def convert(
-        self,
-        input_value: str,
-        output_value: str,
-        model: str,
-        pitch: int,
-        f0: str,
-        index_rate: float,
-        rms_mix_rate: float,
-        protect: float,
-        mode: str,
-        selected_speakers_value: object,
-        overlap_policy: str,
-    ) -> None:
-        selected_speakers = list(selected_speakers_value or [])
+    @Slot("QVariantMap")
+    def convert(self, value: dict[str, Any]) -> None:
+        self._reset_results(cancel_active=True)
+        command = dict(value)
+        input_value = str(command["input"])
+        output_value = str(command["output"])
+        model = str(command["model"])
+        pitch = int(command["pitch"])
+        f0 = str(command["f0"])
+        index_rate = float(command["index_rate"])
+        rms_mix_rate = float(command["rms_mix_rate"])
+        protect = float(command["protect"])
+        mode = str(command["content_mode"])
+        selected_speakers = list(command.get("selected_speakers") or [])
+        overlap_policy = str(command["overlap_policy"])
         input_path = local_path(input_value)
         input_sha256 = self._known_input_sha256(input_path, mode)
         arguments = {
@@ -186,58 +246,39 @@ class MediaViewModel(QObject):
         }
         if input_sha256:
             arguments["input_sha256"] = input_sha256
-        self.activity.submit("conversion.run", arguments, action_key="conversion")
 
-    @Slot(str, str, int, str, float, float, float, str)
-    def preview(
-        self,
-        input_value: str,
-        model: str,
-        pitch: int,
-        f0: str,
-        index_rate: float,
-        rms_mix_rate: float,
-        protect: float,
-        mode: str,
-    ) -> None:
-        self._submit_preview(
-            input_value,
-            model,
-            pitch,
-            f0,
-            index_rate,
-            rms_mix_rate,
-            protect,
-            mode,
-            2,
-            3,
+        def submitted(task: dict[str, Any]) -> None:
+            self._conversion_task_id = str(task["task_id"])
+
+        self.activity.submit(
+            "conversion.run",
+            arguments,
+            action_key="conversion",
+            submitted=submitted,
         )
 
-    @Slot(str, str, int, str, float, float, float, str, int, int)
-    def previewWithOptions(
-        self,
-        input_value: str,
-        model: str,
-        pitch: int,
-        f0: str,
-        index_rate: float,
-        rms_mix_rate: float,
-        protect: float,
-        mode: str,
-        variant_count: int,
-        pitch_step: int,
-    ) -> None:
+    @Slot("QVariantMap")
+    def previewWithOptions(self, value: dict[str, Any]) -> None:
+        command = dict(value)
+        if self._preview_task_id:
+            self.requests.submit(
+                "task.cancel",
+                {"task_id": self._preview_task_id},
+                show_status=False,
+            )
+            self.activity.abandon("preview")
+            self._preview_task_id = None
         self._submit_preview(
-            input_value,
-            model,
-            pitch,
-            f0,
-            index_rate,
-            rms_mix_rate,
-            protect,
-            mode,
-            variant_count,
-            pitch_step,
+            str(command["input"]),
+            str(command["model"]),
+            int(command["pitch"]),
+            str(command["f0"]),
+            float(command["index_rate"]),
+            float(command["rms_mix_rate"]),
+            float(command["protect"]),
+            str(command["content_mode"]),
+            int(command.get("variant_count", 2)),
+            int(command.get("pitch_step", 3)),
         )
 
     def _submit_preview(
@@ -313,25 +354,18 @@ class MediaViewModel(QObject):
             request_key="presets",
         )
 
-    @Slot(str, str, int, str, float, float, float, str)
-    def savePreset(
-        self,
-        model: str,
-        name: str,
-        pitch: int,
-        f0: str,
-        index_rate: float,
-        rms_mix_rate: float,
-        protect: float,
-        mode: str,
-    ) -> None:
+    @Slot("QVariantMap")
+    def savePreset(self, value: dict[str, Any]) -> None:
+        command = dict(value)
+        model = str(command["model"])
+        name = str(command["name"])
         parameters = {
-            "pitch": pitch,
-            "f0": f0,
-            "index_rate": index_rate,
-            "rms_mix_rate": rms_mix_rate,
-            "protect": protect,
-            "content_mode": mode,
+            "pitch": int(command["pitch"]),
+            "f0": str(command["f0"]),
+            "index_rate": float(command["index_rate"]),
+            "rms_mix_rate": float(command["rms_mix_rate"]),
+            "protect": float(command["protect"]),
+            "content_mode": str(command["content_mode"]),
         }
         self.requests.submit(
             "preset.save",
@@ -340,11 +374,34 @@ class MediaViewModel(QObject):
         )
 
     @Slot(str)
-    def selectAudio(self, path: str) -> None:
+    @Slot(str, bool)
+    def selectAudio(self, path: str, autoplay: bool = False) -> None:
         selected = local_path(path)
         if Path(selected).is_file():
             self._result_audio = selected
             self.resultAudioChanged.emit()
+            if autoplay:
+                self.playbackRequested.emit()
+
+    @Slot()
+    def openResult(self) -> None:
+        self._open_path(self._result_path, folder=False)
+
+    @Slot()
+    def openResultFolder(self) -> None:
+        self._open_path(self._result_path, folder=True)
+
+    def _open_path(self, value: str, *, folder: bool) -> None:
+        if not value:
+            return
+        selected = Path(local_path(value)).expanduser().resolve()
+        target = selected.parent if folder and not selected.is_dir() else selected
+        if not target.exists() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+            key = "error.folder_open_failed" if folder else "error.file_open_failed"
+            self._status_callback(
+                self._text_callback(key).format(path=target),
+                "danger",
+            )
 
     @Slot(object)
     def _consume_task(self, value: object) -> None:
@@ -352,6 +409,7 @@ class MediaViewModel(QObject):
         task_id = str(task["id"])
         state = task.get("state")
         is_preview = task_id == self._preview_task_id
+        is_conversion = task_id == self._conversion_task_id
         if task_id == self._analysis_task_id and state in TASK_TERMINAL_STATES:
             self._analysis_task_id = None
             if state == "completed" and task.get("result"):
@@ -363,15 +421,21 @@ class MediaViewModel(QObject):
                 for item in self._preview_outputs:
                     item["url"] = QUrl.fromLocalFile(item["output_path"]).toString()
                 self.previewOutputsChanged.emit()
+        if task_id == self._conversion_task_id and state in TASK_TERMINAL_STATES:
+            self._conversion_task_id = None
         if state != "completed" or not isinstance(task.get("result"), dict):
             return
         payload = task["result"]
         output = payload.get("output", {}).get("path")
         if not output and payload.get("outputs"):
             output = payload["outputs"][0].get("output_path")
+        if is_conversion and output:
+            self._result_path = str(output)
+            self.resultChanged.emit()
         if (
             output
             and Path(output).suffix.casefold() in AUDIO_SUFFIXES
+            and (is_preview or is_conversion)
             and task_id not in self._handled_audio_tasks
             and str(task.get("created_at", "")) >= self._latest_audio_task_created
         ):

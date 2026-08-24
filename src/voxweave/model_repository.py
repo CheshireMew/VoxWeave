@@ -22,12 +22,13 @@ class ModelRepository:
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
             ON CONFLICT(id) DO UPDATE SET
               display_name=excluded.display_name,aliases_json=excluded.aliases_json,
-              model_path=excluded.model_path,index_path=excluded.index_path,
+              model_path=excluded.model_path,model_sha256=excluded.model_sha256,
+              index_path=excluded.index_path,
               index_sha256=excluded.index_sha256,index_candidates_json=excluded.index_candidates_json,
               rvc_version=excluded.rvc_version,sample_rate=excluded.sample_rate,f0=excluded.f0,
               source_kind=excluded.source_kind,license_spdx=excluded.license_spdx,
               source_url=excluded.source_url,recommended_json=excluded.recommended_json,
-              status=excluded.status
+              status=excluded.status,imported_at=excluded.imported_at
             """,
             values,
         )

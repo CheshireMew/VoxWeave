@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .runtime_contract import runtime_contract
+
 MINIMUM_INITIAL_FREE_BYTES = 12 * 1024**3
 DATA_ROOT_LOCATIONS = (
     Path("VoxWeave"),
@@ -119,10 +121,8 @@ def _is_rvc_root(root: Path, *, require_assets: bool = True) -> bool:
     ]
     if require_assets:
         required.extend(
-            [
-                root / "assets" / "hubert_base" / "pytorch_model.bin",
-                root / "assets" / "rmvpe" / "rmvpe.pt",
-            ]
+            root / "assets" / relative
+            for relative in runtime_contract().runtime_assets.required_files
         )
     return all(path.is_file() for path in required) and _rvc_python(root) is not None
 

@@ -1,26 +1,92 @@
 {
-  "version": 1,
-  "windows-x86_64": {
-    "python": {
-      "version": "3.12.13+20260807",
-      "filename": "cpython-3.12.13+20260807-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
-      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260807/cpython-3.12.13%2B20260807-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
-      "size_bytes": 21962247,
-      "sha256": "18bcc65b17921806b72cdc88bcf000bf67a2c99a8fc381fe1629f2b9ba56858d"
-    },
-    "rvc_source": {
-      "revision": "4338f12c3c28c80b3ac015e2d0df66c41592746d",
-      "filename": "rvc-4338f12c3c28c80b3ac015e2d0df66c41592746d.zip",
-      "url": "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI/archive/4338f12c3c28c80b3ac015e2d0df66c41592746d.zip",
-      "size_bytes": 658998,
-      "sha256": "a20bbf0b50479072b3add47d0c693910d55124b7db5699f2caaca1f601e1e0b6"
-    },
-    "ffmpeg": {
-      "version": "8.1.2-essentials",
-      "filename": "ffmpeg-8.1.2-essentials_build.zip",
-      "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip",
-      "size_bytes": 109728040,
-      "sha256": "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
+  "version": 2,
+  "platforms": {
+    "windows-x86_64": {
+      "python": {
+        "version": "3.12.13+20260807",
+        "filename": "cpython-3.12.13+20260807-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260807/cpython-3.12.13%2B20260807-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "size_bytes": 21962247,
+        "sha256": "18bcc65b17921806b72cdc88bcf000bf67a2c99a8fc381fe1629f2b9ba56858d"
+      },
+      "rvc_source": {
+        "revision": "4338f12c3c28c80b3ac015e2d0df66c41592746d",
+        "repository": "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git",
+        "filename": "rvc-4338f12c3c28c80b3ac015e2d0df66c41592746d.zip",
+        "url": "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI/archive/4338f12c3c28c80b3ac015e2d0df66c41592746d.zip",
+        "size_bytes": 658998,
+        "sha256": "a20bbf0b50479072b3add47d0c693910d55124b7db5699f2caaca1f601e1e0b6"
+      },
+      "ffmpeg": {
+        "version": "8.1.2-essentials",
+        "filename": "ffmpeg-8.1.2-essentials_build.zip",
+        "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip",
+        "size_bytes": 109728040,
+        "sha256": "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
+      },
+      "package_indexes": {
+        "pypi_primary": "https://mirrors.pku.edu.cn/pypi/simple",
+        "pypi_fallback": "https://pypi.org/simple",
+        "pytorch_cuda": "https://mirrors.nju.edu.cn/pytorch/whl/cu118",
+        "pytorch_cpu": "https://mirrors.nju.edu.cn/pytorch/whl/cpu"
+      },
+      "package_plans": {
+        "nvidia": {
+          "packages": ["torch==2.7.1+cu118", "torchaudio==2.7.1+cu118"],
+          "index": "pytorch_cuda",
+          "extra_index": "pypi_primary"
+        },
+        "cpu": {
+          "packages": [
+            "torch==2.4.1+cpu",
+            "torchaudio==2.4.1+cpu",
+            "torchvision==0.19.1+cpu",
+            "torch-directml==0.2.5.dev240914"
+          ],
+          "index": "pytorch_cpu",
+          "extra_index": "pypi_primary"
+        },
+        "base": {
+          "requirements_file": "runtime_requirements_windows.txt",
+          "index": "pypi_primary",
+          "extra_index": "pypi_fallback"
+        },
+        "separation": {
+          "packages": ["pymss==2.0.14", "pymss-core==0.1.4"],
+          "index": "pypi_primary",
+          "extra_index": "pypi_fallback"
+        }
+      },
+      "runtime_assets": {
+        "repo_id": "lj1995/VoiceConversionWebUI",
+        "revision": "e6d0c1a17da07c33557852f9dfa2bd44cc75737d",
+        "base_patterns": ["hubert_base/*"],
+        "hubert_file": "hubert_base/pytorch_model.bin",
+        "rmvpe_file": "rmvpe/rmvpe.pt"
+      },
+      "source_separation": {
+        "backend": "rvc-pymss",
+        "model_id": "vocals-bs-roformer-368",
+        "source": "https://huggingface.co/baicai1145/pymss",
+        "weight_files": [
+          "pymss_weights/model_bs_roformer_ep_368_sdr_12.9628.ckpt",
+          "pymss_weights/model_bs_roformer_ep_368_sdr_12.9628.yaml"
+        ],
+        "code_license_spdx": "MIT",
+        "model_license_spdx": "LicenseRef-Unknown",
+        "distribution_allowed": false,
+        "requires_nvidia": true
+      },
+      "speaker_embedding": {
+        "backend": "wespeaker-onnx",
+        "install_directory": "wespeaker-resnet34-lm",
+        "repo_id": "Wespeaker/wespeaker-resnet34-LM",
+        "source": "https://huggingface.co/Wespeaker/wespeaker-resnet34-LM",
+        "revision": "f0c48c298fd835726c27956a5d617bad7115627e",
+        "filename": "voxceleb_resnet34_LM.onnx",
+        "code_license_spdx": "Apache-2.0",
+        "model_license_spdx": "CC-BY-4.0"
+      }
     }
   }
 }

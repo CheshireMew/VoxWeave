@@ -21,31 +21,6 @@ class StorageRepository:
             "SELECT * FROM tasks WHERE updated_at<=? ORDER BY updated_at", (cutoff,)
         )
 
-    def task_references(
-        self, owner_task_id: str, encoded_path_pattern: str
-    ) -> list[dict[str, Any]]:
-        return self.database.fetch_all(
-            "SELECT id,arguments_json,result_json FROM tasks "
-            "WHERE id=? OR arguments_json LIKE ? OR result_json LIKE ? ORDER BY created_at",
-            (owner_task_id, encoded_path_pattern, encoded_path_pattern),
-        )
-
-    def rewrite_task_references(
-        self,
-        replacements: list[tuple[str, str | None, str]],
-        source_path: str,
-        archive_path: str,
-    ) -> None:
-        with self.database.connect() as db:
-            db.executemany(
-                "UPDATE tasks SET arguments_json=?,result_json=? WHERE id=?", replacements
-            )
-            db.execute(
-                "UPDATE artifact_archives SET state='referenced' "
-                "WHERE source_path=? AND archive_path=?",
-                (source_path, archive_path),
-            )
-
     def archive(self, task_id: str) -> dict[str, Any] | None:
         return self.database.fetch_one(
             "SELECT * FROM artifact_archives WHERE task_id=?", (task_id,)

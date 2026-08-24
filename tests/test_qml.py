@@ -17,21 +17,37 @@ from PySide6.QtQml import QQmlApplicationEngine  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
 from voxweave import gui as gui_module  # noqa: E402
+from voxweave import service as service_module  # noqa: E402
 from voxweave.config import Settings  # noqa: E402
 from voxweave.gui import Bridge  # noqa: E402
 from voxweave.gui_maintenance import MaintenanceViewModel  # noqa: E402
 from voxweave.gui_models import ModelCatalogViewModel  # noqa: E402
 from voxweave.gui_presenters import (  # noqa: E402
+    error_summary,
     localized_model_name,
     localized_task_title,
 )
+from voxweave.gui_realtime import RealtimeViewModel  # noqa: E402
 from voxweave.onboarding import RuntimeCandidate  # noqa: E402
 from voxweave.release_smoke import run_smoke  # noqa: E402
 from voxweave.service import create_app  # noqa: E402
+from voxweave.settings_file_store import SettingsFileStore  # noqa: E402
 
 
 def test_first_run_requires_twelve_gibibytes_of_free_space() -> None:
     assert gui_module.MINIMUM_INITIAL_FREE_BYTES == 12 * 1024**3
+
+
+def test_error_summary_prefers_public_context_or_final_exception() -> None:
+    traceback = (
+        "Traceback (most recent call last):\n"
+        '  File "worker.py", line 2, in <module>\n'
+        "    raise RuntimeError('audio failed')\n"
+        "RuntimeError: audio failed"
+    )
+    assert error_summary(traceback) == "RuntimeError: audio failed"
+    assert error_summary(f"Readable failure\n{traceback}") == "Readable failure"
+    assert error_summary(f"操作失败：{traceback}") == "操作失败：RuntimeError: audio failed"
 
 
 class _ModelFeedStub(QObject):
@@ -39,11 +55,14 @@ class _ModelFeedStub(QObject):
 
 
 class _ModelRequestStub:
-    def __init__(self, models: list[dict]) -> None:
+    def __init__(self, models: list[dict], catalog: list[dict]) -> None:
         self.models = models
+        self.catalog = catalog
+        self.calls = []
 
     def submit(self, operation, _arguments, completed, **_kwargs) -> None:
-        completed(self.models if operation == "model.list" else [])
+        self.calls.append(operation)
+        completed(self.models if operation == "model.list" else self.catalog)
 
 
 class _ModelActivityStub:
@@ -56,10 +75,26 @@ class _ModelActivityStub:
         self.completions.append(_kwargs.get("completed"))
 
 
-def _model_view_model(models: list[dict]) -> tuple[ModelCatalogViewModel, _ModelActivityStub]:
+def _starter_catalog() -> list[dict]:
+    return [
+        {
+            "id": model_id,
+            "display_name": model_id,
+            "starter": True,
+            "download_size_bytes": 1024,
+            "license_spdx": "CC-BY-4.0",
+            "source_url": f"https://example.test/{model_id}",
+        }
+        for model_id in ("community.zh-male-young", "community.zh-female-senior")
+    ]
+
+
+def _model_view_model(
+    models: list[dict], catalog: list[dict] | None = None
+) -> tuple[ModelCatalogViewModel, _ModelActivityStub]:
     activity = _ModelActivityStub()
     view_model = ModelCatalogViewModel(
-        _ModelRequestStub(models),
+        _ModelRequestStub(models, _starter_catalog() if catalog is None else catalog),
         activity,
         _ModelFeedStub(),
         lambda: ("zh-CN", {"zh-CN": {}, "en": {}}),
@@ -81,6 +116,143 @@ def test_startup_does_not_rescan_a_populated_model_library() -> None:
     view_model.discover()
 
     assert activity.submissions == []
+
+
+def test_startup_uses_one_model_and_catalog_request_when_runtime_is_ready() -> None:
+    view_model, _activity = _model_view_model([{"id": "local.voice.default", "status": "ready"}])
+
+    view_model.discover()
+    view_model.provision()
+
+    assert view_model.requests.calls.count("model.list") == 1
+    assert view_model.requests.calls.count("model.catalog.list") == 1
+
+
+def test_usable_model_never_triggers_starter_download_prompt() -> None:
+    model_sets = [
+        [{"id": "local.voice.default", "status": "ready", "archived": False}],
+        [
+            {
+                "id": "community.zh-male-young",
+                "status": "ready",
+                "archived": False,
+            }
+        ],
+        [
+            {
+                "id": "community.zh-male-young",
+                "status": "ready",
+                "archived": False,
+            },
+            {
+                "id": "community.zh-female-senior",
+                "status": "ready",
+                "archived": False,
+            },
+        ],
+    ]
+
+    for models in model_sets:
+        view_model, activity = _model_view_model(models)
+        requested = []
+        view_model.starterInstallRequested.connect(requested.append)
+
+        view_model.discover()
+        view_model.provision()
+
+        assert requested == []
+        assert all(
+            operation != "model.catalog.install"
+            for operation, _arguments, _action_key in activity.submissions
+        )
+        assert view_model._startup_provisioned is True
+
+
+def test_empty_starter_queue_finishes_without_emitting_install_prompt() -> None:
+    view_model, _activity = _model_view_model([])
+    requested = []
+    view_model.starterInstallRequested.connect(requested.append)
+    view_model._automatic_provisioning = True
+
+    view_model._request_starter_install()
+
+    assert requested == []
+    assert view_model._automatic_provisioning is False
+    assert view_model._startup_provisioned is True
+
+
+def test_archived_ready_model_requires_restore_instead_of_claiming_startup_ready() -> None:
+    statuses = []
+    activity = _ModelActivityStub()
+    view_model = ModelCatalogViewModel(
+        _ModelRequestStub(
+            [{"id": "local.archived", "status": "ready", "archived": True}],
+            _starter_catalog(),
+        ),
+        activity,
+        _ModelFeedStub(),
+        lambda: ("zh-CN", {"zh-CN": {"models.auto.archived": "restore"}, "en": {}}),
+        status_callback=lambda message, kind: statuses.append((message, kind)),
+    )
+    requested = []
+    view_model.starterInstallRequested.connect(requested.append)
+
+    view_model.discover()
+    view_model.provision()
+
+    assert requested == []
+    assert view_model._startup_provisioned is True
+    assert statuses[-1] == ("restore", "warning")
+
+
+def test_use_in_conversion_emits_the_selected_ready_model() -> None:
+    view_model, _activity = _model_view_model(
+        [{"id": "local.ready", "status": "ready", "archived": False}]
+    )
+    selected = []
+    view_model.conversionModelRequested.connect(selected.append)
+    view_model._set_items(
+        [{"id": "local.ready", "status": "ready", "archived": False}]
+    )
+
+    view_model.useInConversion("local.ready")
+
+    assert selected == ["local.ready"]
+
+
+def test_realtime_polling_runs_only_while_session_or_worker_is_active(tmp_path) -> None:
+    app = QGuiApplication.instance() or QGuiApplication([])
+    settings = Settings(data_root=str(tmp_path))
+
+    class ImmediateRequests:
+        def submit(self, operation, _arguments, callback, **_kwargs) -> None:
+            assert operation == "realtime.status"
+            callback(
+                {
+                    "session_id": None,
+                    "state": "idle",
+                    "stage": "idle",
+                    "metrics": {},
+                    "worker": {"state": "not_started"},
+                }
+            )
+
+    view_model = RealtimeViewModel(
+        settings,
+        ImmediateRequests(),  # type: ignore[arg-type]
+        lambda *_args: None,
+        lambda key: key,
+    )
+    view_model.start()
+    app.processEvents()
+    assert view_model.timer.isActive() is False
+
+    view_model._apply_status({"state": "running", "worker": {"state": "ready"}})
+    assert view_model.timer.isActive() is True
+    assert view_model.timer.interval() == 250
+
+    view_model._apply_status({"state": "stopped", "worker": {"state": "not_started"}})
+    assert view_model.timer.isActive() is False
 
 
 def test_empty_model_library_waits_for_confirmation_before_starter_download() -> None:
@@ -209,11 +381,54 @@ def test_starter_model_confirmation_dialog_controls_download(tmp_path, monkeypat
         lambda *_args, **_kwargs: next(answers),
     )
     starter_ids = ["community.zh-male-young", "community.zh-female-senior"]
+    bridge.modelCatalog._starter_details = {
+        item["id"]: item for item in _starter_catalog()
+    }
 
     bridge._confirm_starter_install(starter_ids)
     bridge._confirm_starter_install(starter_ids)
 
     assert decisions == ["declined", "confirmed"]
+    bridge.shutdown()
+    app.processEvents()
+
+
+def test_empty_starter_confirmation_payload_never_opens_dialog(tmp_path, monkeypatch) -> None:
+    app = QGuiApplication.instance() or QGuiApplication([])
+    bridge = Bridge(Settings(data_root=str(tmp_path)), start_background=False)
+    decisions = []
+    monkeypatch.setattr(
+        ModelCatalogViewModel,
+        "confirmStarterInstall",
+        lambda _self: decisions.append("finished"),
+    )
+
+    def unexpected_dialog(*_args, **_kwargs):
+        raise AssertionError("an empty starter list must not open an install dialog")
+
+    monkeypatch.setattr(gui_module.QMessageBox, "question", unexpected_dialog)
+
+    bridge._confirm_starter_install([])
+
+    assert decisions == ["finished"]
+    bridge.shutdown()
+    app.processEvents()
+
+
+def test_danger_status_remains_visible_until_the_user_dismisses_it(tmp_path) -> None:
+    app = QGuiApplication.instance() or QGuiApplication([])
+    bridge = Bridge(Settings(data_root=str(tmp_path)), start_background=False)
+
+    bridge._set_status("conversion failed", "danger")
+    bridge._set_status("Ready", "success")
+
+    assert bridge.status == "conversion failed"
+    assert bridge.statusKind == "danger"
+
+    bridge.dismissStatus()
+    assert bridge.status == "Ready"
+    bridge._set_status("conversion completed", "success")
+    assert bridge.status == "conversion completed"
     bridge.shutdown()
     app.processEvents()
 
@@ -284,21 +499,16 @@ def test_configured_data_root_still_reconciles_existing_runtime(tmp_path, monkey
         ffmpeg=tmp_path / "ffmpeg.exe",
         ffprobe=tmp_path / "ffprobe.exe",
     )
-    persisted = []
     monkeypatch.setattr(gui_module.sys, "frozen", True, raising=False)
     monkeypatch.setattr(gui_module, "data_root_is_configured", lambda: True)
     monkeypatch.setattr(gui_module, "resolve_data_root", lambda: data_root)
-    monkeypatch.setattr(
-        gui_module,
-        "discover_runtime_for_data_root",
-        lambda target, *, application_root: runtime,
-    )
-    monkeypatch.setattr(gui_module, "_persist_detected_runtime", persisted.append)
 
     assert gui_module._initialize_application() is True
-    assert len(persisted) == 1
-    assert persisted[0].data_root == data_root
-    assert persisted[0].runtime == runtime
+    settings = Settings(data_root=str(data_root))
+    service_module._adopt_detected_runtime(settings, SettingsFileStore(settings), runtime)
+    persisted = json.loads(settings.config_path.read_text(encoding="utf-8"))
+    assert persisted["rvc_root"] == str(runtime.rvc_root)
+    assert persisted["rvc_python"] == str(runtime.rvc_python)
 
 
 def test_main_qml_loads(tmp_path) -> None:
@@ -322,9 +532,11 @@ def test_main_qml_loads(tmp_path) -> None:
     assert stack is not None
     sidebar = root.findChild(QObject, "appSidebar")
     assert sidebar is not None
-    assert root.width() == 960
+    available_width = app.primaryScreen().availableGeometry().width()
+    expected_width = round(max(540, min(840, available_width * 0.84)))
+    assert root.width() == expected_width
     assert root.minimumWidth() == 540
-    assert sidebar.property("width") == 156.0
+    assert sidebar.property("width") == (156.0 if expected_width >= 840 else 64.0)
     assert root.property("currentPage") == 0
     assert root.findChild(QObject, "navButton0").property("iconName") == "realtime"
     assert root.findChild(QObject, "navButton1").property("iconName") == "convert"
@@ -406,7 +618,7 @@ def test_main_qml_loads(tmp_path) -> None:
         "conversionProtectSlider": (0.0, 0.5, 0.01, 0.33),
         "realtimePitchSlider": (-36.0, 36.0, 1.0, 0.0),
         "realtimeVadThresholdSlider": (10.0, 90.0, 1.0, 35.0),
-        "realtimeInputGateSlider": (-60.0, -20.0, 1.0, -30.0),
+        "realtimeInputGateSlider": (-60.0, -20.0, 1.0, -40.0),
         "realtimeIndexRateSlider": (0.0, 100.0, 1.0, 72.0),
         "realtimeRmsMixSlider": (0.0, 100.0, 1.0, 25.0),
     }
@@ -454,6 +666,46 @@ def test_main_qml_loads(tmp_path) -> None:
     app.processEvents()
     assert vad_status.property("text") == bridge.text("realtime.voice.detected")
     assert voice_status.property("text") == bridge.text("realtime.voice.converting")
+    traceback = (
+        "Traceback (most recent call last):\n"
+        '  File "worker.py", line 2, in <module>\n'
+        "RuntimeError: audio failed"
+    )
+    realtime_page.setProperty(
+        "session",
+        {
+            "state": "failed",
+            "stage": "failed",
+            "error": traceback,
+            "metrics": {},
+            "worker": {"state": "failed", "model_ready": False},
+        },
+    )
+    app.processEvents()
+    realtime_error = root.findChild(QObject, "realtimeErrorSummary")
+    assert realtime_error is not None
+    assert realtime_error.property("text") == "RuntimeError: audio failed"
+
+    status_banner = root.findChild(QObject, "statusBanner")
+    status_text = root.findChild(QObject, "statusBannerText")
+    sidebar_status_text = root.findChild(QObject, "sidebarStatusText")
+    assert status_banner is not None
+    assert status_text is not None
+    assert sidebar_status_text is not None
+    width_before_error = root.width()
+    bridge._set_status(f"操作失败：{traceback}", "danger")
+    app.processEvents()
+    assert bridge.status == "操作失败：RuntimeError: audio failed"
+    assert bridge.statusDetail == f"操作失败：{traceback}"
+    assert root.width() == width_before_error
+    assert status_text.property("maximumLineCount") == 1
+    assert sidebar_status_text.property("maximumLineCount") == 1
+    assert status_banner.property("width") <= 720
+    assert status_text.property("width") <= status_banner.property("width")
+    bridge.copyStatus()
+    clipboard = app.clipboard().text()
+    assert clipboard.startswith("操作失败：RuntimeError: audio failed")
+    assert "Traceback (most recent call last)" in clipboard
     models_page = root.findChild(QObject, "modelsPage")
     model_import_stack = root.findChild(QObject, "modelImportStack")
     assert root.findChild(QObject, "libraryModelSelector") is not None
@@ -467,6 +719,65 @@ def test_main_qml_loads(tmp_path) -> None:
     app.processEvents()
     assert models_page.property("importTab") == 1
     assert model_import_stack.property("currentIndex") == 1
+    bridge.shutdown()
+    app.processEvents()
+
+
+def test_qml_translation_bindings_refresh_when_language_changes(tmp_path, monkeypatch) -> None:
+    app = QGuiApplication.instance() or QGuiApplication([])
+    engine = QQmlApplicationEngine()
+    bridge = Bridge(Settings(data_root=str(tmp_path)), start_background=False)
+    monkeypatch.setattr(bridge.requests, "submit", lambda *_args, **_kwargs: None)
+    engine.setInitialProperties({"bridge": bridge})
+    qml = Path(__file__).parents[1] / "src" / "voxweave" / "qml" / "Main.qml"
+    engine.load(QUrl.fromLocalFile(str(qml)))
+    assert engine.rootObjects()
+    root = engine.rootObjects()[0]
+    task_button = root.findChild(QObject, "navButton4")
+    assert task_button is not None
+    assert task_button.property("text") == "任务中心"
+
+    bridge.language = "en"
+    app.processEvents()
+
+    assert task_button.property("text") == "Task Center"
+    bridge.shutdown()
+    app.processEvents()
+
+
+def test_model_library_navigation_selects_the_requested_conversion_model(tmp_path) -> None:
+    app = QGuiApplication.instance() or QGuiApplication([])
+    engine = QQmlApplicationEngine()
+    bridge = Bridge(Settings(data_root=str(tmp_path)), start_background=False)
+    engine.setInitialProperties({"bridge": bridge})
+    qml = Path(__file__).parents[1] / "src" / "voxweave" / "qml" / "Main.qml"
+    engine.load(QUrl.fromLocalFile(str(qml)))
+    root = engine.rootObjects()[0]
+    bridge.modelCatalog._set_items(
+        [
+            {
+                "id": "local.selected",
+                "display_name": "Selected",
+                "family": "selected",
+                "status": "ready",
+                "archived": False,
+                "recommended": {
+                    "pitch": 0,
+                    "f0": "rmvpe",
+                    "index_rate": 0.72,
+                    "rms_mix_rate": 0.25,
+                    "protect": 0.33,
+                },
+            }
+        ]
+    )
+    app.processEvents()
+
+    bridge.modelCatalog.useInConversion("local.selected")
+    app.processEvents()
+
+    assert root.property("currentPage") == 1
+    assert root.findChild(QObject, "modelSelector").property("currentValue") == "local.selected"
     bridge.shutdown()
     app.processEvents()
 
@@ -613,6 +924,7 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(tmp_path, mo
         assert QMetaObject.invokeMethod(page, "saveCurrentPreferences")
         assert bridge.realtime.preferences["model"] == "local.voice.default"
         assert bridge.realtime.preferences["pitch"] == 8
+        assert QMetaObject.invokeMethod(page, "prepareSelectedModel")
 
         prepare_deadline = time.monotonic() + 3
         while time.monotonic() < prepare_deadline:
@@ -696,12 +1008,45 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(tmp_path, mo
     app.processEvents()
 
 
+def test_realtime_preference_patch_preserves_concurrent_service_changes(tmp_path) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    submissions: list[dict] = []
+
+    class ImmediateRequests:
+        def submit(self, _operation, arguments, callback, **_kwargs) -> None:
+            submissions.append(arguments)
+            callback(
+                {
+                    "settings": {
+                        "realtime": {
+                            **settings.realtime,
+                            "pitch": 5,
+                            "input_gate_db": -35.0,
+                        }
+                    }
+                }
+            )
+
+    view_model = RealtimeViewModel(
+        settings,
+        ImmediateRequests(),  # type: ignore[arg-type]
+        lambda *_args: None,
+        lambda key: key,
+    )
+    view_model.savePreferences({**settings.realtime, "pitch": 5})
+    view_model._persist_preferences()
+
+    assert submissions == [{"realtime": {"pitch": 5}}]
+    assert view_model.preferences["pitch"] == 5
+    assert view_model.preferences["input_gate_db"] == -35.0
+
+
 def test_main_qml_translation_keys_are_complete() -> None:
     root = Path(__file__).parents[1] / "src" / "voxweave"
     qml = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted((root / "qml").glob("*.qml"))
     )
-    keys = set(re.findall(r'bridge\.text\("([^"]+)"\)', qml))
+    keys = set(re.findall(r'bridge\.text\([^,]+,\s*"([^"]+)"\)', qml))
     translations = json.loads(
         (root / "resources" / "translations.json").read_text(encoding="utf-8")
     )

@@ -8,10 +8,10 @@ from voxweave.bootstrap import persist_configuration
 from voxweave.config import (
     Settings,
     application_root,
-    load_settings,
     persist_data_root_pointer,
 )
 from voxweave.discovery import ServiceLock
+from voxweave.settings_file_store import SettingsFileStore, load_settings
 
 
 def test_bootstrap_configuration_is_atomic_and_respects_service_ownership(tmp_path) -> None:
@@ -45,20 +45,22 @@ def test_legacy_model_roots_are_migrated_and_removed_from_persisted_settings(
         json.dumps({"data_root": str(tmp_path), "model_roots": ["D:/weights"]}),
         encoding="utf-8",
     )
-    monkeypatch.setattr("voxweave.config.resolve_data_root", lambda: tmp_path)
+    monkeypatch.setattr("voxweave.settings_file_store.resolve_data_root", lambda: tmp_path)
     settings = load_settings()
     assert settings.weight_roots == ["D:/weights"]
     assert settings.index_roots == []
+    assert "model_roots" in json.loads(config.read_text(encoding="utf-8"))
+    SettingsFileStore(settings).ensure_persisted(settings)
     persisted = json.loads(config.read_text(encoding="utf-8"))
     assert "model_roots" not in persisted
     assert persisted["weight_roots"] == ["D:/weights"]
     assert persisted["index_roots"] == []
-    assert persisted["realtime"]["block_seconds"] == 0.5
+    assert persisted["realtime"]["block_seconds"] == 0.25
 
 
 def test_realtime_settings_are_normalized_and_written_atomically(tmp_path) -> None:
     settings = Settings(data_root=str(tmp_path))
-    assert settings.realtime["input_gate_db"] == -30.0
+    assert settings.realtime["input_gate_db"] == -40.0
     realtime = {
         **settings.realtime,
         "model": "local.voice.default",
@@ -68,7 +70,7 @@ def test_realtime_settings_are_normalized_and_written_atomically(tmp_path) -> No
         "pitch": 8,
         "test_mode": True,
     }
-    settings.update(realtime=realtime)
+    SettingsFileStore(settings).commit(settings, realtime=realtime)
     persisted = json.loads(settings.config_path.read_text(encoding="utf-8"))
     assert persisted["realtime"] == realtime
     assert settings.updated(language="en").realtime == realtime

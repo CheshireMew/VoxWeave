@@ -7,8 +7,10 @@ import uuid
 from typing import Any
 
 from .client import request_json, shutdown_service
-from .config import configure_process_environment, load_settings
+from .config import configure_process_environment
 from .i18n import translate
+from .protocol import PROTOCOL, PROTOCOL_VERSION
+from .settings_file_store import load_settings
 
 
 def _read_request(value: str) -> dict[str, Any]:
@@ -94,15 +96,15 @@ def main() -> int:
                 if not args.operation:
                     raise SystemExit("execute requires an operation or --request")
                 request = {
-                    "protocol": "voxweave-control",
-                    "version": 1,
+                    "protocol": PROTOCOL,
+                    "version": PROTOCOL_VERSION,
                     "operation": args.operation,
                     "arguments": json.loads(args.arguments),
                 }
         elif args.command == "models":
             request = {
-                "protocol": "voxweave-control",
-                "version": 1,
+                "protocol": PROTOCOL,
+                "version": PROTOCOL_VERSION,
                 "operation": "model.list",
                 "arguments": {},
             }
@@ -113,8 +115,8 @@ def main() -> int:
             if args.indices:
                 arguments["index_roots"] = args.indices
             request = {
-                "protocol": "voxweave-control",
-                "version": 1,
+                "protocol": PROTOCOL,
+                "version": PROTOCOL_VERSION,
                 "operation": "model.scan",
                 "arguments": arguments,
             }
@@ -122,8 +124,8 @@ def main() -> int:
             operation = f"task.{args.task_command}"
             arguments = {} if args.task_command == "list" else {"task_id": args.task_id}
             request = {
-                "protocol": "voxweave-control",
-                "version": 1,
+                "protocol": PROTOCOL,
+                "version": PROTOCOL_VERSION,
                 "operation": operation,
                 "arguments": arguments,
             }

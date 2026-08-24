@@ -4,6 +4,7 @@ from typing import Any
 
 from .artifacts import ArtifactStore
 from .batch import BatchManager
+from .capabilities import public_capabilities
 from .config import Settings
 from .database import Database
 from .diagnostics import DiagnosticsService
@@ -13,13 +14,17 @@ from .model_importer import ModelImporter
 from .model_inspector import ModelInspector
 from .model_registry import ModelRegistry
 from .model_scanner import ModelScanner
+from .operation_receipt_repository import OperationReceiptRepository
 from .operation_router import OperationRouter
 from .preset_repository import PresetRepository
 from .presets import PresetService
 from .protocol import describe
 from .realtime import RealtimeSessionManager
 from .rvc_engine import RvcEngine
+from .settings_repository import SettingsRepository
+from .settings_service import SettingsService
 from .storage import StorageArchiveManager
+from .task_event_stream import TaskEventStream
 from .task_manager import TaskManager
 from .task_service import TaskService
 
@@ -29,9 +34,18 @@ class Controller:
         self.settings = settings
         self.settings.ensure_layout()
         self.database = Database(settings.database_path)
+        self.settings_service = SettingsService(
+            settings, SettingsRepository(self.database)
+        )
+        self.receipts = OperationReceiptRepository(self.database)
         self.models = ModelRegistry(self.database)
         self.model_inspector = ModelInspector(settings)
-        self.model_scanner = ModelScanner(settings, self.models, self.model_inspector)
+        self.model_scanner = ModelScanner(
+            settings,
+            self.models,
+            self.model_inspector,
+            self.settings_service,
+        )
         self.model_importer = ModelImporter(
             settings,
             self.models,
@@ -40,6 +54,7 @@ class Controller:
         )
         self.presets = PresetService(self.models, PresetRepository(self.database))
         self.tasks = TaskManager(self.database)
+        self.task_event_stream = TaskEventStream(self.tasks)
         self.artifacts = ArtifactStore(self.database)
         self.media = MediaPipeline(settings, self.models, self.artifacts)
         self.realtime = RealtimeSessionManager(
@@ -72,6 +87,8 @@ class Controller:
             self.batch,
             self.storage,
             diagnostics,
+            self.settings_service,
+            self.receipts,
         )
         self.tasks.start(preserved_task_ids=self.batch.durable_task_ids())
         self.batch.start()
@@ -114,10 +131,23 @@ class Controller:
             "hardware_backend": self.settings.hardware_backend,
             "inspection_operation": "runtime.inspect",
         }
+        payload["capabilities"] = public_capabilities(
+            self.model_importer.catalog.list_entries()
+        )
         return payload
 
     def shutdown(self) -> None:
-        self.batch.shutdown()
-        self.tasks.shutdown()
-        self.realtime.shutdown()
-        self.media.shutdown()
+        failures: list[str] = []
+        for name, close in (
+            ("batch watcher", self.batch.shutdown),
+            ("realtime manager", self.realtime.shutdown),
+            ("task worker", self.tasks.shutdown),
+            ("media engine", self.media.shutdown),
+            ("database", self.database.close),
+        ):
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 - complete coordinated shutdown
+                failures.append(f"{name}: {exc}")
+        if failures:
+            raise RuntimeError("; ".join(failures))

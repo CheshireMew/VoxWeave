@@ -6,10 +6,10 @@ import secrets
 import socket
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 from .config import Settings
+from .file_lock import InterprocessFileLock
 from .protocol import PROTOCOL, PROTOCOL_VERSION
 
 
@@ -68,49 +68,12 @@ class Discovery:
         }
 
 
-class ServiceLock:
-    def __init__(self, path: Path):
-        self.path = path
-        self.handle: IO[bytes] | None = None
-
+class ServiceLock(InterprocessFileLock):
     def acquire(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("a+b")
         try:
-            if os.name == "nt":
-                import msvcrt
-
-                self.handle.seek(0, os.SEEK_END)
-                if self.handle.tell() == 0:
-                    self.handle.write(b"0")
-                    self.handle.flush()
-                self.handle.seek(0)
-                msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            self.handle.close()
-            self.handle = None
+            super().acquire()
+        except RuntimeError as exc:
             raise RuntimeError("another VoxWeave service already owns the lock") from exc
-
-    def release(self) -> None:
-        if self.handle is None:
-            return
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                self.handle.seek(0)
-                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            self.handle.close()
-            self.handle = None
 
 
 def read_discovery(settings: Settings) -> Discovery | None:

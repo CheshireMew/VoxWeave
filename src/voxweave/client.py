@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from . import __version__
 from .app import SERVICE_ARGUMENT
 from .config import Settings
 from .discovery import Discovery, read_discovery
@@ -45,6 +46,7 @@ def _handshake(discovery: Discovery) -> bool:
             and payload.get("pid") == discovery.pid
             and payload.get("protocol") == PROTOCOL
             and payload.get("version") == PROTOCOL_VERSION
+            and payload.get("product_version") == __version__
         )
     except (OSError, ValueError, urllib.error.URLError):
         return False
@@ -78,7 +80,7 @@ def ensure_service_with_state(settings: Settings, timeout: float = 120) -> tuple
         while time.monotonic() < deadline:
             discovery = read_discovery(settings)
             if discovery and _handshake(discovery):
-                return discovery, True
+                return discovery, discovery.pid == getattr(process, "pid", None)
             if process.poll() is not None:
                 break
             time.sleep(0.15)
@@ -103,6 +105,7 @@ class ManagedServiceClient:
         self._started_service = False
         self._closing = False
         self._discovery: Discovery | None = None
+        self._capabilities: dict[str, Any] | None = None
 
     @property
     def started_service(self) -> bool:
@@ -120,10 +123,19 @@ class ManagedServiceClient:
         try:
             return _request_json(discovery, method, route, payload)
         except ServiceUnavailable:
+            if not _retry_safe(method, route, payload):
+                raise
             with self._lock:
                 self._discovery = None
+                self._capabilities = None
             discovery = self.ensure()
             return _request_json(discovery, method, route, payload)
+
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        self.ensure()
+        with self._lock:
+            return dict(self._capabilities or {})
 
     def ensure(self) -> Discovery:
         with self._lock:
@@ -132,12 +144,15 @@ class ManagedServiceClient:
             if self._discovery is not None:
                 return self._discovery
         discovery, started = ensure_service_with_state(self.settings)
+        capabilities = _describe(discovery)
+        _validate_capabilities(capabilities)
         stop_after_start = False
         closing = False
         with self._lock:
             closing = self._closing
             if not closing:
                 self._discovery = discovery
+                self._capabilities = capabilities
                 if started:
                     self._started_service = True
             elif started:
@@ -154,6 +169,7 @@ class ManagedServiceClient:
             owned = self._started_service
             self._started_service = False
             self._discovery = None
+            self._capabilities = None
         if not owned:
             return {"ok": True, "state": "retained"}
         return shutdown_service(self.settings)
@@ -167,6 +183,42 @@ def request_json(
 ) -> dict[str, Any]:
     discovery = ensure_service(settings)
     return _request_json(discovery, method, route, payload)
+
+
+def _retry_safe(
+    method: str,
+    route: str,
+    payload: dict[str, Any] | None,
+) -> bool:
+    if method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    return bool(
+        route == "/v1/execute"
+        and payload
+        and isinstance(payload.get("request_id"), str)
+        and payload["request_id"].strip()
+    )
+
+
+def _describe(discovery: Discovery) -> dict[str, Any]:
+    return _request_json(discovery, "GET", "/v1/describe")
+
+
+def _validate_capabilities(payload: dict[str, Any]) -> None:
+    if payload.get("protocol") != PROTOCOL or payload.get("version") != PROTOCOL_VERSION:
+        raise ServiceUnavailable("local service protocol is incompatible with this client")
+    if payload.get("product_version") != __version__:
+        raise ServiceUnavailable(
+            "local service product version does not match this client; restart VoxWeave"
+        )
+    operations = payload.get("operations")
+    if not isinstance(operations, dict):
+        raise ServiceUnavailable("local service did not publish operation capabilities")
+    from .protocol import OPERATION_SPECS
+
+    missing = sorted(set(OPERATION_SPECS) - set(operations))
+    if missing:
+        raise ServiceUnavailable(f"local service is missing required operations: {missing}")
 
 
 def _request_json(

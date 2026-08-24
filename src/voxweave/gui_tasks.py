@@ -15,6 +15,7 @@ from .discovery import Discovery
 from .gui_presenters import (
     localized_task_stage,
     localized_task_title,
+    localized_text,
     localized_timestamp,
     task_error_summary,
     task_result_path,
@@ -27,6 +28,7 @@ class TaskEventStream(QObject):
     eventReceived = Signal(object)
     connectionReady = Signal(object)
     connectionFailed = Signal(str)
+    stateChanged = Signal(str, str)
 
     def __init__(
         self,
@@ -45,24 +47,42 @@ class TaskEventStream(QObject):
         self.reconnect.timeout.connect(self._discover)
         self.socket.textMessageReceived.connect(self._message)
         self.socket.disconnected.connect(self._schedule_reconnect)
-        self.socket.connected.connect(self.reconnect.stop)
-        self.socket.errorOccurred.connect(lambda _error: self._schedule_reconnect())
+        self.socket.connected.connect(self._connected)
+        self.socket.errorOccurred.connect(lambda _error: self._connection_error())
         self.connectionReady.connect(self._connect)
-        self.connectionFailed.connect(lambda _message: self._schedule_reconnect())
+        self.connectionFailed.connect(self._discovery_failed)
         self.active = False
         self.connecting = False
         self.after_id = 0
+
+    def _set_state(self, state: str, detail: str = "") -> None:
+        self.stateChanged.emit(state, detail)
+
+    @Slot()
+    def _connected(self) -> None:
+        self.reconnect.stop()
+        self._set_state("connected")
+
+    @Slot()
+    def _connection_error(self) -> None:
+        self._schedule_reconnect(self.socket.errorString())
+
+    @Slot(str)
+    def _discovery_failed(self, message: str) -> None:
+        self._schedule_reconnect(message)
 
     def start(self) -> None:
         if self.active:
             return
         self.active = True
+        self._set_state("connecting")
         self._discover()
 
     def _discover(self) -> None:
         if not self.active or self.connecting:
             return
         self.connecting = True
+        self._set_state("connecting")
 
         def work() -> None:
             try:
@@ -101,21 +121,27 @@ class TaskEventStream(QObject):
         self.eventReceived.emit(event)
 
     @Slot()
-    def _schedule_reconnect(self) -> None:
+    @Slot(str)
+    def _schedule_reconnect(self, detail: str = "") -> None:
         self.connecting = False
         if self.active and not self.reconnect.isActive():
+            self._set_state("reconnecting", detail)
             self.reconnect.start()
 
     def shutdown(self) -> None:
         self.active = False
         self.reconnect.stop()
         self.socket.abort()
+        self._set_state("offline")
         self.executor.shutdown(wait=False, cancel_futures=True)
 
 
 class TaskFeed(QObject):
     itemsChanged = Signal()
     taskUpdated = Signal(object)
+    loadingChanged = Signal()
+    errorChanged = Signal()
+    connectionChanged = Signal()
 
     def __init__(
         self,
@@ -129,11 +155,21 @@ class TaskFeed(QObject):
         self.items: list[dict[str, Any]] = []
         self.next_cursor: str | None = None
         self.refreshing = False
+        self.error = ""
+        self.connection_state = "offline"
+        self.connection_detail = ""
         self.pending_events: list[dict[str, Any]] = []
         self.snapshot_event_cursor = 0
         self.started = False
         self.events = TaskEventStream(settings, self, discovery_provider)
         self.events.eventReceived.connect(self._event)
+        self.events.stateChanged.connect(self._connection_state_changed)
+
+    @Slot(str, str)
+    def _connection_state_changed(self, state: str, detail: str) -> None:
+        self.connection_state = state
+        self.connection_detail = detail
+        self.connectionChanged.emit()
 
     def start(self) -> None:
         self.started = True
@@ -160,15 +196,21 @@ class TaskFeed(QObject):
         if self.refreshing:
             return
         self.refreshing = True
+        self.error = ""
+        self.loadingChanged.emit()
+        self.errorChanged.emit()
 
         def update(result: dict[str, Any]) -> None:
             self.refreshing = False
+            self.error = ""
             self.items = list(result["items"])
             self.next_cursor = result.get("next_cursor")
             self.snapshot_event_cursor = max(
                 self.snapshot_event_cursor, int(result.get("event_cursor") or 0)
             )
             self.itemsChanged.emit()
+            self.loadingChanged.emit()
+            self.errorChanged.emit()
             for task in self.items:
                 self.taskUpdated.emit(task)
             self._drain_pending_events()
@@ -176,9 +218,14 @@ class TaskFeed(QObject):
                 self.events.after_id = int(result.get("event_cursor") or 0)
                 self.events.start()
 
-        def failed(_message: str) -> None:
+        def failed(message: str) -> None:
             self.refreshing = False
+            self.error = str(message)
+            self.loadingChanged.emit()
+            self.errorChanged.emit()
             self._drain_pending_events()
+            if self.started and not self.events.active:
+                self.events.start()
 
         self.requests.submit(
             "task.list",
@@ -194,18 +241,27 @@ class TaskFeed(QObject):
         if self.refreshing or not self.next_cursor:
             return
         self.refreshing = True
+        self.error = ""
+        self.loadingChanged.emit()
+        self.errorChanged.emit()
         cursor = self.next_cursor
 
         def update(result: dict[str, Any]) -> None:
             self.refreshing = False
+            self.error = ""
             known = {item["id"] for item in self.items}
             self.items.extend(item for item in result["items"] if item["id"] not in known)
             self.next_cursor = result.get("next_cursor")
             self.itemsChanged.emit()
+            self.loadingChanged.emit()
+            self.errorChanged.emit()
             self._drain_pending_events()
 
-        def failed(_message: str) -> None:
+        def failed(message: str) -> None:
             self.refreshing = False
+            self.error = str(message)
+            self.loadingChanged.emit()
+            self.errorChanged.emit()
             self._drain_pending_events()
 
         self.requests.submit(
@@ -259,6 +315,7 @@ class TaskFeed(QObject):
 
 class TaskListViewModel(QObject):
     itemsChanged = Signal()
+    stateChanged = Signal()
 
     def __init__(
         self,
@@ -274,11 +331,9 @@ class TaskListViewModel(QObject):
         self.locale_context = locale_context
         self.status_callback = status_callback
         self.feed.itemsChanged.connect(self.itemsChanged)
-
-    def _text(self, key: str) -> str:
-        language, translations = self.locale_context()
-        table = translations.get(language, translations["en"])
-        return table.get(key, key)
+        self.feed.loadingChanged.connect(self.stateChanged)
+        self.feed.errorChanged.connect(self.stateChanged)
+        self.feed.connectionChanged.connect(self.stateChanged)
 
     @Property("QVariantList", notify=itemsChanged)
     def items(self) -> list[dict[str, Any]]:
@@ -300,8 +355,42 @@ class TaskListViewModel(QObject):
                 "runtime.inspect",
                 "diagnostics.snapshot",
             }
+            item["detail_loaded"] = "arguments" in task
+            item["details_text"] = (
+                json.dumps(
+                    {
+                        "arguments": task.get("arguments"),
+                        "result": task.get("result"),
+                        "error_type": task.get("error_type"),
+                        "error": task.get("error"),
+                        "worker_failures": task.get("worker_failures"),
+                        "retry_of": task.get("retry_of"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
+                if item["detail_loaded"]
+                else ""
+            )
             projected.append(item)
         return projected
+
+    @Property(bool, notify=stateChanged)
+    def loading(self) -> bool:
+        return not self.feed.started or self.feed.refreshing
+
+    @Property(str, notify=stateChanged)
+    def error(self) -> str:
+        return self.feed.error
+
+    @Property(str, notify=stateChanged)
+    def connectionState(self) -> str:
+        return self.feed.connection_state
+
+    @Property(str, notify=stateChanged)
+    def connectionDetail(self) -> str:
+        return self.feed.connection_detail
 
     @Property(bool, notify=itemsChanged)
     def hasMore(self) -> bool:
@@ -319,6 +408,16 @@ class TaskListViewModel(QObject):
         self.feed.load_more()
 
     @Slot(str)
+    def loadDetails(self, task_id: str) -> None:
+        self.requests.submit(
+            "task.get",
+            {"task_id": task_id},
+            self.feed.accept,
+            show_status=False,
+            request_key=f"task:{task_id}",
+        )
+
+    @Slot(str)
     def cancel(self, task_id: str) -> None:
         self.requests.submit("task.cancel", {"task_id": task_id}, self.feed.accept)
 
@@ -331,12 +430,14 @@ class TaskListViewModel(QObject):
         selected = Path(local_path(path)).expanduser().resolve()
         if not selected.exists():
             self.status_callback(
-                self._text("error.file_missing").format(path=selected), "danger"
+                localized_text("error.file_missing", self.locale_context).format(path=selected),
+                "danger",
             )
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(selected))):
             self.status_callback(
-                self._text("error.open_failed").format(path=selected), "danger"
+                localized_text("error.open_failed", self.locale_context).format(path=selected),
+                "danger",
             )
 
     @Slot(str)
@@ -345,7 +446,10 @@ class TaskListViewModel(QObject):
         folder = selected if selected.is_dir() else selected.parent
         if not folder.exists() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
             self.status_callback(
-                self._text("error.open_folder_failed").format(path=folder), "danger"
+                localized_text("error.open_folder_failed", self.locale_context).format(
+                    path=folder
+                ),
+                "danger",
             )
 
     @Slot(str)

@@ -7,7 +7,7 @@ from typing import Any
 
 from .artifacts import ArtifactStore
 from .config import Settings
-from .hashing import sha256_file
+from .hashing import FileVerificationLedger, VerifiedFile
 from .media_checkpoint import (
     _file_matches_record,
     _file_record,
@@ -19,13 +19,14 @@ from .media_checkpoint import (
 from .media_errors import MediaPipelineError
 from .media_inputs import MediaInputResolver
 from .media_io import (
+    audio_geometry,
     extract_audio,
     match_loudness,
     measure_audio_quality,
     mix_stems,
     mux_video,
     transcode_audio,
-    validate_output,
+    validate_output_verified,
     verify_media_snapshot,
 )
 from .media_processing import (
@@ -51,6 +52,8 @@ class ConversionState:
     parameters: dict[str, Any]
     work_dir: Path
     source_media: dict[str, Any]
+    source_verified: VerifiedFile
+    files: FileVerificationLedger
     content_mode: str
     selected_speakers: set[str]
     analysis_manifest: Path | None
@@ -83,17 +86,20 @@ class ConversionRunner:
         source = Path(arguments["input"]).expanduser().resolve()
         output = Path(arguments["output"]).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
+        files = FileVerificationLedger()
         model = self.inputs.model(arguments, context)
         parameters = {**model["recommended"], **arguments, "overwrite": False}
         work_dir = self.settings.artifacts_dir / context.task_id
         work_dir.mkdir(parents=True, exist_ok=False)
-        source_media = self.inputs.inspect(source, arguments, context)
+        source_media, source_verified = self.inputs.inspect_verified(
+            source, arguments, context, files
+        )
         content_mode = arguments.get("content_mode", "clean")
         selected_speakers = set(arguments.get("selected_speakers") or [])
         manifest_value = arguments.get("analysis_manifest")
         analysis_manifest = Path(manifest_value) if manifest_value else None
         analysis_hash = (
-            sha256_file(analysis_manifest)
+            files.verify(analysis_manifest, cancelled=context.cancelled).sha256
             if analysis_manifest and analysis_manifest.is_file()
             else None
         )
@@ -130,6 +136,8 @@ class ConversionRunner:
             parameters=parameters,
             work_dir=work_dir,
             source_media=source_media,
+            source_verified=source_verified,
+            files=files,
             content_mode=content_mode,
             selected_speakers=selected_speakers,
             analysis_manifest=analysis_manifest,
@@ -187,8 +195,12 @@ class ConversionRunner:
                 source_audio,
                 cancelled=state.context.cancelled,
             )
-            verify_media_snapshot(state.source, state.source_media["sha256"])
-        state.checkpoint["stages"]["source_audio"] = _file_record(source_audio)
+            verify_media_snapshot(
+                state.source, state.source_media["sha256"], state.source_verified
+            )
+        state.checkpoint["stages"]["source_audio"] = _file_record(
+            source_audio, state.files
+        )
         _write_checkpoint(state.checkpoint_path, state.checkpoint)
         return source_audio
 
@@ -214,8 +226,8 @@ class ConversionRunner:
                 state.context.cancelled,
             )
         state.checkpoint["stages"]["separation"] = {
-            "vocal": _file_record(vocal),
-            "instrumental": _file_record(instrumental),
+            "vocal": _file_record(vocal, state.files),
+            "instrumental": _file_record(instrumental, state.files),
             "metadata": metadata,
         }
         _write_checkpoint(state.checkpoint_path, state.checkpoint)
@@ -242,11 +254,13 @@ class ConversionRunner:
                 state.context.progress,
                 state.context.cancelled,
                 state.arguments.get("overlap_policy", "convert"),
+                self.settings,
+                state.files,
             )
         else:
             converted_vocal = self._convert_all_audio(state, vocal)
         state.checkpoint["stages"]["conversion"] = {
-            "converted_vocal": _file_record(converted_vocal),
+            "converted_vocal": _file_record(converted_vocal, state.files),
             "segments": state.segment_results,
         }
         _write_checkpoint(state.checkpoint_path, state.checkpoint)
@@ -263,10 +277,10 @@ class ConversionRunner:
         return analyze_audio(self.settings, vocal, state.work_dir, state.context.cancelled)
 
     def _convert_all_audio(self, state: ConversionState, vocal: Path) -> Path:
-        import soundfile as sf  # noqa: PLC0415
-
         converted_vocal = state.work_dir / "converted-vocal.wav"
-        if sf.info(vocal).duration > 90:
+        if audio_geometry(
+            self.settings, vocal, state.context.cancelled
+        )["duration_seconds"] > 90:
             state.segment_results = convert_long_audio(
                 self.engine,
                 vocal,
@@ -276,6 +290,8 @@ class ConversionRunner:
                 state.work_dir,
                 state.context.progress,
                 state.context.cancelled,
+                self.settings,
+                state.files,
             )
             return converted_vocal
         converted_raw = state.work_dir / "converted-vocal-raw.wav"
@@ -286,12 +302,16 @@ class ConversionRunner:
             state.parameters,
             state.context.progress,
             cancelled=state.context.cancelled,
+            ledger=state.files,
         )
         engine_result["aligned_output"] = align_audio_file(
             converted_raw,
             vocal,
             converted_vocal,
+            self.settings,
+            state.context.cancelled,
         )
+        state.files.accept_record(engine_result["aligned_output"])
         state.segment_results = [{"segment": "full", "conversion": engine_result}]
         return converted_vocal
 
@@ -335,7 +355,9 @@ class ConversionRunner:
                 "before": quality,
                 "after": quality,
                 "output_path": str(converted_mix),
-                "output_sha256": sha256_file(converted_mix),
+                "output_sha256": state.files.verify(
+                    converted_mix, cancelled=state.context.cancelled
+                ).sha256,
             }
             state.context.progress(0.87, "muxing", "preserving unselected speaker intervals")
         else:
@@ -349,10 +371,11 @@ class ConversionRunner:
                 matched,
                 state.work_dir,
                 state.context.cancelled,
+                state.files,
             )
             converted_mix = matched
         state.checkpoint["stages"]["loudness"] = {
-            "output": _file_record(converted_mix),
+            "output": _file_record(converted_mix, state.files),
             "metadata": loudness,
         }
         _write_checkpoint(state.checkpoint_path, state.checkpoint)
@@ -364,7 +387,7 @@ class ConversionRunner:
         converted_mix: Path,
         separation: dict[str, Any] | None,
         loudness: dict[str, Any],
-    ) -> tuple[Path, dict[str, Any]]:
+    ) -> tuple[Path, dict[str, Any], VerifiedFile]:
         state.context.progress(0.88, "muxing", "writing final media")
         prepared_output = state.output.parent / (
             f".{state.output.stem}.{state.context.task_id}.publishing{state.output.suffix}"
@@ -390,7 +413,12 @@ class ConversionRunner:
                 state.context.cancelled,
             )
         state.context.progress(0.95, "validating", "fully decoding final output")
-        output_media = validate_output(self.settings, prepared_output, state.context.cancelled)
+        output_media, output_verified = validate_output_verified(
+            self.settings,
+            prepared_output,
+            state.context.cancelled,
+            state.files,
+        )
         output_media["path"] = str(state.output)
         result = {
             "protocol": "voxweave-conversion-result",
@@ -419,14 +447,20 @@ class ConversionRunner:
             "loudness_match": loudness,
             "segments": state.segment_results,
         }
-        return prepared_output, self._write_result_manifest(state, result)
+        return prepared_output, self._write_result_manifest(state, result), output_verified
 
     def _register_artifacts(self, state: ConversionState, result: dict[str, Any]) -> None:
-        self.artifacts.register(state.context.task_id, "conversion-output", state.output)
+        self.artifacts.register(
+            state.context.task_id,
+            "conversion-output",
+            state.output,
+            state.files.verify(state.output),
+        )
         self.artifacts.register(
             state.context.task_id,
             "conversion-manifest",
             Path(result["manifest_path"]),
+            state.files.verify(Path(result["manifest_path"])),
         )
 
     def run(self, arguments: dict[str, Any], context: TaskContext) -> dict[str, Any]:
@@ -444,13 +478,15 @@ class ConversionRunner:
             converted_vocal,
             instrumental,
         )
-        prepared_output, result = self._prepare_result(
+        prepared_output, result, output_verified = self._prepare_result(
             state,
             converted_mix,
             separation,
             loudness,
         )
-        verify_media_snapshot(state.source, state.source_media["sha256"])
+        verify_media_snapshot(
+            state.source, state.source_media["sha256"], state.source_verified
+        )
         self.models.verify_snapshot(state.model)
         _publish_prepared_output(
             prepared_output,
@@ -460,6 +496,8 @@ class ConversionRunner:
             checkpoint=state.checkpoint,
             checkpoint_path=state.checkpoint_path,
             result=result,
+            verified=output_verified,
+            ledger=state.files,
         )
         self._register_artifacts(state, result)
         return result

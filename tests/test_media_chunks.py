@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import soundfile as sf
 
-from voxweave.media_processing import _quiet_chunk_ranges_file
+from voxweave.media_postprocess import _quiet_chunk_ranges
 
 
 def test_production_quiet_chunk_ranges_cover_source_without_gaps(tmp_path) -> None:
@@ -14,7 +14,7 @@ def test_production_quiet_chunk_ranges_cover_source_without_gaps(tmp_path) -> No
     source = tmp_path / "source.wav"
     sf.write(source, audio, sample_rate, subtype="PCM_24")
 
-    actual_rate, total_frames, ranges = _quiet_chunk_ranges_file(source, lambda: False)
+    actual_rate, total_frames, ranges = _quiet_chunk_ranges(source)
 
     assert actual_rate == sample_rate
     assert total_frames == len(audio)

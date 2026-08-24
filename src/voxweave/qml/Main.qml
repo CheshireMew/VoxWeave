@@ -3,17 +3,19 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic as Basic
 import QtQuick.Layouts
+import QtQuick.Window
 
 Basic.ApplicationWindow {
     id: root
     required property var bridge
 
-    width: 960
+    width: Math.round(Math.max(minimumWidth,
+        Math.min(840, Screen.desktopAvailableWidth * 0.84)))
     height: 720
     minimumWidth: 540
     minimumHeight: 620
     visible: true
-    title: root.bridge.text("app.title")
+    title: root.bridge.text(root.bridge.language, "app.title")
     readonly property bool useNativeTitleBar: Qt.platform.os === "windows"
     flags: root.useNativeTitleBar ? Qt.Window : Qt.Window | Qt.FramelessWindowHint
     color: theme.canvas
@@ -45,6 +47,7 @@ Basic.ApplicationWindow {
     property var batches: bridge.batchRules.items
     property var realtimeDevices: bridge.realtime.devices
     property var realtimeStatus: bridge.realtime.status
+    property string conversionModelId: ""
     property int currentPage: 0
     readonly property bool expandedSidebar: root.width >= 840
 
@@ -63,6 +66,10 @@ Basic.ApplicationWindow {
             root.readyModels = root.models.filter(function(item) {
                 return item.status === "ready" && !item.archived
             })
+        }
+        function onConversionModelRequested(modelId) {
+            root.conversionModelId = modelId
+            root.currentPage = 1
         }
     }
     Connections {
@@ -101,10 +108,10 @@ Basic.ApplicationWindow {
         targetWindow: root
         visible: !root.useNativeTitleBar
         title: root.title
-        minimizeLabel: root.bridge.text("window.minimize")
-        maximizeLabel: root.bridge.text("window.maximize")
-        restoreLabel: root.bridge.text("window.restore")
-        closeLabel: root.bridge.text("window.close")
+        minimizeLabel: root.bridge.text(root.bridge.language, "window.minimize")
+        maximizeLabel: root.bridge.text(root.bridge.language, "window.maximize")
+        restoreLabel: root.bridge.text(root.bridge.language, "window.restore")
+        closeLabel: root.bridge.text(root.bridge.language, "window.close")
     }
 
     RowLayout {
@@ -142,7 +149,7 @@ Basic.ApplicationWindow {
                     objectName: "navButton0"
                     Layout.fillWidth: true
                     iconName: "realtime"
-                    text: root.bridge.text("nav.realtime")
+                    text: root.bridge.text(root.bridge.language, "nav.realtime")
                     selected: root.currentPage === 0
                     showLabel: root.expandedSidebar
                     onClicked: root.currentPage = 0
@@ -151,7 +158,7 @@ Basic.ApplicationWindow {
                     objectName: "navButton1"
                     Layout.fillWidth: true
                     iconName: "convert"
-                    text: root.bridge.text("nav.convert")
+                    text: root.bridge.text(root.bridge.language, "nav.convert")
                     selected: root.currentPage === 1
                     showLabel: root.expandedSidebar
                     onClicked: root.currentPage = 1
@@ -160,7 +167,7 @@ Basic.ApplicationWindow {
                     objectName: "navButton2"
                     Layout.fillWidth: true
                     iconName: "models"
-                    text: root.bridge.text("nav.models")
+                    text: root.bridge.text(root.bridge.language, "nav.models")
                     selected: root.currentPage === 2
                     showLabel: root.expandedSidebar
                     onClicked: root.currentPage = 2
@@ -169,7 +176,7 @@ Basic.ApplicationWindow {
                     objectName: "navButton3"
                     Layout.fillWidth: true
                     iconName: "batch"
-                    text: root.bridge.text("nav.batch")
+                    text: root.bridge.text(root.bridge.language, "nav.batch")
                     selected: root.currentPage === 3
                     showLabel: root.expandedSidebar
                     onClicked: root.currentPage = 3
@@ -178,7 +185,7 @@ Basic.ApplicationWindow {
                     objectName: "navButton4"
                     Layout.fillWidth: true
                     iconName: "tasks"
-                    text: root.bridge.text("nav.tasks")
+                    text: root.bridge.text(root.bridge.language, "nav.tasks")
                     selected: root.currentPage === 4
                     showLabel: root.expandedSidebar
                     onClicked: root.currentPage = 4
@@ -187,7 +194,7 @@ Basic.ApplicationWindow {
                     objectName: "navButton5"
                     Layout.fillWidth: true
                     iconName: "settings"
-                    text: root.bridge.text("nav.settings")
+                    text: root.bridge.text(root.bridge.language, "nav.settings")
                     selected: root.currentPage === 5
                     showLabel: root.expandedSidebar
                     onClicked: root.currentPage = 5
@@ -203,7 +210,7 @@ Basic.ApplicationWindow {
                     color: theme.surface
                     border.color: theme.border
                     border.width: 1
-                    Accessible.name: root.bridge.status === "Ready" ? root.bridge.text("status.ready") : root.bridge.status
+                    Accessible.name: root.bridge.status === "Ready" ? root.bridge.text(root.bridge.language, "status.ready") : root.bridge.status
                     Accessible.description: root.bridge.statusKind
 
                     Rectangle {
@@ -219,6 +226,7 @@ Basic.ApplicationWindow {
                     }
 
                     Basic.Label {
+                        objectName: "sidebarStatusText"
                         visible: root.expandedSidebar
                         anchors.left: parent.left
                         anchors.leftMargin: 30
@@ -226,16 +234,21 @@ Basic.ApplicationWindow {
                         anchors.rightMargin: 8
                         anchors.verticalCenter: parent.verticalCenter
                         text: root.bridge.status === "Ready"
-                            ? root.bridge.text("status.ready") : root.bridge.status
+                            ? root.bridge.text(root.bridge.language, "status.ready") : root.bridge.status
                         color: theme.textMuted
                         font.family: theme.uiFont
                         font.pixelSize: 11
+                        clip: true
+                        maximumLineCount: 1
+                        wrapMode: Text.NoWrap
                         elide: Text.ElideRight
                     }
 
                     HoverHandler { id: statusHover }
                     Basic.ToolTip.visible: statusHover.hovered
-                    Basic.ToolTip.text: root.bridge.status === "Ready" ? root.bridge.text("status.ready") : root.bridge.status
+                    Basic.ToolTip.text: root.bridge.status === "Ready"
+                        ? root.bridge.text(root.bridge.language, "status.ready")
+                        : root.bridge.status
                     Basic.ToolTip.delay: 350
                 }
 
@@ -246,11 +259,11 @@ Basic.ApplicationWindow {
                     square: !root.expandedSidebar
                     kind: "quiet"
                     text: root.expandedSidebar
-                        ? root.bridge.text("label.language") + " · " + (root.bridge.language === "zh-CN" ? "中文" : "EN")
+                        ? root.bridge.text(root.bridge.language, "label.language") + " · " + (root.bridge.language === "zh-CN" ? "中文" : "EN")
                         : (root.bridge.language === "zh-CN" ? "中" : "EN")
                     onClicked: root.bridge.language = root.bridge.language === "zh-CN" ? "en" : "zh-CN"
                     Basic.ToolTip.visible: hovered
-                    Basic.ToolTip.text: root.bridge.text("label.language")
+                    Basic.ToolTip.text: root.bridge.text(root.bridge.language, "label.language")
                     Basic.ToolTip.delay: 350
                 }
             }
@@ -284,6 +297,7 @@ Basic.ApplicationWindow {
                     speakers: root.speakers
                     previewOutputs: root.previewOutputs
                     presets: root.presets
+                    requestedModelId: root.conversionModelId
                 }
 
                 ModelsPage {
@@ -297,6 +311,7 @@ Basic.ApplicationWindow {
                     bridge: root.bridge
                     theme: theme
                     models: root.readyModels
+                    allModels: root.models
                     batches: root.batches
                 }
 
@@ -316,10 +331,10 @@ Basic.ApplicationWindow {
             Rectangle {
                 id: statusBanner
                 objectName: "statusBanner"
-                anchors.left: parent.left
-                anchors.right: parent.right
+                width: Math.min(parent.width - 20, 720)
+                anchors.horizontalCenter: parent.horizontalCenter
                 anchors.bottom: parent.bottom
-                anchors.margins: 10
+                anchors.bottomMargin: 10
                 height: visible ? 44 : 0
                 visible: root.bridge.status !== "Ready"
                 z: 900
@@ -331,31 +346,38 @@ Basic.ApplicationWindow {
                 border.color: root.bridge.statusKind === "danger" ? theme.danger
                     : root.bridge.statusKind === "warning" ? theme.warning
                     : root.bridge.statusKind === "success" ? theme.success : theme.info
+                clip: true
 
                 RowLayout {
                     anchors.fill: parent
                     anchors.margins: 7
                     spacing: 8
                     Basic.Label {
+                        objectName: "statusBannerText"
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        Layout.preferredWidth: 0
                         text: root.bridge.status
                         color: theme.text
                         font.family: theme.uiFont
                         font.pixelSize: 12
+                        clip: true
+                        maximumLineCount: 1
+                        wrapMode: Text.NoWrap
                         elide: Text.ElideRight
                     }
                     AppButton {
                         compact: true
                         visible: root.bridge.statusKind === "danger"
                             || root.bridge.statusKind === "warning"
-                        text: root.bridge.text("action.copy")
+                        text: root.bridge.text(root.bridge.language, "action.copy")
                         onClicked: root.bridge.copyStatus()
                     }
                     AppButton {
                         compact: true
                         kind: "quiet"
                         text: "×"
-                        Accessible.name: root.bridge.text("action.dismiss")
+                        Accessible.name: root.bridge.text(root.bridge.language, "action.dismiss")
                         onClicked: root.bridge.dismissStatus()
                     }
                 }

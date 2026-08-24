@@ -12,6 +12,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from . import __version__
+from .capabilities import AUDIO_EXTENSIONS, MEDIA_EXTENSIONS, VIDEO_EXTENSIONS
 from .client import ManagedServiceClient, request_json, shutdown_service
 from .config import (
     PACKAGE_ROOT,
@@ -21,7 +22,6 @@ from .config import (
     Settings,
     configure_process_environment,
     data_root_is_configured,
-    load_settings,
     persist_data_root_pointer,
     resolve_data_root,
 )
@@ -30,15 +30,15 @@ from .gui_batches import BatchRulesViewModel
 from .gui_maintenance import MaintenanceViewModel
 from .gui_media import MediaViewModel
 from .gui_models import ModelCatalogViewModel
+from .gui_presenters import error_summary
 from .gui_realtime import RealtimeViewModel
 from .gui_requests import RequestCoordinator
 from .gui_tasks import TaskFeed, TaskListViewModel
 from .onboarding import (
     MINIMUM_INITIAL_FREE_BYTES,
-    InitialSetup,
-    discover_runtime_for_data_root,
     plan_initial_setup,
 )
+from .settings_file_store import load_settings
 
 
 class Bridge(QObject):
@@ -58,7 +58,9 @@ class Bridge(QObject):
         super().__init__()
         self.settings = settings
         self._status = "Ready"
+        self._status_detail = "Ready"
         self._status_kind = "success"
+        self._status_generation = 0
         self._language = settings.language
         translations_path = PACKAGE_ROOT / "resources" / "translations.json"
         self.translations = json.loads(translations_path.read_text(encoding="utf-8"))
@@ -98,7 +100,14 @@ class Bridge(QObject):
             self._set_status,
             self,
         )
-        self._media = MediaViewModel(self.requests, self._activity, self._task_feed, self)
+        self._media = MediaViewModel(
+            self.requests,
+            self._activity,
+            self._task_feed,
+            self,
+            status_callback=self._set_status,
+            text_callback=self.text,
+        )
         self._realtime = RealtimeViewModel(
             settings, self.requests, self._set_status, self.text, self
         )
@@ -113,7 +122,7 @@ class Bridge(QObject):
             self,
         )
         self._maintenance.runtimeInstallRequested.connect(self._confirm_runtime_install)
-        self._maintenance.runtimeAvailable.connect(self._realtime.refreshDevices)
+        self._maintenance.runtimeAvailable.connect(self._realtime.ensureDevices)
         self._maintenance.runtimeAvailable.connect(self._model_catalog.provision)
         self._model_catalog.starterInstallRequested.connect(self._confirm_starter_install)
         if start_background:
@@ -155,6 +164,18 @@ class Bridge(QObject):
     def applicationVersion(self) -> str:
         return __version__
 
+    @Property(str, constant=True)
+    def mediaFileFilter(self) -> str:
+        return " ".join(f"*{value}" for value in MEDIA_EXTENSIONS)
+
+    @Property(str, constant=True)
+    def audioFileFilter(self) -> str:
+        return " ".join(f"*{value}" for value in AUDIO_EXTENSIONS)
+
+    @Property(str, constant=True)
+    def videoFileFilter(self) -> str:
+        return " ".join(f"*{value}" for value in VIDEO_EXTENSIONS)
+
     @Property(str, notify=statusChanged)
     def status(self) -> str:
         return self._status
@@ -162,6 +183,10 @@ class Bridge(QObject):
     @Property(str, notify=statusChanged)
     def statusKind(self) -> str:
         return self._status_kind
+
+    @Property(str, notify=statusChanged)
+    def statusDetail(self) -> str:
+        return self._status_detail
 
     @Slot()
     def _confirm_runtime_install(self) -> None:
@@ -181,15 +206,48 @@ class Bridge(QObject):
     @Slot(object)
     def _confirm_starter_install(self, value: object) -> None:
         model_ids = list(value)  # type: ignore[arg-type]
-        details = {
-            "community.zh-male-young": (self.text("model.name.community.zh-male-young"), 83.9),
-            "community.zh-female-senior": (
-                self.text("model.name.community.zh-female-senior"),
-                177.2,
-            ),
-        }
-        names = [details[model_id][0] for model_id in model_ids]
-        download_size = sum(details[model_id][1] for model_id in model_ids)
+        if not model_ids:
+            self._model_catalog.confirmStarterInstall()
+            return
+        details = self._model_catalog.starterDetails
+        model_ids = [
+            model_id
+            for model_id in model_ids
+            if int(details.get(model_id, {}).get("download_size_bytes") or 0) > 0
+        ]
+        if not model_ids:
+            self._model_catalog.declineStarterInstall()
+            self._set_status(self.text("models.auto.no_starter"), "warning")
+            return
+        names = [
+            self.text(f"model.name.{model_id}")
+            if self.text(f"model.name.{model_id}") != f"model.name.{model_id}"
+            else str(details.get(model_id, {}).get("display_name") or model_id)
+            for model_id in model_ids
+        ]
+        source_lines = []
+        for model_id, name in zip(model_ids, names, strict=True):
+            detail = details.get(model_id, {})
+            license_value = str(detail.get("license_spdx") or "LicenseRef-Unknown")
+            license_label = (
+                self.text("models.license_unknown")
+                if license_value == "LicenseRef-Unknown"
+                else license_value
+            )
+            source_lines.append(
+                self.text("setup.models.source_line").format(
+                    name=name,
+                    license=license_label,
+                    source=detail.get("source_url") or detail.get("model_url") or "—",
+                )
+            )
+        download_size = (
+            sum(
+                int(details.get(model_id, {}).get("download_size_bytes") or 0)
+                for model_id in model_ids
+            )
+            / 1024**2
+        )
         answer = QMessageBox.question(
             None,
             self.text("setup.models.title"),
@@ -197,6 +255,7 @@ class Bridge(QObject):
                 names=self.text("setup.models.separator").join(names),
                 size=download_size,
                 root=self.settings.managed_models_dir,
+                details="\n".join(source_lines),
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
@@ -237,8 +296,13 @@ class Bridge(QObject):
         self._task_list.locale_changed()
 
     @Slot(str, result=str)
-    def text(self, key: str) -> str:
-        return self.translations.get(self._language, {}).get(key, key)
+    @Slot(str, str, result=str)
+    def text(self, language_or_key: str, key: str | None = None) -> str:
+        """Translate for Python or for a QML binding that observes ``language``."""
+
+        language = language_or_key if key is not None else self._language
+        translation_key = key if key is not None else language_or_key
+        return self.translations.get(language, {}).get(translation_key, translation_key)
 
     def _operation_label(self, operation: str) -> str:
         key = f"task.operation.{operation}"
@@ -251,24 +315,48 @@ class Bridge(QObject):
         translated = self.text(key)
         if translated == key:
             translated = self.text("error.operation_failed")
-        return translated.format(message=str(message))
+        return translated.format(message=error_summary(message))
+
+    @Slot(str, result=str)
+    def summarizeError(self, value: str) -> str:
+        return error_summary(value)
 
     @Slot()
     def copyStatus(self) -> None:
-        QApplication.clipboard().setText(self._status)
+        value = self._status
+        if self._status_detail and self._status_detail != self._status:
+            value += f"\n\n{self._status_detail}"
+        QApplication.clipboard().setText(value)
 
     @Slot()
     def dismissStatus(self) -> None:
-            self._set_status("Ready", "success")
+        self._status_generation += 1
+        self._status = "Ready"
+        self._status_detail = "Ready"
+        self._status_kind = "success"
+        self.statusChanged.emit()
 
     @Slot()
     def openProjectPage(self) -> None:
         QDesktopServices.openUrl(QUrl("https://github.com/CheshireMew/VoxWeave"))
 
-    def _set_status(self, value: str, kind: str = "info") -> None:
-        self._status = value
+    def _set_status(self, value: str, kind: str = "info", detail: str | None = None) -> None:
+        if self._status_kind == "danger" and kind != "danger":
+            return
+        raw_value = str(value)
+        diagnostic = detail or getattr(value, "detail", None) or raw_value
+        self._status_generation += 1
+        generation = self._status_generation
+        self._status = error_summary(raw_value) if kind == "danger" else raw_value
+        self._status_detail = str(diagnostic)
         self._status_kind = kind
         self.statusChanged.emit()
+        if kind == "success" and raw_value != "Ready":
+            def clear_success() -> None:
+                if generation == self._status_generation and self._status_kind == "success":
+                    self.dismissStatus()
+
+            QTimer.singleShot(4500, clear_success)
 
     @Slot()
     def shutdown(self) -> None:
@@ -343,46 +431,10 @@ def _select_initial_data_root() -> Path | None:
         return target
 
 
-def _persist_detected_runtime(setup: InitialSetup) -> None:
-    runtime = setup.runtime
-    if not runtime or not setup.data_root:
-        return
-    settings = load_settings()
-    weight_root = runtime.rvc_root / "assets" / "weights"
-    weight_roots = list(settings.weight_roots or [])
-    if weight_root.is_dir() and str(weight_root) not in weight_roots:
-        weight_roots.append(str(weight_root))
-    index_roots = list(settings.index_roots or [])
-    for path in (runtime.rvc_root / "assets" / "indices", runtime.rvc_root / "logs"):
-        if path.is_dir() and str(path) not in index_roots:
-            index_roots.append(str(path))
-    settings.update(
-        rvc_root=str(runtime.rvc_root),
-        rvc_python=str(runtime.rvc_python),
-        ffmpeg=str(runtime.ffmpeg) if runtime.ffmpeg else settings.ffmpeg,
-        ffprobe=str(runtime.ffprobe) if runtime.ffprobe else settings.ffprobe,
-        weight_roots=weight_roots,
-        index_roots=index_roots,
-    )
-
-
 def _initialize_application() -> bool:
     if not getattr(sys, "frozen", False):
         return True
     if data_root_is_configured():
-        target = resolve_data_root()
-        try:
-            runtime = discover_runtime_for_data_root(
-                target,
-                application_root=SOURCE_ROOT,
-            )
-            _persist_detected_runtime(InitialSetup(target, True, runtime, "configured_data"))
-        except OSError as exc:
-            QMessageBox.warning(
-                None,
-                _setup_text("setup.detect_failed.title"),
-                _setup_text("setup.detect_failed.detail").format(target=target, error=exc),
-            )
         return True
     setup = plan_initial_setup(
         application_root=SOURCE_ROOT,
@@ -402,9 +454,6 @@ def _initialize_application() -> bool:
     try:
         target.mkdir(parents=True, exist_ok=True)
         persist_data_root_pointer(target)
-        _persist_detected_runtime(
-            InitialSetup(target, setup.reused_existing_data, setup.runtime, setup.reason)
-        )
     except OSError as exc:
         QMessageBox.critical(
             None,

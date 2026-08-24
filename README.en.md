@@ -118,7 +118,7 @@ Choose the Windows audio host, microphone, and playback device in Settings & Dia
 
 Live Voice offers 0.25, 0.5, and 1.0 second latency budgets. Silero VAD and the configured microphone activation level decide when inference runs. Test mode captures and converts a complete utterance, then plays it after the user pauses, which is useful before continuous monitoring.
 
-Live and offline work share one GPU boundary. A live session cannot start while an offline task is running. Tasks submitted during a live session stay queued and resume after the session stops.
+Live and offline work share one GPU boundary. A live session cannot start while an offline task is running. Tasks submitted during a live session stay queued and resume after the session stops. Because model preparation pauses the offline queue, it never runs silently in the background: use Prepare Model explicitly, or start a live session and wait for the same preparation step.
 
 ### Batch and watched folders
 
@@ -136,7 +136,7 @@ The desktop app, CLI, and automation clients all use the same local service. Rea
 .\scripts\voxweave.ps1 --json execute runtime.inspect --arguments '{}'
 ```
 
-Requests use `voxweave-control v1`. Long operations return a `task_id` immediately. Poll it with `task get` or consume the authenticated loopback WebSocket declared by the discovery file:
+Requests use `voxweave-control v1`. Every mutating or long-running operation requires a globally unique `request_id`. Retrying the same ID with the same operation, arguments, and actor replays the first durable result instead of executing twice. Long operations return a `task_id` immediately. Poll it with `task get` or consume the authenticated loopback WebSocket declared by the discovery file:
 
 ```powershell
 .\scripts\voxweave.ps1 --json execute conversion.run --arguments '{
@@ -156,7 +156,7 @@ The service listens on a random `127.0.0.1` port. Its discovery file contains th
 
 ## Data, models, and boundaries
 
-- SQLite is the single state source for models, presets, tasks, batch rules, realtime sessions, events, artifacts, and archives.
+- SQLite is the operational state source for models, presets, tasks, batch rules, realtime sessions, events, artifacts, and archives. The revisioned settings file is the separate source for user configuration and is written only by the service.
 - Structured JSON logs live under the data directory, rotate at 10 MB, and retain five files.
 - Diagnostics include runtime, model, task, realtime, storage, and log summaries without embedding model or media contents.
 - External models are indexed in place. VoxWeave hashes their weights and indexes without copying, renaming, or uploading them.

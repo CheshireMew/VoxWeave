@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import pytest
 
-from voxweave.config import load_settings
+from voxweave.settings_file_store import load_settings
 
 
 def test_current_machine_models_are_distinct() -> None:

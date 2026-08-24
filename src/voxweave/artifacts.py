@@ -5,17 +5,25 @@ from pathlib import Path
 from typing import Any
 
 from .database import Database, utc_now
-from .hashing import sha256_file
+from .hashing import VerifiedFile, sha256_file
 
 
 class ArtifactStore:
     def __init__(self, database: Database):
         self.database = database
 
-    def register(self, task_id: str, kind: str, path: Path) -> dict[str, Any]:
+    def register(
+        self,
+        task_id: str,
+        kind: str,
+        path: Path,
+        verified: VerifiedFile | None = None,
+    ) -> dict[str, Any]:
         path = path.expanduser().resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
+        if verified is not None:
+            verified = verified.assert_unchanged(path)
         artifact_id = str(
             uuid.uuid5(uuid.NAMESPACE_URL, f"voxweave:artifact:{task_id}:{kind}:{path}")
         )
@@ -32,8 +40,8 @@ class ArtifactStore:
                 task_id,
                 kind,
                 str(path),
-                sha256_file(path),
-                path.stat().st_size,
+                verified.sha256 if verified is not None else sha256_file(path),
+                verified.size_bytes if verified is not None else path.stat().st_size,
                 "active",
                 now,
                 now,
@@ -58,10 +66,10 @@ class ArtifactStore:
             except ValueError:
                 continue
             archived_path = str(destination / relative)
-            updates.append((archived_path, archived_path, utc_now(), row["id"]))
+            updates.append((archived_path, utc_now(), row["id"]))
         with self.database.connect() as db:
             db.executemany(
-                "UPDATE artifacts SET path=?,archive_path=?,state='archived',updated_at=? "
+                "UPDATE artifacts SET archive_path=?,state='archived',updated_at=? "
                 "WHERE id=?",
                 updates,
             )

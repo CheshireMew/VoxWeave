@@ -39,6 +39,7 @@ LIFECYCLE_STATES = {"queued", "running", *TERMINAL_STATES}
 LOGGER = logging.getLogger(__name__)
 PROGRESS_INTERVAL_SECONDS = 0.1
 PROGRESS_DELTA = 0.02
+MAX_WORKER_FAILURES = 3
 
 
 class TaskManager:
@@ -55,6 +56,17 @@ class TaskManager:
         self._executing = False
         self._cancel_lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
+        self._event_condition = threading.Condition()
+        self._event_generation = 0
+        self._task_event_generation: dict[str, int] = {}
+        self._task_event_waiters: dict[str, int] = {}
+
+    def _notify_event(self, task_id: str) -> None:
+        with self._event_condition:
+            self._event_generation += 1
+            if self._task_event_waiters.get(task_id, 0):
+                self._task_event_generation[task_id] += 1
+            self._event_condition.notify_all()
 
     def _cancel_event(self, task_id: str) -> threading.Event:
         with self._cancel_lock:
@@ -132,6 +144,7 @@ class TaskManager:
 
     def notify_enqueued(self, task_id: str) -> None:
         self._cancel_event(task_id)
+        self._notify_event(task_id)
         self.queue.put(task_id)
 
     def _update(
@@ -159,6 +172,7 @@ class TaskManager:
             error_type=error_type,
             error=error,
         )
+        self._notify_event(task_id)
 
     def _run(self) -> None:
         while not self.stop_event.is_set():
@@ -174,8 +188,20 @@ class TaskManager:
                         continue
                     self._executing = True
                 self._execute(task_id)
-            except Exception:  # noqa: BLE001 - keep the durable worker alive
+            except Exception as exc:  # noqa: BLE001 - keep the durable worker alive
                 LOGGER.exception("unhandled task worker failure for %s", task_id)
+                try:
+                    retry = self.repository.recover_worker_failure(
+                        task_id,
+                        str(exc) or type(exc).__name__,
+                        max_failures=MAX_WORKER_FAILURES,
+                    )
+                    self._notify_event(task_id)
+                except Exception:  # noqa: BLE001 - the worker must remain observable
+                    LOGGER.exception("failed to persist task worker failure for %s", task_id)
+                    retry = False
+                if retry and not self.stop_event.is_set():
+                    self.queue.put(task_id)
             finally:
                 with self._dispatch_condition:
                     self._executing = False
@@ -307,6 +333,15 @@ class TaskManager:
     def list(self, limit: int = 200, cursor: str | None = None) -> dict[str, Any]:
         return self.repository.list(limit, cursor)
 
+    def find_by_request(
+        self,
+        request_id: str,
+        operation: str,
+        arguments: dict[str, Any],
+        actor: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        return self.repository.find_by_request(request_id, operation, arguments, actor)
+
     def cancel(self, task_id: str) -> dict[str, Any]:
         task = self.get(task_id)
         if task["state"] in TERMINAL_STATES:
@@ -406,6 +441,60 @@ class TaskManager:
     def events_all(self, after_id: int = 0, limit: int = 500) -> list[dict[str, Any]]:
         return self.repository.events_all(after_id, limit)
 
+    def wait_events(
+        self,
+        task_id: str | None,
+        after_id: int,
+        limit: int,
+        timeout: float,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> list[dict[str, Any]]:
+        query = self.events if task_id else self.events_all
+        arguments = (task_id, after_id, limit) if task_id else (after_id, limit)
+        with self._event_condition:
+            if task_id:
+                self._task_event_waiters[task_id] = (
+                    self._task_event_waiters.get(task_id, 0) + 1
+                )
+                self._task_event_generation.setdefault(task_id, 0)
+            try:
+                rows = query(*arguments)
+                if rows:
+                    return rows
+                generation = (
+                    self._task_event_generation[task_id]
+                    if task_id
+                    else self._event_generation
+                )
+
+                def changed() -> bool:
+                    current = (
+                        self._task_event_generation[task_id]
+                        if task_id
+                        else self._event_generation
+                    )
+                    return current != generation or bool(cancelled and cancelled())
+
+                self._event_condition.wait_for(changed, timeout=max(0.0, timeout))
+                if cancelled and cancelled():
+                    return []
+                return query(*arguments)
+            finally:
+                if task_id:
+                    remaining = self._task_event_waiters[task_id] - 1
+                    if remaining:
+                        self._task_event_waiters[task_id] = remaining
+                    else:
+                        self._task_event_waiters.pop(task_id, None)
+                        self._task_event_generation.pop(task_id, None)
+
+    def wake_event_waiters(self) -> None:
+        with self._event_condition:
+            self._event_generation += 1
+            for task_id in self._task_event_generation:
+                self._task_event_generation[task_id] += 1
+            self._event_condition.notify_all()
+
     def recent_events(self, limit: int = 500) -> list[dict[str, Any]]:
         return self.repository.recent_events(limit)
 
@@ -414,5 +503,9 @@ class TaskManager:
         self.stop_event.set()
         with self._dispatch_condition:
             self._dispatch_condition.notify_all()
+        self.wake_event_waiters()
         if self.worker:
-            self.worker.join(timeout=15)
+            self.worker.join(timeout=30)
+            if self.worker.is_alive():
+                raise RuntimeError("task worker did not stop within 30 seconds")
+            self.worker = None

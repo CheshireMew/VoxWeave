@@ -7,6 +7,8 @@ package_root = source_root / "voxweave"
 
 worker_sources = [
     "analysis_worker.py",
+    "media_postprocess.py",
+    "media_postprocess_worker.py",
     "model_inspect_worker.py",
     "runtime_assets_worker.py",
     "runtime_worker.py",

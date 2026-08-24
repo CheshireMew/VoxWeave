@@ -3,7 +3,11 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from voxweave.database import Database
+from voxweave.operation_receipt_repository import OperationReceiptRepository
+from voxweave.protocol import OperationError
 from voxweave.task_manager import DeferredTask, TaskManager
 
 
@@ -192,3 +196,65 @@ def test_invalid_public_results_fail_without_killing_the_worker(tmp_path) -> Non
     healthy = manager.submit("test.work", {})
     assert wait_terminal(manager, healthy["id"])["result"] == {"alive": True}
     manager.shutdown()
+
+
+def test_unhandled_worker_failures_are_durably_bounded(tmp_path, monkeypatch) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    manager = TaskManager(database)
+    manager.register("test.work", lambda _args, _context: {"unused": True})
+    manager.start()
+
+    def fail_outside_handler(_task_id: str) -> None:
+        raise RuntimeError("worker boundary failed")
+
+    monkeypatch.setattr(manager, "_execute", fail_outside_handler)
+    submitted = manager.submit("test.work", {})
+    failed = wait_terminal(manager, submitted["id"])
+
+    assert failed["state"] == "failed"
+    assert failed["error_type"] == "worker_failure"
+    stored = database.fetch_one(
+        "SELECT worker_failures FROM tasks WHERE id=?", (submitted["id"],)
+    )
+    assert stored == {"worker_failures": 3}
+    assert manager.worker and manager.worker.is_alive()
+    manager.shutdown()
+
+
+def test_receipt_recovery_only_preserves_matching_long_task_operations(tmp_path) -> None:
+    database = Database(tmp_path / "state.sqlite3")
+    database.execute(
+        "INSERT INTO tasks(id,operation,arguments_json,state,progress,stage,request_id,"
+        "created_at,updated_at) VALUES('retry-child','conversion.run','{}','queued',0,"
+        "'queued','retry-request','now','now')"
+    )
+    database.execute(
+        "INSERT INTO tasks(id,operation,arguments_json,state,progress,stage,request_id,"
+        "created_at,updated_at) VALUES('long-task','media.inspect','{}','queued',0,"
+        "'queued','long-request','now','now')"
+    )
+    database.execute(
+        "INSERT INTO tasks(id,operation,arguments_json,state,progress,stage,request_id,"
+        "created_at,updated_at) VALUES('historical','model.scan','{}','completed',1,"
+        "'completed','historical-request','now','now')"
+    )
+    for request_id, operation in (
+        ("retry-request", "task.retry"),
+        ("long-request", "media.inspect"),
+    ):
+        database.execute(
+            "INSERT INTO operation_receipts(request_id,operation,arguments_json,state,"
+            "created_at,updated_at) VALUES(?,?,?,'running','now','now')",
+            (request_id, operation, "{}"),
+        )
+
+    receipts = OperationReceiptRepository(database)
+
+    assert database.fetch_one(
+        "SELECT state,error_type FROM operation_receipts WHERE request_id='retry-request'"
+    ) == {"state": "failed", "error_type": "service_restart"}
+    assert database.fetch_one(
+        "SELECT state,error_type FROM operation_receipts WHERE request_id='long-request'"
+    ) == {"state": "running", "error_type": None}
+    with pytest.raises(OperationError, match="existing task"):
+        receipts.claim("historical-request", "settings.update", {}, None)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import uuid
@@ -19,29 +18,6 @@ from .storage_repository import StorageRepository
 Progress = Callable[[float, str, str | None], None]
 Cancelled = Callable[[], bool]
 TERMINAL_TASK_STATES = {"completed", "failed", "cancelled", "interrupted"}
-
-
-def _path_within(value: str, source: Path) -> Path | None:
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        return None
-    try:
-        return candidate.resolve(strict=False).relative_to(source)
-    except ValueError:
-        return None
-
-
-def _replace_paths(value: Any, source: Path, destination: Path) -> Any:
-    if isinstance(value, str):
-        relative = _path_within(value, source)
-        return str(destination / relative) if relative is not None else value
-    if isinstance(value, list):
-        return [_replace_paths(item, source, destination) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _replace_paths(item, source, destination) for key, item in value.items()
-        }
-    return value
 
 
 def _tree_summary(root: Path) -> tuple[int, int]:
@@ -139,32 +115,6 @@ class StorageArchiveManager:
             raise ValueError(f"only terminal tasks can be archived: {invalid}")
         return [row for row in rows if row["operation"] != "storage.archive"]
 
-    def _rewrite_task_references(
-        self, task_id: str, source: Path, destination: Path
-    ) -> None:
-        encoded_source = json.dumps(str(source), ensure_ascii=False)[1:-1]
-        pattern = f"%{encoded_source}%"
-        rows = self.repository.task_references(task_id, pattern)
-        replacements: list[tuple[str, str | None, str]] = []
-        for row in rows:
-            arguments = json.loads(row["arguments_json"])
-            result = json.loads(row["result_json"]) if row["result_json"] else None
-            next_arguments = _replace_paths(arguments, source, destination)
-            next_result = _replace_paths(result, source, destination)
-            if next_arguments != arguments or next_result != result:
-                replacements.append(
-                    (
-                        json.dumps(next_arguments, ensure_ascii=False),
-                        json.dumps(next_result, ensure_ascii=False)
-                        if next_result is not None
-                        else None,
-                        row["id"],
-                    )
-                )
-        self.repository.rewrite_task_references(
-            replacements, str(source), str(destination)
-        )
-
     def _move_one(
         self,
         row: dict[str, Any],
@@ -226,7 +176,6 @@ class StorageArchiveManager:
             raise FileNotFoundError(destination)
         self.repository.mark_moved(task_id)
         self.artifacts.mark_archived(source, destination)
-        self._rewrite_task_references(task_id, source, destination)
         if source.exists():
             if not confirm_source_removal:
                 raise ValueError("source removal was not confirmed")

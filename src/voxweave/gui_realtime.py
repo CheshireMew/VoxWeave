@@ -4,8 +4,12 @@ from typing import Any
 
 from PySide6.QtCore import Property, QObject, QTimer, Signal, Slot
 
-from .config import Settings, normalize_realtime_settings
+from .config import Settings
 from .gui_requests import RequestCoordinator
+from .parameter_contracts import (
+    normalize_realtime_settings,
+    realtime_parameter_capabilities,
+)
 
 
 class RealtimeViewModel(QObject):
@@ -38,19 +42,30 @@ class RealtimeViewModel(QObject):
             "metrics": {},
         }
         self._refreshing = False
+        self._devices_refreshing = False
+        self._devices_loaded = False
         self._audio_test: dict[str, Any] = {}
         self._audio_testing = False
         self._closed = False
         self.timer = QTimer(self)
-        self.timer.setInterval(1000)
+        self.timer.setInterval(250)
         self.timer.timeout.connect(self.refreshStatus)
         self.preferences_timer = QTimer(self)
         self.preferences_timer.setSingleShot(True)
         self.preferences_timer.setInterval(250)
         self.preferences_timer.timeout.connect(self._persist_preferences)
 
-    def _set_poll_interval(self, state: str | None) -> None:
-        self.timer.setInterval(250 if state in {"starting", "running", "stopping"} else 1000)
+    def _set_poll_interval(self, status: dict[str, Any]) -> None:
+        state = status.get("state")
+        worker_state = str((status.get("worker") or {}).get("state") or "")
+        if state in {"starting", "running", "stopping"}:
+            self.timer.setInterval(250)
+            self.timer.start()
+        elif worker_state in {"starting", "warming", "ready"}:
+            self.timer.setInterval(1000)
+            self.timer.start()
+        else:
+            self.timer.stop()
 
     @Property("QVariantMap", notify=devicesChanged)
     def devices(self) -> dict[str, Any]:
@@ -152,6 +167,10 @@ class RealtimeViewModel(QObject):
     def preferences(self) -> dict[str, Any]:
         return dict(self._preferences)
 
+    @Property("QVariantMap", constant=True)
+    def parameterSpecs(self) -> dict[str, Any]:
+        return realtime_parameter_capabilities()
+
     @Slot("QVariantMap")
     def savePreferences(self, value: dict[str, Any]) -> None:
         try:
@@ -179,10 +198,35 @@ class RealtimeViewModel(QObject):
             return
         self._save_inflight = True
         snapshot = dict(self._preferences)
+        patch = {
+            name: value
+            for name, value in snapshot.items()
+            if value != self._saved_preferences.get(name)
+        }
 
         def update(result: dict[str, Any]) -> None:
             self._save_inflight = False
-            self._saved_preferences = normalize_realtime_settings(result["realtime"])
+            committed = normalize_realtime_settings(
+                result["settings"]["realtime"]
+            )
+            current = dict(self._preferences)
+            merged = {
+                name: committed[name]
+                if current.get(name) == snapshot.get(name)
+                else current[name]
+                for name in committed
+            }
+            route_changed = any(
+                merged[name] != self._preferences[name]
+                for name in ("hostapi", "input_device", "output_device")
+            )
+            preferences_changed = merged != self._preferences
+            self._saved_preferences = committed
+            self._preferences = merged
+            if preferences_changed:
+                self.preferencesChanged.emit()
+            if route_changed:
+                self.audioRouteChanged.emit()
             if self._preferences != self._saved_preferences:
                 self.preferences_timer.start(0)
 
@@ -192,7 +236,7 @@ class RealtimeViewModel(QObject):
 
         self.requests.submit(
             "settings.update",
-            {"realtime": snapshot},
+            {"realtime": patch},
             update,
             show_status=False,
             error_callback=failed,
@@ -231,13 +275,26 @@ class RealtimeViewModel(QObject):
         )
 
     def start(self) -> None:
-        self.timer.start()
-        self.refreshDevices()
         self.refreshStatus()
 
     @Slot()
+    def ensureDevices(self) -> None:
+        if self._devices_loaded or self._devices_refreshing:
+            return
+        self._request_devices()
+
+    @Slot()
     def refreshDevices(self) -> None:
+        if self._devices_refreshing:
+            return
+        self._request_devices()
+
+    def _request_devices(self) -> None:
+        self._devices_refreshing = True
+
         def update(result: dict[str, Any]) -> None:
+            self._devices_refreshing = False
+            self._devices_loaded = True
             payload = dict(result)
             payload["devices"] = [
                 {**device, "display_name": f"{device['name']} · {device['hostapi']}"}
@@ -247,11 +304,16 @@ class RealtimeViewModel(QObject):
             self.devicesChanged.emit()
             self.audioRouteChanged.emit()
 
+        def failed(message: str) -> None:
+            self._devices_refreshing = False
+            self.status_callback(message, "danger")
+
         self.requests.submit(
             "realtime.devices",
             {},
             update,
             show_status=False,
+            error_callback=failed,
             request_key="realtime-devices",
         )
 
@@ -296,7 +358,7 @@ class RealtimeViewModel(QObject):
             worker_state = str((result.get("worker") or {}).get("state") or "")
             if worker_state in {"failed", "not_started"}:
                 self._last_prepare_arguments = None
-            self._set_poll_interval(result.get("state"))
+            self._set_poll_interval(result)
             self.statusChanged.emit()
             if result.get("state") == "failed" and previous_state != "failed":
                 self.status_callback(
@@ -348,48 +410,32 @@ class RealtimeViewModel(QObject):
             "test_mode": test_mode,
         }
 
-    @Slot(str, int, int, int, str, float, float, float, float, float)
-    def prepareModel(
-        self,
-        model: str,
-        input_device: int,
-        output_device: int,
-        pitch: int,
-        f0: str,
-        index_rate: float,
-        rms_mix_rate: float,
-        vad_threshold: float,
-        input_gate_db: float,
-        block_seconds: float,
-    ) -> None:
+    @Slot("QVariantMap")
+    def prepareModel(self, value: dict[str, Any]) -> None:
         if self._closed:
             return
+        command = dict(value)
         arguments = self._session_arguments(
-            model,
-            input_device,
-            output_device,
-            pitch,
-            f0,
-            index_rate,
-            rms_mix_rate,
-            vad_threshold,
-            input_gate_db,
-            block_seconds,
+            str(command["model"]),
+            int(command["input_device"]),
+            int(command["output_device"]),
+            int(command["pitch"]),
+            str(command["f0"]),
+            float(command["index_rate"]),
+            float(command["rms_mix_rate"]),
+            float(command["vad_threshold"]),
+            float(command["input_gate_db"]),
+            float(command["block_seconds"]),
             False,
         )
         worker = self._status.get("worker") or {}
         if (
             arguments == self._last_prepare_arguments
             and worker.get("state") in {"starting", "warming", "ready"}
-            and worker.get("model_id") == model
+            and worker.get("model_id") == arguments["model"]
         ):
             return
         self._last_prepare_arguments = dict(arguments)
-
-        def update(result: dict[str, Any]) -> None:
-            self._status = result
-            self._set_poll_interval(result.get("state"))
-            self.statusChanged.emit()
 
         def failed(message: str) -> None:
             self._last_prepare_arguments = None
@@ -398,7 +444,7 @@ class RealtimeViewModel(QObject):
         self.requests.submit(
             "realtime.prepare",
             arguments,
-            update,
+            self._apply_status,
             show_status=False,
             error_callback=failed,
             request_key="realtime-prepare",
@@ -414,37 +460,31 @@ class RealtimeViewModel(QObject):
         if worker.get("state") in {None, "", "not_started"}:
             return
 
-        def update(result: dict[str, Any]) -> None:
-            self._status = result
-            self._set_poll_interval(result.get("state"))
-            self.statusChanged.emit()
-
         self.requests.submit(
             "realtime.release",
             {},
-            update,
+            self._apply_status,
             show_status=False,
             error_callback=lambda message: self.status_callback(message, "danger"),
             request_key="realtime-release",
         )
 
-    @Slot(str, int, int, int, str, float, float, float, float, float, bool)
-    def startSession(
-        self,
-        model: str,
-        input_device: int,
-        output_device: int,
-        pitch: int,
-        f0: str,
-        index_rate: float,
-        rms_mix_rate: float,
-        vad_threshold: float,
-        input_gate_db: float,
-        block_seconds: float,
-        test_mode: bool,
-    ) -> None:
+    @Slot("QVariantMap")
+    def startSession(self, value: dict[str, Any]) -> None:
         if self._closed:
             return
+        command = dict(value)
+        model = str(command["model"])
+        input_device = int(command["input_device"])
+        output_device = int(command["output_device"])
+        pitch = int(command["pitch"])
+        f0 = str(command["f0"])
+        index_rate = float(command["index_rate"])
+        rms_mix_rate = float(command["rms_mix_rate"])
+        vad_threshold = float(command["vad_threshold"])
+        input_gate_db = float(command["input_gate_db"])
+        block_seconds = float(command["block_seconds"])
+        test_mode = bool(command.get("test_mode", False))
         input_record = self._device(input_device)
         output_record = self._device(output_device)
         remembered = {
@@ -482,9 +522,7 @@ class RealtimeViewModel(QObject):
         )
 
         def update(result: dict[str, Any]) -> None:
-            self._status = result
-            self._set_poll_interval(result.get("state"))
-            self.statusChanged.emit()
+            self._apply_status(result)
             self.status_callback(self.text_callback("realtime.status.starting"), "info")
 
         self.requests.submit(
@@ -498,12 +536,17 @@ class RealtimeViewModel(QObject):
     def stopSession(self) -> None:
         if self._closed:
             return
-        def update(result: dict[str, Any]) -> None:
-            self._status = result
-            self._set_poll_interval(result.get("state"))
-            self.statusChanged.emit()
+        self.requests.submit(
+            "realtime.stop",
+            {},
+            self._apply_status,
+            request_key="realtime-control",
+        )
 
-        self.requests.submit("realtime.stop", {}, update, request_key="realtime-control")
+    def _apply_status(self, result: dict[str, Any]) -> None:
+        self._status = result
+        self._set_poll_interval(result)
+        self.statusChanged.emit()
 
     def shutdown(self) -> None:
         self._closed = True

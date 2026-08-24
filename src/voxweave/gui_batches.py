@@ -4,6 +4,7 @@ from typing import Any
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
+from .bounded_ids import BoundedIdSet
 from .gui_activity import TaskActivity
 from .gui_requests import RequestCoordinator
 from .gui_support import local_path
@@ -12,6 +13,8 @@ from .gui_tasks import TaskFeed
 
 class BatchRulesViewModel(QObject):
     itemsChanged = Signal()
+    loadingChanged = Signal()
+    ruleSaved = Signal(str)
 
     def __init__(
         self,
@@ -24,57 +27,50 @@ class BatchRulesViewModel(QObject):
         self.requests = requests
         self.activity = activity
         self._items: list[dict[str, Any]] = []
-        self._handled_tasks: set[str] = set()
+        self._loading = False
+        self._loaded = False
+        self._handled_tasks = BoundedIdSet()
         task_feed.taskUpdated.connect(self._consume_task)
 
     @Property("QVariantList", notify=itemsChanged)
     def items(self) -> list[dict[str, Any]]:
         return self._items
 
+    @Property(bool, notify=loadingChanged)
+    def loading(self) -> bool:
+        return self._loading or not self._loaded
+
     @Slot()
     def refresh(self) -> None:
+        self._loading = True
+        self.loadingChanged.emit()
+
         def update(result: dict[str, Any]) -> None:
             self._items = list(result["items"])
+            self._loading = False
+            self._loaded = True
             self.itemsChanged.emit()
+            self.loadingChanged.emit()
+
+        def failed(message: str) -> None:
+            self._loading = False
+            self._loaded = True
+            self.loadingChanged.emit()
+            self.requests.status_callback(message, "danger")
 
         self.requests.submit(
             "batch.list",
             {"limit": 100},
             update,
             show_status=False,
+            error_callback=failed,
             request_key="batches",
-        )
-
-    @Slot(str, str, str, bool)
-    def create(self, input_root: str, output_root: str, model: str, watch: bool) -> None:
-        def created(result: dict[str, Any]) -> None:
-            self.refresh()
-            if not watch:
-                self.activity.submit(
-                    "batch.run",
-                    {"batch_id": result["id"]},
-                    action_key=f"batch-run:{result['id']}",
-                )
-
-        self.requests.submit(
-            "batch.create",
-            {
-                "input_root": local_path(input_root),
-                "output_root": local_path(output_root),
-                "model": model,
-                "preset": {"content_mode": "clean"},
-                "preset_name": "default",
-                "recursive": True,
-                "watch": watch,
-            },
-            created,
         )
 
     @Slot("QVariantMap")
     def saveRule(self, value: dict[str, Any]) -> None:
         payload = dict(value)
         batch_id = str(payload.pop("batch_id", "") or "")
-        watch = bool(payload.get("watch", False))
         payload["input_root"] = local_path(str(payload["input_root"]))
         payload["output_root"] = local_path(str(payload["output_root"]))
         payload.setdefault("preset_name", "custom")
@@ -82,12 +78,7 @@ class BatchRulesViewModel(QObject):
 
         def saved(result: dict[str, Any]) -> None:
             self.refresh()
-            if not batch_id and not watch:
-                self.activity.submit(
-                    "batch.run",
-                    {"batch_id": result["id"]},
-                    action_key=f"batch-run:{result['id']}",
-                )
+            self.ruleSaved.emit(str(result["id"]))
 
         if batch_id:
             payload["batch_id"] = batch_id

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .hashing import sha256_file
+from .hashing import FileVerificationLedger, VerifiedFile, sha256_file, verify_file
 from .media_errors import MediaPipelineError
 from .process_control import run_capture
 from .protocol import OperationError
@@ -35,6 +35,16 @@ def inspect_media(
     input_path: Path,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    media, _verified = inspect_media_verified(settings, input_path, cancelled)
+    return media
+
+
+def inspect_media_verified(
+    settings: Settings,
+    input_path: Path,
+    cancelled: Callable[[], bool] | None = None,
+    ledger: FileVerificationLedger | None = None,
+) -> tuple[dict[str, Any], VerifiedFile]:
     input_path = input_path.expanduser().resolve()
     if not input_path.is_file():
         raise FileNotFoundError(input_path)
@@ -58,13 +68,17 @@ def inspect_media(
     audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
     video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
     subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
-    digest = sha256_file(input_path)
+    verified = (
+        ledger.verify(input_path, cancelled=cancelled)
+        if ledger is not None
+        else verify_file(input_path, cancelled=cancelled)
+    )
     after = input_path.stat()
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise OperationError("input_changed", f"media changed while it was inspected: {input_path}")
     return {
         "path": str(input_path),
-        "sha256": digest,
+        "sha256": verified.sha256,
         "size_bytes": after.st_size,
         "media_type": "video" if video_streams else "audio",
         "duration_seconds": float(payload.get("format", {}).get("duration") or 0),
@@ -72,15 +86,65 @@ def inspect_media(
         "audio_streams": audio_streams,
         "video_streams": video_streams,
         "subtitle_streams": subtitle_streams,
-    }
+    }, verified
 
 
-def verify_media_snapshot(path: Path, expected_sha256: str) -> None:
+def verify_media_snapshot(
+    path: Path,
+    expected_sha256: str,
+    verified: VerifiedFile | None = None,
+) -> None:
     path = path.expanduser().resolve()
     if not path.is_file():
         raise OperationError("input_missing", f"media no longer exists: {path}")
-    if sha256_file(path).casefold() != expected_sha256.casefold():
+    try:
+        actual = (
+            verified.assert_unchanged(path).sha256
+            if verified is not None
+            else sha256_file(path)
+        )
+    except OSError as exc:
+        raise OperationError("input_changed", f"media changed during processing: {path}") from exc
+    if actual.casefold() != expected_sha256.casefold():
         raise OperationError("input_changed", f"media changed during processing: {path}")
+
+
+def audio_geometry(
+    settings: Settings,
+    path: Path,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, int | float]:
+    completed = _run(
+        [
+            _binary(settings, "ffprobe"),
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=sample_rate,duration,duration_ts,time_base",
+            "-of",
+            "json",
+            "--",
+            str(path),
+        ],
+        cancelled=cancelled,
+    )
+    streams = json.loads(completed.stdout).get("streams") or []
+    if not streams:
+        raise MediaPipelineError(f"media has no audio stream: {path}")
+    stream = streams[0]
+    sample_rate = int(stream["sample_rate"])
+    duration = float(stream.get("duration") or 0.0)
+    duration_ts = stream.get("duration_ts")
+    time_base = str(stream.get("time_base") or "")
+    frames = 0
+    if duration_ts is not None and "/" in time_base:
+        numerator, denominator = (int(value) for value in time_base.split("/", 1))
+        frames = round(int(duration_ts) * numerator * sample_rate / denominator)
+    if frames <= 0:
+        frames = round(duration * sample_rate)
+    return {"sample_rate": sample_rate, "frames": frames, "duration_seconds": duration}
 
 
 def extract_audio(
@@ -302,9 +366,8 @@ def match_loudness(
     output: Path,
     work_dir: Path,
     cancelled: Callable[[], bool] | None = None,
+    ledger: FileVerificationLedger | None = None,
 ) -> dict[str, Any]:
-    import soundfile as sf  # noqa: PLC0415
-
     reference_quality = measure_audio_quality(settings, loudness_reference, cancelled=cancelled)
     before = measure_audio_quality(settings, source, cancelled=cancelled)
     target = reference_quality["integrated_loudness_lufs"]
@@ -328,7 +391,7 @@ def match_loudness(
         ],
         cancelled=cancelled,
     )
-    reference = sf.info(duration_reference)
+    reference = audio_geometry(settings, duration_reference, cancelled)
     _run(
         [
             _binary(settings, "ffmpeg"),
@@ -339,8 +402,8 @@ def match_loudness(
             str(filtered),
             "-af",
             (
-                f"aresample={reference.samplerate},"
-                f"apad=whole_len={reference.frames},atrim=end_sample={reference.frames}"
+                f"aresample={reference['sample_rate']},"
+                f"apad=whole_len={reference['frames']},atrim=end_sample={reference['frames']}"
             ),
             "-c:a",
             "pcm_s24le",
@@ -354,7 +417,11 @@ def match_loudness(
         "before": before,
         "after": after,
         "output_path": str(output),
-        "output_sha256": sha256_file(output),
+        "output_sha256": (
+            ledger.verify(output, cancelled=cancelled).sha256
+            if ledger is not None
+            else sha256_file(output)
+        ),
     }
 
 
@@ -363,7 +430,17 @@ def validate_output(
     output: Path,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    media = inspect_media(settings, output, cancelled)
+    media, _verified = validate_output_verified(settings, output, cancelled)
+    return media
+
+
+def validate_output_verified(
+    settings: Settings,
+    output: Path,
+    cancelled: Callable[[], bool] | None = None,
+    ledger: FileVerificationLedger | None = None,
+) -> tuple[dict[str, Any], VerifiedFile]:
+    media, verified = inspect_media_verified(settings, output, cancelled, ledger)
     qualities = [
         measure_audio_quality(settings, output, stream_index, cancelled)
         for stream_index in range(len(media["audio_streams"]))
@@ -384,4 +461,4 @@ def validate_output(
         )
     media["full_decode"] = "passed"
     media["audio_quality"] = qualities
-    return media
+    return media, verified

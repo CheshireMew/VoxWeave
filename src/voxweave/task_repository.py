@@ -73,13 +73,20 @@ class TaskRepository:
     ) -> tuple[str, bool]:
         if request_id:
             existing = db.execute(
-                "SELECT id,operation,arguments_json FROM tasks WHERE request_id=?",
+                "SELECT id,operation,arguments_json,actor_json FROM tasks WHERE request_id=?",
                 (request_id,),
             ).fetchone()
             if existing:
-                if existing["operation"] != operation or json.loads(
-                    existing["arguments_json"]
-                ) != arguments:
+                stored_actor = (
+                    json.loads(existing["actor_json"])
+                    if existing["actor_json"]
+                    else None
+                )
+                if (
+                    existing["operation"] != operation
+                    or json.loads(existing["arguments_json"]) != arguments
+                    or stored_actor != actor
+                ):
                     raise OperationError(
                         "idempotency_conflict",
                         "request_id is already associated with a different command",
@@ -108,6 +115,31 @@ class TaskRepository:
         )
         self._insert_event(db, task_id, "queued", 0.0, "queued", None)
         return task_id, True
+
+    def find_by_request(
+        self,
+        request_id: str,
+        operation: str,
+        arguments: dict[str, Any],
+        actor: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        row = self.database.fetch_one(
+            "SELECT id,operation,arguments_json,actor_json FROM tasks WHERE request_id=?",
+            (request_id,),
+        )
+        if not row:
+            return None
+        stored_actor = json.loads(row["actor_json"]) if row["actor_json"] else None
+        if (
+            row["operation"] != operation
+            or json.loads(row["arguments_json"]) != arguments
+            or stored_actor != actor
+        ):
+            raise OperationError(
+                "idempotency_conflict",
+                "request_id is globally associated with a different command",
+            )
+        return self.get(str(row["id"]))
 
     def update(
         self,
@@ -168,19 +200,59 @@ class TaskRepository:
             rows = [
                 dict(row)
                 for row in db.execute(
-                    f"SELECT * FROM tasks {where} ORDER BY created_at DESC,id DESC LIMIT ?",  # noqa: S608
+                    "SELECT id,operation,state,progress,stage,cancel_requested,error_type,error,"
+                    "request_id,worker_failures,retry_of,created_at,updated_at "
+                    f"FROM tasks {where} ORDER BY created_at DESC,id DESC LIMIT ?",  # noqa: S608
                     parameters,
                 ).fetchall()
             ]
             cursor_row = db.execute("SELECT COALESCE(MAX(id),0) AS id FROM task_events").fetchone()
             event_cursor = int(cursor_row["id"])
         has_more = len(rows) > limit
-        results = [self._decode(row) for row in rows[:limit]]
+        results = []
+        for row in rows[:limit]:
+            row["cancel_requested"] = bool(row["cancel_requested"])
+            row["task_id"] = row["id"]
+            results.append(row)
         next_cursor = None
         if has_more and results:
             last = results[-1]
             next_cursor = encode_cursor(last["created_at"], last["id"])
         return {"items": results, "next_cursor": next_cursor, "event_cursor": event_cursor}
+
+    def recover_worker_failure(
+        self,
+        task_id: str,
+        error: str,
+        *,
+        max_failures: int,
+    ) -> bool:
+        """Persist a worker-boundary failure and return whether to dispatch again."""
+
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT state,worker_failures FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if not row or row["state"] in {
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted",
+            }:
+                return False
+            failures = int(row["worker_failures"]) + 1
+            retry = failures < max_failures
+            state = "queued" if retry else "failed"
+            stage = "worker_retry" if retry else "worker_failure"
+            error_type = None if retry else "worker_failure"
+            now = utc_now()
+            db.execute(
+                "UPDATE tasks SET state=?,stage=?,worker_failures=?,error_type=?,error=?,"
+                "updated_at=? WHERE id=?",
+                (state, stage, failures, error_type, error, now, task_id),
+            )
+            self._insert_event(db, task_id, state, 0.0, stage, error)
+            return retry
 
     def cancel_requested(self, task_id: str) -> bool:
         current = self.database.fetch_one(

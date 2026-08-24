@@ -7,16 +7,25 @@ from typing import Any
 
 from .artifacts import ArtifactStore
 from .batch import BatchManager
+from .capabilities import catalog_entry_capabilities
 from .config import Settings
 from .diagnostics import DiagnosticsService
 from .media_pipeline import MediaPipeline
 from .model_importer import ModelImporter
 from .model_registry import ModelRegistry
 from .model_scanner import ModelScanner
+from .operation_receipt_repository import OperationReceiptRepository
 from .presets import PresetService
-from .protocol import OPERATION_SPECS, OperationError, parse_arguments
+from .protocol import (
+    OPERATION_SPECS,
+    OperationError,
+    parse_arguments,
+    public_error_code,
+    validate_execute_result,
+)
 from .realtime import RealtimeSessionManager
 from .runtime_install import install_runtime
+from .settings_service import SettingsService
 from .storage import StorageArchiveManager
 from .task_manager import Handler, TaskManager
 from .task_service import TaskService
@@ -54,10 +63,13 @@ class OperationRouter:
         batch: BatchManager,
         storage: StorageArchiveManager,
         diagnostics: DiagnosticsService,
+        settings_service: SettingsService,
+        receipts: OperationReceiptRepository,
     ) -> None:
         self.settings = settings
         self.models = models
         self.tasks = tasks
+        self.receipts = receipts
         snapshot_model = self._model_preparer
         snapshot_input = self._input_preparer
 
@@ -68,8 +80,14 @@ class OperationRouter:
             "diagnostics.snapshot": OperationBinding(
                 lambda _arguments, context: diagnostics.snapshot(context)
             ),
+            "settings.get": OperationBinding(
+                sync(lambda _arguments: settings_service.get())
+            ),
             "settings.update": OperationBinding(
-                lambda arguments, _metadata: self._update_settings(arguments)
+                lambda arguments, _metadata: settings_service.update(arguments)
+            ),
+            "settings.events": OperationBinding(
+                sync(settings_service.events)
             ),
             "runtime.inspect": OperationBinding(
                 lambda _arguments, context: diagnostics.inspect_runtime(context)
@@ -77,6 +95,7 @@ class OperationRouter:
             "runtime.install": OperationBinding(
                 lambda arguments, context: install_runtime(
                     settings,
+                    settings_service,
                     arguments,
                     context.progress,
                     context.cancelled,
@@ -94,7 +113,10 @@ class OperationRouter:
             "model.catalog.list": OperationBinding(
                 sync(
                     lambda _arguments: [
-                        {**entry, "installed": models.is_registered(entry["id"])}
+                        {
+                            **catalog_entry_capabilities(entry),
+                            **models.catalog_state(entry),
+                        }
                         for entry in importer.catalog.list_entries()
                     ]
                 )
@@ -218,14 +240,6 @@ class OperationRouter:
                 f"extra={sorted(extra)}"
             )
 
-    def _update_settings(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        changes = {name: arguments[name] for name in ("language", "realtime") if name in arguments}
-        self.settings.update(**changes)
-        return {
-            "language": self.settings.language,
-            "realtime": dict(self.settings.realtime),
-        }
-
     def _model_preparer(self, arguments: dict[str, Any]) -> dict[str, Any]:
         model = self.models.resolve(arguments["model"])
         arguments["model"] = model["id"]
@@ -261,22 +275,64 @@ class OperationRouter:
         actor: dict[str, Any] | None,
     ) -> Any:
         parsed = parse_arguments(operation, arguments)
-        binding = self.bindings[operation]
-        snapshot: dict[str, Any] = {}
-        for prepare in binding.preparers:
-            snapshot.update(prepare(parsed))
-        if OPERATION_SPECS[operation].long_running:
-            if not request_id:
-                raise OperationError(
-                    "request_id_required",
-                    "long-running commands require request_id",
-                )
-            return self.tasks.submit(
+        spec = OPERATION_SPECS[operation]
+        requires_receipt = spec.long_running or spec.mutating
+        if requires_receipt and not request_id:
+            raise OperationError(
+                "request_id_required",
+                "mutating and long-running commands require request_id",
+            )
+        if spec.long_running and request_id:
+            existing_task = self.tasks.find_by_request(
+                request_id,
                 operation,
                 parsed,
-                request_id=request_id,
-                actor=actor,
-                snapshot=snapshot,
+                actor,
             )
-        handler: SyncHandler = binding.handler  # type: ignore[assignment]
-        return handler(parsed, RequestMetadata(request_id, actor))
+            if existing_task is not None:
+                result = validate_execute_result(operation, existing_task)
+                self.receipts.complete(request_id, result)
+                return result
+        if requires_receipt:
+            state, record = self.receipts.claim(
+                request_id or "", operation, parsed, actor
+            )
+            if state == "running":
+                record = self.receipts.await_terminal(request_id or "")
+                state = str(record["state"])
+            if state == "completed":
+                return record["result"] if record else None
+            if state == "failed":
+                raise OperationError(
+                    str(record.get("error_type") or "operation_failed"),
+                    str(record.get("error") or "operation failed"),
+                )
+
+        binding = self.bindings[operation]
+        try:
+            snapshot: dict[str, Any] = {}
+            for prepare in binding.preparers:
+                snapshot.update(prepare(parsed))
+            if spec.long_running:
+                result = self.tasks.submit(
+                    operation,
+                    parsed,
+                    request_id=request_id,
+                    actor=actor,
+                    snapshot=snapshot,
+                )
+            else:
+                handler: SyncHandler = binding.handler  # type: ignore[assignment]
+                result = handler(parsed, RequestMetadata(request_id, actor))
+            result = validate_execute_result(operation, result)
+        except Exception as exc:
+            if requires_receipt:
+                self.receipts.fail(
+                    request_id or "",
+                    public_error_code(exc),
+                    str(exc) or "operation failed",
+                )
+            raise
+        if requires_receipt:
+            self.receipts.complete(request_id or "", result)
+        return result

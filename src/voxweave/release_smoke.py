@@ -13,8 +13,9 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication
 
 from . import __version__
-from .config import PACKAGE_ROOT, configure_process_environment, load_settings
+from .config import PACKAGE_ROOT, configure_process_environment
 from .gui import Bridge
+from .settings_file_store import load_settings
 
 
 def _write_report(path: Path, payload: dict[str, object]) -> None:

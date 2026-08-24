@@ -4,9 +4,12 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from voxweave.batch import BatchManager
 from voxweave.database import Database
 from voxweave.model_registry import ModelRegistry
+from voxweave.protocol import OperationError
 from voxweave.task_manager import TaskManager
 
 
@@ -42,7 +45,35 @@ def _managers(tmp_path, *, fail_first: bool = False):
         output = Path(arguments["output"])
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(Path(arguments["input"]).read_bytes())
-        return {"input": arguments["input"], "output": str(output)}
+        manifest = output.with_suffix(output.suffix + ".json")
+        manifest.write_text("{}\n", encoding="utf-8")
+
+        def media(path: str) -> dict:
+            return {
+                "path": path,
+                "sha256": "0" * 64,
+                "size_bytes": Path(path).stat().st_size,
+                "media_type": "audio",
+                "duration_seconds": 0.0,
+                "format_name": Path(path).suffix.removeprefix("."),
+                "audio_streams": [],
+                "video_streams": [],
+                "subtitle_streams": [],
+            }
+
+        return {
+            "protocol": "voxweave-conversion-result",
+            "version": 1,
+            "input": media(arguments["input"]),
+            "output": media(str(output)),
+            "model": {"id": arguments["model"]},
+            "parameters": {},
+            "selected_speakers": [],
+            "separation": None,
+            "loudness_match": {},
+            "segments": [],
+            "manifest_path": str(manifest),
+        }
 
     tasks.register("conversion.run", convert)
     tasks.register("batch.run", batch.run)
@@ -136,6 +167,42 @@ def test_batch_rule_can_be_edited_archived_and_restored_without_deleting_it(tmp_
     tasks.shutdown()
 
 
+def test_stale_batch_rule_cannot_submit_after_revision_changes(tmp_path) -> None:
+    database, tasks, batch = _managers(tmp_path)
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    source = input_root / "voice.wav"
+    source.write_bytes(b"voice")
+    stale_rule = batch.create(
+        {
+            "input_root": str(input_root),
+            "output_root": str(output_root),
+            "model": "model.example",
+            "preset": {},
+            "watch": False,
+        }
+    )
+    batch.update(
+        {
+            "batch_id": stale_rule["id"],
+            "input_root": str(input_root),
+            "output_root": str(output_root),
+            "model": "model.example",
+            "preset": {"pitch": 3},
+            "watch": False,
+        }
+    )
+
+    with pytest.raises(OperationError, match="batch rule changed"):
+        batch.submissions.submit_file(stale_rule, source)
+
+    assert database.fetch_one("SELECT COUNT(*) AS count FROM batch_items") == {"count": 0}
+    assert database.fetch_one("SELECT COUNT(*) AS count FROM tasks") == {"count": 0}
+    batch.shutdown()
+    tasks.shutdown()
+
+
 def test_watcher_records_rule_errors_without_stopping(tmp_path) -> None:
     database, tasks, batch = _managers(tmp_path)
     input_root = tmp_path / "input"
@@ -163,13 +230,13 @@ def test_watcher_records_rule_errors_without_stopping(tmp_path) -> None:
         time.sleep(0.05)
     assert stored and stored["last_error"]
     assert stored["last_error_at"]
-    assert batch.thread.is_alive()
+    assert batch.watch.thread and batch.watch.thread.is_alive()
     batch.shutdown()
     tasks.shutdown()
 
 
 def test_watcher_uses_changes_and_submits_stable_file_only_once(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("voxweave.batch.WATCH_SETTLE_SECONDS", 0.1)
+    monkeypatch.setattr("voxweave.batch_watch.WATCH_SETTLE_SECONDS", 0.1)
     database, tasks, batch = _managers(tmp_path)
     input_root = tmp_path / "input"
     output_root = tmp_path / "output"
@@ -245,14 +312,14 @@ def test_partial_batch_submission_is_visible_on_parent_task(tmp_path, monkeypatc
             "watch": False,
         }
     )
-    submit_file = batch._submit_file
+    submit_file = batch.submissions.submit_file
 
     def fail_one(stored_rule, source, cancelled=None):
         if source.name == "bad.wav":
             raise OSError("source became unavailable")
         return submit_file(stored_rule, source, cancelled)
 
-    monkeypatch.setattr(batch, "_submit_file", fail_one)
+    monkeypatch.setattr(batch.submissions, "submit_file", fail_one)
     parent = tasks.submit("batch.run", {"batch_id": rule["id"]})
     failed = _wait_completed(tasks, parent["id"])
     assert failed["state"] == "failed"

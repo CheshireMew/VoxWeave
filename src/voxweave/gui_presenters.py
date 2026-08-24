@@ -1,9 +1,52 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+TRACEBACK_MARKERS = (
+    "traceback (most recent call last)",
+    "during handling of the above exception",
+    "the above exception was the direct cause",
+)
+
+
+def error_summary(value: object, *, limit: int = 500) -> str:
+    """Return one useful line while keeping raw diagnostics outside the layout."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    lines = [line.strip() for line in raw.replace("\r\n", "\n").split("\n") if line.strip()]
+    first = lines[0]
+    first_lower = first.casefold()
+    if not any(marker in first_lower for marker in TRACEBACK_MARKERS):
+        summary = first
+    else:
+        prefix = first[: first_lower.find("traceback")].rstrip(" ：:")
+        summary = ""
+        for line in reversed(lines):
+            lowered = line.casefold()
+            if any(marker in lowered for marker in TRACEBACK_MARKERS):
+                continue
+            if line.startswith('File "') or line.startswith("^"):
+                continue
+            if re.match(r"^(from|import|raise|return)\s", line):
+                continue
+            summary = line
+            break
+        summary = f"{prefix}：{summary}" if prefix and summary else summary or prefix
+    if len(summary) > limit:
+        return summary[: limit - 1].rstrip() + "…"
+    return summary
+
+
+def localized_text(key: str, locale_context: Any) -> str:
+    language, translations = locale_context()
+    table = translations.get(language, translations["en"])
+    return table.get(key, key)
 
 
 def localized_model_name(
@@ -46,8 +89,7 @@ def localized_task_title(
 
 
 def task_error_summary(task: dict[str, Any]) -> str:
-    error = str(task.get("error") or "").strip()
-    return error.splitlines()[0] if error else ""
+    return error_summary(task.get("error"))
 
 
 def task_result_path(task: dict[str, Any]) -> str:
@@ -55,12 +97,16 @@ def task_result_path(task: dict[str, Any]) -> str:
     if not isinstance(result, dict):
         return ""
     output = result.get("output")
+    result_path = ""
     if isinstance(output, dict) and output.get("path"):
-        return str(output["path"])
+        result_path = str(output["path"])
     outputs = result.get("outputs")
-    if isinstance(outputs, list) and outputs and isinstance(outputs[0], dict):
-        return str(outputs[0].get("output_path") or "")
-    return ""
+    if not result_path and isinstance(outputs, list) and outputs and isinstance(outputs[0], dict):
+        result_path = str(outputs[0].get("output_path") or "")
+    for artifact in task.get("artifacts") or []:
+        if artifact.get("path") == result_path and artifact.get("state") == "archived":
+            return str(artifact.get("archive_path") or result_path)
+    return result_path
 
 
 def localized_task_stage(

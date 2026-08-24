@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
 import os
 import platform
 import shutil
 import tarfile
 import time
-import urllib.request
 import uuid
 import zipfile
 from collections.abc import Callable
@@ -15,10 +13,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .config import PACKAGE_ROOT, Settings
-from .hashing import sha256_file
 from .process_control import run_logged
 from .runtime import RuntimeErrorDetail, inspect_runtime
+from .runtime_contract import PlatformRuntimeContract, RuntimeArtifact, runtime_contract
+from .settings_service import SettingsService
 from .staging import archive_failed_staging
+from .verified_download import download_verified
 
 GIBIBYTE = 1024**3
 
@@ -40,20 +40,10 @@ class RuntimeLayout:
             source=root / "source",
             venv=venv,
             python=venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
-            speaker_root=root / "components" / "wespeaker-resnet34-lm",
+            speaker_root=(
+                root / "components" / runtime_contract().speaker_embedding.install_directory
+            ),
         )
-
-
-def _component_manifest() -> dict[str, Any]:
-    manifest = json.loads(
-        (PACKAGE_ROOT / "resources" / "runtime_components.json").read_text(encoding="utf-8")
-    )
-    if platform.system() != "Windows" or platform.machine().casefold() not in {
-        "amd64",
-        "x86_64",
-    }:
-        raise RuntimeErrorDetail("the managed installer currently supports Windows x64 only")
-    return dict(manifest["windows-x86_64"])
 
 
 def _require_install_space(settings: Settings) -> None:
@@ -90,73 +80,49 @@ def _replace_directory(source: Path, destination: Path) -> None:
     raise last_error
 
 
-def _download_verified(
+def _download_component(
     settings: Settings,
-    component: dict[str, Any],
+    component: RuntimeArtifact,
     cancelled: Callable[[], bool],
     progress: Callable[[float, str, str | None], None],
     progress_start: float,
     progress_end: float,
 ) -> Path:
-    target = settings.downloads_dir / "components" / str(component["filename"])
-    expected_size = int(component["size_bytes"])
-    expected_hash = str(component["sha256"]).casefold()
-    if target.is_file():
-        if (
-            target.stat().st_size == expected_size
-            and sha256_file(target).casefold() == expected_hash
-        ):
-            return target
-        _archive_existing(
-            target,
+    spec = component.download_spec()
+    target = settings.downloads_dir / "components" / spec.filename
+    return download_verified(
+        spec,
+        target,
+        cancelled=cancelled,
+        progress=progress,
+        progress_start=progress_start,
+        progress_end=progress_end,
+        invalid_existing=lambda path: _archive_existing(
+            path,
             settings.downloads_dir / "failed",
             f"invalid-{target.name}",
-        )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    partial = target.with_name(f"{target.name}.part-{uuid.uuid4().hex}")
-    request = urllib.request.Request(str(component["url"]), headers={"User-Agent": "VoxWeave/0.1"})
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response, partial.open("xb") as output:
-            received = 0
-            while chunk := response.read(1024 * 1024):
-                if cancelled():
-                    raise InterruptedError("task cancellation requested")
-                output.write(chunk)
-                received += len(chunk)
-                fraction = min(1.0, received / max(1, expected_size))
-                progress(
-                    progress_start + (progress_end - progress_start) * fraction,
-                    "download",
-                    f"{component['filename']}: {received}/{expected_size} bytes",
-                )
-        if partial.stat().st_size != expected_size:
-            raise ValueError(f"downloaded size mismatch for {component['filename']}")
-        if sha256_file(partial).casefold() != expected_hash:
-            raise ValueError(f"downloaded hash mismatch for {component['filename']}")
-        partial.replace(target)
-        return target
-    except Exception:
-        _archive_existing(
-            partial,
+        ),
+        failed_partial=lambda path: _archive_existing(
+            path,
             settings.downloads_dir / "failed",
             f"partial-{target.name}",
-        )
-        raise
+        ),
+    ).path
 
 
 def _ensure_managed_python(
     settings: Settings,
-    component: dict[str, Any],
+    component: RuntimeArtifact,
     cancelled: Callable[[], bool],
     progress: Callable[[float, str, str | None], None],
 ) -> Path:
-    root = settings.components_dir / f"python-{component['version']}"
+    root = settings.components_dir / f"python-{component.version}"
     python = root / "python.exe"
     if python.is_file():
         return python
     if root.exists():
         _archive_existing(root, settings.components_dir / "failed", "python-incomplete")
-    archive = _download_verified(settings, component, cancelled, progress, 0.03, 0.08)
+    archive = _download_component(settings, component, cancelled, progress, 0.03, 0.08)
     progress(0.09, "environment", "extracting private Python 3.12 runtime")
     staging = settings.components_dir / "staging" / f"python-{uuid.uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=False)
@@ -188,18 +154,18 @@ def _ensure_managed_python(
 
 def _ensure_managed_ffmpeg(
     settings: Settings,
-    component: dict[str, Any],
+    component: RuntimeArtifact,
     cancelled: Callable[[], bool],
     progress: Callable[[float, str, str | None], None],
 ) -> tuple[Path, Path]:
-    root = settings.components_dir / f"ffmpeg-{component['version']}"
+    root = settings.components_dir / f"ffmpeg-{component.version}"
     ffmpeg = root / "ffmpeg.exe"
     ffprobe = root / "ffprobe.exe"
     if ffmpeg.is_file() and ffprobe.is_file():
         return ffmpeg, ffprobe
     if root.exists():
         _archive_existing(root, settings.components_dir / "failed", "ffmpeg-incomplete")
-    archive = _download_verified(settings, component, cancelled, progress, 0.10, 0.18)
+    archive = _download_component(settings, component, cancelled, progress, 0.10, 0.18)
     staging = settings.components_dir / "staging" / f"ffmpeg-{uuid.uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=False)
     try:
@@ -247,6 +213,7 @@ def _run_install_step(
 
 def _attach_supplied_runtime(
     settings: Settings,
+    settings_service: SettingsService,
     arguments: dict[str, Any],
     cancelled: Callable[[], bool],
 ) -> dict[str, Any] | None:
@@ -279,7 +246,7 @@ def _attach_supplied_runtime(
         raise InterruptedError("task cancellation requested")
     if not runtime["ready"]:
         raise RuntimeErrorDetail(runtime.get("error") or "supplied RVC runtime is not ready")
-    settings.update(
+    settings_service.replace(
         rvc_root=candidate.rvc_root,
         rvc_python=candidate.rvc_python,
         weight_roots=candidate.weight_roots,
@@ -290,6 +257,7 @@ def _attach_supplied_runtime(
 
 def _reuse_existing_runtime(
     settings: Settings,
+    settings_service: SettingsService,
     layout: RuntimeLayout,
     cancelled: Callable[[], bool],
 ) -> dict[str, Any] | None:
@@ -303,7 +271,7 @@ def _reuse_existing_runtime(
     )
     report = inspect_runtime(candidate, cancelled)
     if report["ready"] or bool((report.get("doctor") or {}).get("ok")):
-        settings.update(
+        settings_service.replace(
             rvc_root=candidate.rvc_root,
             rvc_python=candidate.rvc_python,
             wespeaker_model=candidate.wespeaker_model,
@@ -317,7 +285,7 @@ def _reuse_existing_runtime(
 
 def _checkout_runtime_source(
     settings: Settings,
-    component: dict[str, Any],
+    component: RuntimeArtifact,
     staging: Path,
     bootstrap_python: Path,
     cancelled: Callable[[], bool],
@@ -327,7 +295,7 @@ def _checkout_runtime_source(
     source = staging / "source"
     venv = staging / "venv"
     progress(0.19, "download", "downloading pinned RVC source")
-    archive = _download_verified(settings, component, cancelled, progress, 0.19, 0.23)
+    archive = _download_component(settings, component, cancelled, progress, 0.19, 0.23)
     source.mkdir(parents=True, exist_ok=False)
     with zipfile.ZipFile(archive) as bundle:
         for info in bundle.infolist():
@@ -343,7 +311,7 @@ def _checkout_runtime_source(
             with bundle.open(info) as input_stream, destination.open("xb") as output:
                 shutil.copyfileobj(input_stream, output)
     (source / ".voxweave-rvc-revision").write_text(
-        str(component["revision"]) + "\n", encoding="utf-8"
+        str(component.revision) + "\n", encoding="utf-8"
     )
     progress(0.25, "environment", "creating Python environment")
     _run_install_step(
@@ -362,63 +330,28 @@ def _install_dependencies(
     cancelled: Callable[[], bool],
     log_path: Path,
     progress: Callable[[float, str, str | None], None],
+    contract: PlatformRuntimeContract | None = None,
 ) -> dict[str, str]:
+    contract = contract or runtime_contract()
     use_nvidia = platform.system() == "Windows" and bool(shutil.which("nvidia-smi"))
-    requirements = PACKAGE_ROOT / "resources" / "runtime_requirements_windows.txt"
     env = os.environ.copy()
     env["PIP_CACHE_DIR"] = str(settings.root / "pip-cache")
     env["TMP"] = str(settings.root / "temp")
     env["TEMP"] = str(settings.root / "temp")
     Path(env["TEMP"]).mkdir(parents=True, exist_ok=True)
     progress(0.35, "dependencies", "installing VoxWeave inference dependencies")
-    commands: list[list[str | Path]] = []
-    if use_nvidia:
-        commands.append(
-            [
-                runtime_python,
-                "-m",
-                "pip",
-                "install",
-                "torch==2.7.1+cu118",
-                "torchaudio==2.7.1+cu118",
-                "--index-url",
-                "https://mirrors.nju.edu.cn/pytorch/whl/cu118",
-                "--extra-index-url",
-                "https://mirrors.pku.edu.cn/pypi/simple",
-            ]
-        )
-    else:
-        commands.append(
-            [
-                runtime_python,
-                "-m",
-                "pip",
-                "install",
-                "torch==2.4.1+cpu",
-                "torchaudio==2.4.1+cpu",
-                "torchvision==0.19.1+cpu",
-                "torch-directml==0.2.5.dev240914",
-                "--index-url",
-                "https://mirrors.nju.edu.cn/pytorch/whl/cpu",
-                "--extra-index-url",
-                "https://mirrors.pku.edu.cn/pypi/simple",
-            ]
-        )
-    commands.extend(([runtime_python, "-m", "pip", "install", "-r", requirements],))
+    profile = "nvidia" if use_nvidia else "cpu"
+    commands: list[list[str | Path]] = [
+        [runtime_python, "-m", "pip", "install", *contract.pip_arguments(profile)],
+        [runtime_python, "-m", "pip", "install", *contract.pip_arguments("base")],
+    ]
     if install_separation:
-        if not use_nvidia:
+        if contract.source_separation.requires_nvidia and not use_nvidia:
             raise RuntimeErrorDetail(
                 "optional PyMSS separation currently requires an NVIDIA runtime"
             )
         commands.append(
-            [
-                runtime_python,
-                "-m",
-                "pip",
-                "install",
-                "pymss==2.0.14",
-                "pymss-core==0.1.4",
-            ]
+            [runtime_python, "-m", "pip", "install", *contract.pip_arguments("separation")]
         )
     for command in commands:
         _run_install_step(
@@ -442,6 +375,7 @@ def _install_assets(
     progress: Callable[[float, str, str | None], None],
 ) -> tuple[bool, Path]:
     progress(0.72, "assets", "downloading required official inference assets")
+    contract = runtime_contract()
     env["HF_HOME"] = str(settings.cache_dir / "huggingface")
     command: list[str | Path] = [
         runtime_python,
@@ -453,7 +387,7 @@ def _install_assets(
     if arguments.get("install_separation", False):
         command.append("--with-separation")
     install_speaker = arguments.get("install_speaker_model", True)
-    speaker_root = staging / "components" / "wespeaker-resnet34-lm"
+    speaker_root = staging / "components" / contract.speaker_embedding.install_directory
     if install_speaker:
         command.extend(["--speaker-root", speaker_root])
     _run_install_step(
@@ -499,6 +433,7 @@ def _staging_candidate(
 
 def _publish_runtime(
     settings: Settings,
+    settings_service: SettingsService,
     layout: RuntimeLayout,
     staging: Path,
     candidate: Settings,
@@ -537,7 +472,7 @@ def _publish_runtime(
         failed_root.mkdir(parents=True, exist_ok=True)
         layout.root.replace(failed_root / f"post-publish-{uuid.uuid4().hex}")
         raise RuntimeErrorDetail(runtime.get("error") or "published runtime failed doctor")
-    settings.update(
+    settings_service.replace(
         rvc_root=final_candidate.rvc_root,
         rvc_python=final_candidate.rvc_python,
         weight_roots=final_candidate.weight_roots,
@@ -551,6 +486,7 @@ def _publish_runtime(
 
 def install_runtime(
     settings: Settings,
+    settings_service: SettingsService,
     arguments: dict[str, Any],
     progress: Callable[[float, str, str | None], None],
     cancelled: Callable[[], bool],
@@ -561,21 +497,21 @@ def install_runtime(
     current = inspect_runtime(settings, cancelled)
     if current["ready"]:
         return current
-    supplied = _attach_supplied_runtime(settings, arguments, cancelled)
+    supplied = _attach_supplied_runtime(settings, settings_service, arguments, cancelled)
     if supplied is not None:
         return supplied
     layout = RuntimeLayout.managed(settings)
-    existing = _reuse_existing_runtime(settings, layout, cancelled)
+    existing = _reuse_existing_runtime(settings, settings_service, layout, cancelled)
     if existing is not None and existing["ready"]:
         return existing
-    manifest = _component_manifest()
+    contract = runtime_contract()
     ffmpeg: Path | None = None
     ffprobe: Path | None = None
     reusable_report = existing or current
     if bool((reusable_report.get("doctor") or {}).get("ok")):
         ffmpeg, ffprobe = _ensure_managed_ffmpeg(
             settings,
-            manifest["ffmpeg"],
+            contract.ffmpeg,
             cancelled,
             progress,
         )
@@ -585,19 +521,19 @@ def install_runtime(
         )
         existing_report = inspect_runtime(existing_candidate, cancelled)
         if existing_report["ready"]:
-            settings.update(ffmpeg=str(ffmpeg), ffprobe=str(ffprobe))
+            settings_service.replace(ffmpeg=str(ffmpeg), ffprobe=str(ffprobe))
             return existing_report
     _require_install_space(settings)
     bootstrap_python = _ensure_managed_python(
         settings,
-        manifest["python"],
+        contract.python,
         cancelled,
         progress,
     )
     if ffmpeg is None or ffprobe is None:
         ffmpeg, ffprobe = _ensure_managed_ffmpeg(
             settings,
-            manifest["ffmpeg"],
+            contract.ffmpeg,
             cancelled,
             progress,
         )
@@ -611,7 +547,7 @@ def install_runtime(
         log_path = staging / "install.log"
         source, _venv, runtime_python = _checkout_runtime_source(
             settings,
-            manifest["rvc_source"],
+            contract.rvc_source,
             staging,
             bootstrap_python,
             cancelled,
@@ -625,6 +561,7 @@ def install_runtime(
             cancelled,
             log_path,
             progress,
+            contract,
         )
         install_speaker, speaker_root = _install_assets(
             settings,
@@ -654,6 +591,7 @@ def install_runtime(
             raise RuntimeErrorDetail(report.get("error") or "installed runtime failed doctor")
         return _publish_runtime(
             settings,
+            settings_service,
             layout,
             staging,
             candidate,

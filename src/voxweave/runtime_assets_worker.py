@@ -5,8 +5,10 @@ from pathlib import Path
 
 from huggingface_hub import hf_hub_download, snapshot_download
 
-ASSET_REVISION = "e6d0c1a17da07c33557852f9dfa2bd44cc75737d"
-WESPEAKER_REVISION = "f0c48c298fd835726c27956a5d617bad7115627e"
+try:
+    from .runtime_contract import runtime_contract
+except ImportError:
+    from runtime_contract import runtime_contract  # type: ignore[no-redef]
 
 
 def main() -> int:
@@ -15,32 +17,31 @@ def main() -> int:
     parser.add_argument("--with-separation", action="store_true")
     parser.add_argument("--speaker-root")
     arguments = parser.parse_args()
+    contract = runtime_contract()
+    runtime_assets = contract.runtime_assets
+    separation = contract.source_separation
+    speaker = contract.speaker_embedding
     assets = Path(arguments.rvc_root).resolve() / "assets"
-    patterns = ["hubert_base/*"]
+    patterns = list(runtime_assets.base_patterns)
     if arguments.with_separation:
-        patterns.extend(
-            [
-                "pymss_weights/model_bs_roformer_ep_368_sdr_12.9628.ckpt",
-                "pymss_weights/model_bs_roformer_ep_368_sdr_12.9628.yaml",
-            ]
-        )
+        patterns.extend(separation.weight_files)
     snapshot_download(
-        repo_id="lj1995/VoiceConversionWebUI",
-        revision=ASSET_REVISION,
+        repo_id=runtime_assets.repo_id,
+        revision=runtime_assets.revision,
         allow_patterns=patterns,
         local_dir=assets,
     )
     hf_hub_download(
-        repo_id="lj1995/VoiceConversionWebUI",
-        filename="rmvpe.pt",
-        revision=ASSET_REVISION,
-        local_dir=assets / "rmvpe",
+        repo_id=runtime_assets.repo_id,
+        filename=runtime_assets.rmvpe_filename,
+        revision=runtime_assets.revision,
+        local_dir=assets / runtime_assets.rmvpe_directory,
     )
     if arguments.speaker_root:
         hf_hub_download(
-            repo_id="Wespeaker/wespeaker-resnet34-LM",
-            filename="voxceleb_resnet34_LM.onnx",
-            revision=WESPEAKER_REVISION,
+            repo_id=speaker.repo_id,
+            filename=speaker.filename,
+            revision=speaker.revision,
             local_dir=Path(arguments.speaker_root).resolve(),
         )
     return 0

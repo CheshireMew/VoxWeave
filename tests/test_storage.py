@@ -21,7 +21,7 @@ def _wait_for_task(tasks: TaskManager, task_id: str) -> dict[str, Any]:
     raise AssertionError(f"task did not finish: {task_id}")
 
 
-def test_archive_moves_producer_artifacts_and_rewrites_persisted_result(tmp_path) -> None:
+def test_archive_moves_artifacts_without_rewriting_immutable_task_result(tmp_path) -> None:
     settings = Settings(data_root=str(tmp_path / "data"))
     settings.ensure_layout()
     database = Database(settings.database_path)
@@ -72,8 +72,13 @@ def test_archive_moves_producer_artifacts_and_rewrites_persisted_result(tmp_path
         )
         assert archived_manifest.read_text(encoding="utf-8") == '{"created":true}\n'
         refreshed = tasks.get(produced["id"])
-        assert refreshed["result"]["manifest_path"] == str(archived_manifest)
-        assert Path(refreshed["result"]["manifest_path"]).is_file()
+        assert refreshed["result"]["manifest_path"] == str(source / "manifest.json")
+        artifact = database.fetch_one(
+            "SELECT * FROM artifacts WHERE task_id=?", (produced["id"],)
+        )
+        assert artifact and artifact["path"] == str(source / "manifest.json")
+        assert artifact["archive_path"] == str(archived_manifest)
+        assert artifact["state"] == "archived"
         record = database.fetch_one(
             "SELECT * FROM artifact_archives WHERE task_id=?", (produced["id"],)
         )

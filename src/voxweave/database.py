@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -9,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 MODEL_RECOMMENDATION_DEFAULTS = {
     "pitch": 0,
@@ -47,29 +48,85 @@ def utc_now() -> str:
 
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, pool_size: int = 4):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._journal_configured = False
+        self._pool_size = max(1, pool_size)
+        self._pool: queue.LifoQueue[sqlite3.Connection] = queue.LifoQueue(
+            maxsize=self._pool_size
+        )
+        self._pool_lock = threading.Lock()
+        self._pool_created = 0
+        self._closed = False
         self.migrate()
+
+    def _new_connection(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        return connection
+
+    def _acquire(self) -> sqlite3.Connection:
+        if self._closed:
+            raise RuntimeError("database is closed")
+        try:
+            return self._pool.get_nowait()
+        except queue.Empty:
+            pass
+        with self._pool_lock:
+            if self._closed:
+                raise RuntimeError("database is closed")
+            if self._pool_created < self._pool_size:
+                self._pool_created += 1
+                try:
+                    return self._new_connection()
+                except Exception:
+                    self._pool_created -= 1
+                    raise
+        return self._pool.get()
+
+    def _release(self, connection: sqlite3.Connection) -> None:
+        if self._closed:
+            connection.close()
+            with self._pool_lock:
+                self._pool_created -= 1
+            return
+        self._pool.put(connection)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            connection = sqlite3.connect(self.path, timeout=30)
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA busy_timeout=30000")
-            if not self._journal_configured:
-                connection.execute("PRAGMA journal_mode=WAL")
-                self._journal_configured = True
-            connection.execute("PRAGMA synchronous=NORMAL")
+        connection = self._acquire()
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            self._release(connection)
+
+    def close(self) -> None:
+        with self._pool_lock:
+            if self._closed:
+                return
+            self._closed = True
+        while True:
             try:
-                yield connection
-                connection.commit()
-            finally:
-                connection.close()
+                connection = self._pool.get_nowait()
+            except queue.Empty:
+                break
+            connection.close()
+            with self._pool_lock:
+                self._pool_created -= 1
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def migrate(self) -> None:
         with self.connect() as db:
@@ -111,6 +168,7 @@ class Database:
                     15: self._migrate_to_15,
                     16: self._migrate_to_16,
                     17: self._migrate_to_17,
+                    18: self._migrate_to_18,
                 }
                 while version < SCHEMA_VERSION:
                     target = version + 1
@@ -190,6 +248,7 @@ class Database:
                     request_id TEXT,
                     actor_json TEXT,
                     snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    worker_failures INTEGER NOT NULL DEFAULT 0,
                     retry_of TEXT REFERENCES tasks(id),
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -224,6 +283,7 @@ class Database:
                     last_error TEXT,
                     last_error_at TEXT,
                     state TEXT NOT NULL DEFAULT 'active',
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -330,6 +390,24 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS artifacts_task_index ON artifacts(task_id,state);
+                CREATE TABLE IF NOT EXISTS operation_receipts (
+                    request_id TEXT PRIMARY KEY,
+                    operation TEXT NOT NULL,
+                    arguments_json TEXT NOT NULL,
+                    actor_json TEXT,
+                    state TEXT NOT NULL CHECK(state IN ('running','completed','failed')),
+                    result_json TEXT,
+                    error_type TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS settings_events (
+                    revision INTEGER PRIMARY KEY,
+                    changed_fields_json TEXT NOT NULL,
+                    settings_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
         )
 
@@ -601,6 +679,33 @@ class Database:
         db.execute("DROP INDEX IF EXISTS realtime_sessions_state_index")
 
     @classmethod
+    def _migrate_to_18(cls, db: sqlite3.Connection) -> None:
+        cls._add_column(db, "tasks", "worker_failures INTEGER NOT NULL DEFAULT 0")
+        cls._add_column(db, "batch_rules", "revision INTEGER NOT NULL DEFAULT 1")
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS operation_receipts (
+                request_id TEXT PRIMARY KEY,
+                operation TEXT NOT NULL,
+                arguments_json TEXT NOT NULL,
+                actor_json TEXT,
+                state TEXT NOT NULL CHECK(state IN ('running','completed','failed')),
+                result_json TEXT,
+                error_type TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings_events (
+                revision INTEGER PRIMARY KEY,
+                changed_fields_json TEXT NOT NULL,
+                settings_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+
+    @classmethod
     def _validate_schema(cls, db: sqlite3.Connection) -> None:
         required = {
             "models": {"id", "model_sha256", "status", "archived"},
@@ -611,6 +716,7 @@ class Database:
                 "actor_json",
                 "snapshot_json",
                 "retry_of",
+                "worker_failures",
             },
             "task_events": {"id", "task_id", "state"},
             "batch_rules": {
@@ -620,6 +726,7 @@ class Database:
                 "index_sha256",
                 "state",
                 "watch_enabled",
+                "revision",
             },
             "batch_items": {"id", "source_sha256", "task_id"},
             "batch_runs": {
@@ -631,6 +738,8 @@ class Database:
             },
             "realtime_sessions": {"id", "state", "model_sha256"},
             "artifacts": {"id", "task_id", "path", "state"},
+            "operation_receipts": {"request_id", "operation", "state"},
+            "settings_events": {"revision", "settings_json"},
         }
         for table, columns in required.items():
             actual = cls._columns(db, table)

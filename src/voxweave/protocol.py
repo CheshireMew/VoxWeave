@@ -16,9 +16,24 @@ from pydantic import (
 )
 
 from . import __version__
+from .capabilities import CONTROL_PROTOCOL, CONTROL_PROTOCOL_VERSION
+from .config import SettingsConflictError
+from .parameter_contracts import (
+    BLOCK_SECONDS_SPEC,
+    F0_SPEC,
+    INDEX_RATE_SPEC,
+    INPUT_GATE_DB_SPEC,
+    PITCH_SPEC,
+    PROTECT_SPEC,
+    RMS_MIX_RATE_SPEC,
+    TEST_MODE_SPEC,
+    VAD_THRESHOLD_SPEC,
+    BlockSeconds,
+    F0Method,
+)
 
-PROTOCOL = "voxweave-control"
-PROTOCOL_VERSION = 1
+PROTOCOL = CONTROL_PROTOCOL
+PROTOCOL_VERSION = CONTROL_PROTOCOL_VERSION
 SHA256_PATTERN = r"^[0-9a-fA-F]{64}$"
 MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
 
@@ -32,6 +47,8 @@ class OperationError(RuntimeError):
 
 
 def public_error_code(error: Exception) -> str:
+    if isinstance(error, SettingsConflictError):
+        return "revision_conflict"
     if isinstance(error, OperationError):
         return error.code
     if isinstance(error, ValidationError | ValueError | TypeError):
@@ -86,25 +103,69 @@ class RealtimeSettings(Command):
     hostapi: str = Field(max_length=256)
     input_device: str = Field(max_length=512)
     output_device: str = Field(max_length=512)
-    pitch: int = Field(ge=-36, le=36)
-    f0: Literal["rmvpe", "fcpe", "pm"]
-    index_rate: float = Field(ge=0, le=1)
-    rms_mix_rate: float = Field(ge=0, le=1)
-    vad_threshold: float = Field(ge=0.1, le=0.9)
-    input_gate_db: float = Field(ge=-60, le=-20)
-    block_seconds: Literal[0.25, 0.5, 1.0]
+    pitch: int = Field(ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum)
+    f0: F0Method
+    index_rate: float = Field(ge=INDEX_RATE_SPEC.minimum, le=INDEX_RATE_SPEC.maximum)
+    rms_mix_rate: float = Field(
+        ge=RMS_MIX_RATE_SPEC.minimum, le=RMS_MIX_RATE_SPEC.maximum
+    )
+    vad_threshold: float = Field(
+        ge=VAD_THRESHOLD_SPEC.minimum, le=VAD_THRESHOLD_SPEC.maximum
+    )
+    input_gate_db: float = Field(
+        ge=INPUT_GATE_DB_SPEC.minimum, le=INPUT_GATE_DB_SPEC.maximum
+    )
+    block_seconds: BlockSeconds
     test_mode: bool
 
 
+class RealtimeSettingsPatch(Command):
+    model: str | None = Field(default=None, max_length=256)
+    hostapi: str | None = Field(default=None, max_length=256)
+    input_device: str | None = Field(default=None, max_length=512)
+    output_device: str | None = Field(default=None, max_length=512)
+    pitch: int | None = Field(default=None, ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum)
+    f0: F0Method | None = None
+    index_rate: float | None = Field(
+        default=None, ge=INDEX_RATE_SPEC.minimum, le=INDEX_RATE_SPEC.maximum
+    )
+    rms_mix_rate: float | None = Field(
+        default=None, ge=RMS_MIX_RATE_SPEC.minimum, le=RMS_MIX_RATE_SPEC.maximum
+    )
+    vad_threshold: float | None = Field(
+        default=None, ge=VAD_THRESHOLD_SPEC.minimum, le=VAD_THRESHOLD_SPEC.maximum
+    )
+    input_gate_db: float | None = Field(
+        default=None, ge=INPUT_GATE_DB_SPEC.minimum, le=INPUT_GATE_DB_SPEC.maximum
+    )
+    block_seconds: BlockSeconds | None = None
+    test_mode: bool | None = None
+
+    @model_validator(mode="after")
+    def reject_explicit_nulls(self) -> RealtimeSettingsPatch:
+        null_fields = sorted(
+            name for name in self.model_fields_set if getattr(self, name) is None
+        )
+        if null_fields:
+            raise ValueError(f"realtime settings cannot be null: {null_fields}")
+        return self
+
+
 class SettingsUpdateCommand(Command):
+    expected_revision: int = Field(ge=0)
     language: Literal["zh-CN", "en"] | None = None
-    realtime: RealtimeSettings | None = None
+    realtime: RealtimeSettingsPatch | None = None
 
     @model_validator(mode="after")
     def require_change(self) -> SettingsUpdateCommand:
         if self.language is None and self.realtime is None:
             raise ValueError("at least one setting must be provided")
         return self
+
+
+class SettingsEventsCommand(Command):
+    after_revision: int = Field(default=0, ge=0)
+    limit: int = Field(default=100, ge=1, le=500)
 
 
 class RuntimeInstallCommand(Command):
@@ -130,11 +191,13 @@ class ModelArchiveCommand(Command):
 
 
 class ModelRecommendedParameters(Command):
-    pitch: int = Field(ge=-36, le=36)
-    f0: Literal["rmvpe", "fcpe", "pm"]
-    index_rate: float = Field(ge=0, le=1)
-    rms_mix_rate: float = Field(ge=0, le=1)
-    protect: float = Field(ge=0, le=0.5)
+    pitch: int = Field(ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum)
+    f0: F0Method
+    index_rate: float = Field(ge=INDEX_RATE_SPEC.minimum, le=INDEX_RATE_SPEC.maximum)
+    rms_mix_rate: float = Field(
+        ge=RMS_MIX_RATE_SPEC.minimum, le=RMS_MIX_RATE_SPEC.maximum
+    )
+    protect: float = Field(ge=PROTECT_SPEC.minimum, le=PROTECT_SPEC.maximum)
     content_mode: Literal["clean", "mixed", "singing"]
 
 
@@ -187,11 +250,17 @@ class PresetListCommand(Command):
 
 
 class ConversionParameters(Command):
-    pitch: int | None = Field(default=None, ge=-36, le=36)
-    f0: Literal["rmvpe", "fcpe", "pm"] | None = None
-    index_rate: float | None = Field(default=None, ge=0, le=1)
-    rms_mix_rate: float | None = Field(default=None, ge=0, le=1)
-    protect: float | None = Field(default=None, ge=0, le=0.5)
+    pitch: int | None = Field(default=None, ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum)
+    f0: F0Method | None = None
+    index_rate: float | None = Field(
+        default=None, ge=INDEX_RATE_SPEC.minimum, le=INDEX_RATE_SPEC.maximum
+    )
+    rms_mix_rate: float | None = Field(
+        default=None, ge=RMS_MIX_RATE_SPEC.minimum, le=RMS_MIX_RATE_SPEC.maximum
+    )
+    protect: float | None = Field(
+        default=None, ge=PROTECT_SPEC.minimum, le=PROTECT_SPEC.maximum
+    )
     content_mode: Literal["clean", "mixed", "singing"] | None = None
 
 
@@ -215,14 +284,32 @@ class RealtimeStartCommand(Command):
     model: NonEmpty
     input_device: int = Field(ge=0)
     output_device: int = Field(ge=0)
-    pitch: int = Field(default=0, ge=-36, le=36)
-    f0: Literal["rmvpe", "fcpe", "pm"] = "rmvpe"
-    index_rate: float = Field(default=0.72, ge=0, le=1)
-    rms_mix_rate: float = Field(default=0.25, ge=0, le=1)
-    vad_threshold: float = Field(default=0.55, ge=0.1, le=0.9)
-    input_gate_db: float = Field(default=-40.0, ge=-60, le=-20)
-    block_seconds: Literal[0.25, 0.5, 1.0] = 0.5
-    test_mode: bool = False
+    pitch: int = Field(
+        default=PITCH_SPEC.default, ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum
+    )
+    f0: F0Method = F0_SPEC.default
+    index_rate: float = Field(
+        default=INDEX_RATE_SPEC.default,
+        ge=INDEX_RATE_SPEC.minimum,
+        le=INDEX_RATE_SPEC.maximum,
+    )
+    rms_mix_rate: float = Field(
+        default=RMS_MIX_RATE_SPEC.default,
+        ge=RMS_MIX_RATE_SPEC.minimum,
+        le=RMS_MIX_RATE_SPEC.maximum,
+    )
+    vad_threshold: float = Field(
+        default=VAD_THRESHOLD_SPEC.default,
+        ge=VAD_THRESHOLD_SPEC.minimum,
+        le=VAD_THRESHOLD_SPEC.maximum,
+    )
+    input_gate_db: float = Field(
+        default=INPUT_GATE_DB_SPEC.default,
+        ge=INPUT_GATE_DB_SPEC.minimum,
+        le=INPUT_GATE_DB_SPEC.maximum,
+    )
+    block_seconds: BlockSeconds = BLOCK_SECONDS_SPEC.default
+    test_mode: bool = TEST_MODE_SPEC.default
 
 
 class RealtimeAudioTestCommand(Command):
@@ -253,11 +340,17 @@ class ConversionRunCommand(Command):
     input_sha256: Sha256 | None = None
     output: AbsolutePath
     model: NonEmpty
-    pitch: int | None = Field(default=None, ge=-36, le=36)
-    f0: Literal["rmvpe", "fcpe", "pm"] | None = None
-    index_rate: float | None = Field(default=None, ge=0, le=1)
-    rms_mix_rate: float | None = Field(default=None, ge=0, le=1)
-    protect: float | None = Field(default=None, ge=0, le=0.5)
+    pitch: int | None = Field(default=None, ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum)
+    f0: F0Method | None = None
+    index_rate: float | None = Field(
+        default=None, ge=INDEX_RATE_SPEC.minimum, le=INDEX_RATE_SPEC.maximum
+    )
+    rms_mix_rate: float | None = Field(
+        default=None, ge=RMS_MIX_RATE_SPEC.minimum, le=RMS_MIX_RATE_SPEC.maximum
+    )
+    protect: float | None = Field(
+        default=None, ge=PROTECT_SPEC.minimum, le=PROTECT_SPEC.maximum
+    )
     content_mode: Literal["clean", "mixed", "singing"] = "clean"
     selected_speakers: list[NonEmpty] = Field(default_factory=list)
     analysis_manifest: AbsolutePath | None = None
@@ -336,15 +429,76 @@ class TaskEventsCommand(Command):
 
 
 class ResultModel(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
 
-class JsonObject(RootModel[dict[str, Any]]):
-    pass
+class SettingsPayload(ResultModel):
+    data_root: str
+    revision: int
+    rvc_root: str | None
+    rvc_python: str | None
+    ffmpeg: str | None
+    ffprobe: str | None
+    language: Literal["zh-CN", "en"]
+    hardware_backend: str
+    separation_backend: str
+    separation_model_id: str
+    wespeaker_model: str | None
+    weight_roots: list[str]
+    index_roots: list[str]
+    catalog_urls: list[str]
+    realtime: RealtimeSettings
+    telemetry_enabled: bool
 
 
-class ObjectList(RootModel[list[dict[str, Any]]]):
-    pass
+class SettingsUpdateResult(ResultModel):
+    revision: int
+    changed_fields: list[str]
+    settings: SettingsPayload
+
+
+class SettingsEvent(ResultModel):
+    revision: int
+    changed_fields: list[str]
+    settings: SettingsPayload
+    created_at: str
+
+
+class SettingsEventPage(ResultModel):
+    events: list[SettingsEvent]
+    current_revision: int
+
+
+class RuntimeReport(ResultModel):
+    platform: str
+    python: str
+    data_root: str
+    rvc_root: str | None
+    rvc_python: str | None
+    ffmpeg: str | None
+    ffprobe: str | None
+    hardware_backend: str
+    ready: bool
+    rvc_revision: str | None
+    doctor: dict[str, Any] | None
+    components: dict[str, dict[str, Any]]
+    pinned_rvc_revision: str
+    pinned_asset_revision: str
+    rvc_revision_matches_pin: bool
+    error: str | None = None
+
+
+class DiagnosticsReport(ResultModel):
+    protocol: Literal["voxweave-diagnostics"]
+    version: Literal[1]
+    settings: SettingsPayload
+    runtime: RuntimeReport
+    models: list[dict[str, Any]]
+    realtime: dict[str, Any]
+    tasks: list[dict[str, Any]]
+    events: list[dict[str, Any]]
+    storage: dict[str, dict[str, int]]
+    logs: list[dict[str, Any]]
 
 
 class TaskRecord(ResultModel):
@@ -353,12 +507,57 @@ class TaskRecord(ResultModel):
     operation: str
     state: str
     progress: float
+    stage: str | None
+    arguments: dict[str, Any]
+    result: Any
+    error_type: str | None
+    error: str | None
+    cancel_requested: bool
+    request_id: str | None
+    actor: dict[str, Any] | None
+    snapshot: dict[str, Any]
+    worker_failures: int
+    retry_of: str | None
     created_at: str
     updated_at: str
 
 
+class TaskSummary(ResultModel):
+    id: str
+    task_id: str
+    operation: str
+    state: str
+    progress: float
+    stage: str | None
+    error_type: str | None
+    error: str | None
+    cancel_requested: bool
+    request_id: str | None
+    worker_failures: int
+    retry_of: str | None
+    created_at: str
+    updated_at: str
+
+
+class ArtifactRecord(ResultModel):
+    id: str
+    task_id: str
+    kind: str
+    path: str
+    sha256: str
+    size_bytes: int
+    state: Literal["active", "archived", "missing"]
+    archive_path: str | None
+    created_at: str
+    updated_at: str
+
+
+class TaskDetail(TaskRecord):
+    artifacts: list[ArtifactRecord]
+
+
 class TaskPage(ResultModel):
-    items: list[TaskRecord]
+    items: list[TaskSummary]
     next_cursor: str | None
     event_cursor: int = 0
 
@@ -366,10 +565,74 @@ class TaskPage(ResultModel):
 class ModelRecord(ResultModel):
     id: str
     display_name: str
+    aliases: list[str]
+    family: str
+    checkpoint_epoch: int | None
+    model_path: str
+    model_sha256: str
+    index_path: str | None
+    index_sha256: str | None
+    index_candidates: list[str]
+    rvc_version: str | None
+    sample_rate: int | None
+    f0: bool | None
+    source_kind: str
+    license_spdx: str | None
+    source_url: str | None
+    recommended: ModelRecommendedParameters
     status: str
+    archived: bool
+    imported_at: str
+    protocol: Literal["voxweave-rvc-model"]
+    version: Literal[1]
 
 
 class ModelList(RootModel[list[ModelRecord]]):
+    pass
+
+
+class CatalogModelRecord(ResultModel):
+    id: str
+    display_name: str
+    gender: str
+    recommended: ModelRecommendedParameters
+    aliases: list[str]
+    license_spdx: str
+    source_url: str
+    model_url: str
+    model_size_bytes: int
+    model_sha256: str
+    index_url: str | None = None
+    index_size_bytes: int | None = None
+    index_sha256: str | None = None
+    installed: bool
+    registered: bool
+    available: bool
+    archived: bool
+    status: str
+    repairable: bool
+    starter: bool
+    download_size_bytes: int
+
+
+class CatalogModelList(RootModel[list[CatalogModelRecord]]):
+    pass
+
+
+class PresetRecord(ResultModel):
+    id: str
+    model_id: str
+    name: str
+    model_sha256: str
+    parameters: ConversionParameters
+    created_at: str
+
+
+class PresetListRecord(PresetRecord):
+    needs_reconfirmation: bool
+
+
+class PresetList(RootModel[list[PresetListRecord]]):
     pass
 
 
@@ -378,64 +641,252 @@ class BatchRecord(ResultModel):
     input_root: str
     output_root: str
     model_id: str
+    model_sha256: str | None
+    index_sha256: str | None
+    preset: dict[str, Any]
+    preset_name: str
+    recursive: bool
+    watch_enabled: bool
+    extensions: list[str]
+    last_error: str | None
+    last_error_at: str | None
     state: str
+    revision: int
+    created_at: str
+    updated_at: str
+
+
+class BatchSummary(BatchRecord):
+    item_counts: dict[str, int]
 
 
 class BatchPage(ResultModel):
-    items: list[BatchRecord]
+    items: list[BatchSummary]
     next_cursor: str | None
 
 
+class TaskEventRecord(ResultModel):
+    id: int
+    task_id: str
+    state: str
+    progress: float
+    stage: str | None
+    detail: str | None
+    created_at: str
+
+
 class EventList(ResultModel):
-    events: list[dict[str, Any]]
+    events: list[TaskEventRecord]
+
+
+class MediaRecord(ResultModel):
+    path: str
+    sha256: str
+    size_bytes: int
+    media_type: Literal["audio", "video"]
+    duration_seconds: float
+    format_name: str | None
+    audio_streams: list[dict[str, Any]]
+    video_streams: list[dict[str, Any]]
+    subtitle_streams: list[dict[str, Any]]
+
+
+class ValidatedMediaRecord(MediaRecord):
+    full_decode: Literal["passed"] | None = None
+    audio_quality: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MediaAnalysisResult(ResultModel):
+    input: MediaRecord
+    content_mode: Literal["clean", "mixed", "singing"]
+    vocal_audio: str
+    instrumental_audio: str | None
+    separation: dict[str, Any] | None
+    speaker_samples: list[dict[str, Any]]
+    speaker_count: int
+    segments: list[dict[str, Any]]
+    manifest_path: str
+    note: str | None = None
+
+
+class ConversionPreviewResult(ResultModel):
+    model: ModelRecord
+    source: str
+    content_mode: Literal["clean", "mixed", "singing"]
+    separation: dict[str, Any] | None
+    outputs: list[dict[str, Any]]
+
+
+class ConversionResult(ResultModel):
+    protocol: Literal["voxweave-conversion-result"]
+    version: Literal[1]
+    input: MediaRecord
+    output: ValidatedMediaRecord
+    model: dict[str, Any]
+    parameters: ConversionParameters
+    selected_speakers: list[str]
+    separation: dict[str, Any] | None
+    loudness_match: dict[str, Any]
+    segments: list[dict[str, Any]]
+    manifest_path: str
+
+
+class AudioHostRecord(ResultModel):
+    id: int
+    name: str
+    default_input_device: int
+    default_output_device: int
+
+
+class AudioDeviceRecord(ResultModel):
+    id: int
+    name: str
+    hostapi_id: int
+    hostapi: str
+    input_channels: int
+    output_channels: int
+    default_sample_rate: int
+    default_input: bool
+    default_output: bool
+
+
+class AudioDevicesResult(ResultModel):
+    hostapis: list[AudioHostRecord]
+    devices: list[AudioDeviceRecord]
+    default_input_device: int
+    default_output_device: int
+
+
+class AudioTestResult(ResultModel):
+    ok: Literal[True]
+    command: Literal["audio-test"]
+    mode: Literal["input", "output"]
+    device: int
+    sample_rate: int
+    peak: float | None = None
+    rms: float | None = None
+
+
+class RealtimeWorkerStatus(ResultModel):
+    state: str
+    pid: int | None
+    model_id: str | None
+    model_ready: bool
+
+
+class RealtimeStatusResult(ResultModel):
+    session_id: str | None
+    state: str
+    stage: str | None
+    metrics: dict[str, Any]
+    worker: RealtimeWorkerStatus
+    id: str | None = None
+    model_id: str | None = None
+    model_sha256: str | None = None
+    index_sha256: str | None = None
+    arguments: dict[str, Any] | None = None
+    error_type: str | None = None
+    error: str | None = None
+    started_at: str | None = None
+    stopped_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class BatchExecutionResult(ResultModel):
+    batch: BatchRecord | None = None
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
+    failures: list[dict[str, Any]] = Field(default_factory=list)
+    batch_id: str | None = None
+    retried: int | None = None
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    item_count: int | None = None
+    counts: dict[str, int] = Field(default_factory=dict)
+    submission_failures: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StorageArchiveResult(ResultModel):
+    destination_root: str
+    candidate_count: int
+    archived_count: int
+    archives: list[dict[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
 class OperationSpec:
     command: type[Command]
+    result: type[BaseModel]
     long_running: bool = False
-    result: type[BaseModel] = JsonObject
+    mutating: bool = False
 
 
 OPERATION_SPECS: dict[str, OperationSpec] = {
-    "diagnostics.snapshot": OperationSpec(EmptyCommand, True),
-    "settings.update": OperationSpec(SettingsUpdateCommand),
-    "runtime.inspect": OperationSpec(EmptyCommand, True),
-    "runtime.install": OperationSpec(RuntimeInstallCommand, True),
-    "model.scan": OperationSpec(ModelScanCommand, True, ModelList),
-    "model.list": OperationSpec(EmptyCommand, result=ModelList),
-    "model.catalog.list": OperationSpec(EmptyCommand, result=ObjectList),
-    "model.resolve": OperationSpec(ModelResolveCommand, result=ModelRecord),
-    "model.archive": OperationSpec(ModelArchiveCommand, result=ModelRecord),
-    "model.import": OperationSpec(ModelImportCommand, True, ModelRecord),
-    "model.catalog.install": OperationSpec(ModelCatalogInstallCommand, True, ModelRecord),
-    "preset.list": OperationSpec(PresetListCommand, result=ObjectList),
-    "preset.save": OperationSpec(PresetSaveCommand),
-    "media.inspect": OperationSpec(MediaInspectCommand, True),
-    "media.analyze": OperationSpec(MediaAnalyzeCommand, True),
-    "realtime.devices": OperationSpec(EmptyCommand),
-    "realtime.audio_test": OperationSpec(RealtimeAudioTestCommand),
-    "realtime.prepare": OperationSpec(RealtimeStartCommand),
-    "realtime.start": OperationSpec(RealtimeStartCommand),
-    "realtime.status": OperationSpec(EmptyCommand),
-    "realtime.stop": OperationSpec(EmptyCommand),
-    "realtime.release": OperationSpec(EmptyCommand),
-    "conversion.preview": OperationSpec(ConversionPreviewCommand, True),
-    "conversion.run": OperationSpec(ConversionRunCommand, True),
-    "batch.create": OperationSpec(BatchCreateCommand, result=BatchRecord),
-    "batch.update": OperationSpec(BatchUpdateCommand, result=BatchRecord),
-    "batch.archive": OperationSpec(BatchArchiveCommand, result=BatchRecord),
-    "batch.get": OperationSpec(BatchIdCommand, result=BatchRecord),
-    "batch.list": OperationSpec(BatchListCommand, result=BatchPage),
-    "batch.run": OperationSpec(BatchIdCommand, True),
-    "batch.retry": OperationSpec(BatchIdCommand, True),
-    "batch.watch": OperationSpec(BatchWatchCommand, result=BatchRecord),
-    "storage.archive": OperationSpec(StorageArchiveCommand, True),
-    "task.list": OperationSpec(TaskListCommand, result=TaskPage),
-    "task.events": OperationSpec(TaskEventsCommand, result=EventList),
-    "task.get": OperationSpec(TaskIdCommand, result=TaskRecord),
-    "task.cancel": OperationSpec(TaskIdCommand, result=TaskRecord),
-    "task.retry": OperationSpec(TaskIdCommand, result=TaskRecord),
+    "diagnostics.snapshot": OperationSpec(
+        EmptyCommand, DiagnosticsReport, long_running=True
+    ),
+    "settings.get": OperationSpec(EmptyCommand, SettingsPayload),
+    "settings.update": OperationSpec(
+        SettingsUpdateCommand, SettingsUpdateResult, mutating=True
+    ),
+    "settings.events": OperationSpec(SettingsEventsCommand, SettingsEventPage),
+    "runtime.inspect": OperationSpec(EmptyCommand, RuntimeReport, long_running=True),
+    "runtime.install": OperationSpec(
+        RuntimeInstallCommand, RuntimeReport, long_running=True
+    ),
+    "model.scan": OperationSpec(ModelScanCommand, ModelList, long_running=True),
+    "model.list": OperationSpec(EmptyCommand, ModelList),
+    "model.catalog.list": OperationSpec(EmptyCommand, CatalogModelList),
+    "model.resolve": OperationSpec(ModelResolveCommand, ModelRecord),
+    "model.archive": OperationSpec(ModelArchiveCommand, ModelRecord, mutating=True),
+    "model.import": OperationSpec(ModelImportCommand, ModelRecord, long_running=True),
+    "model.catalog.install": OperationSpec(
+        ModelCatalogInstallCommand, ModelRecord, long_running=True
+    ),
+    "preset.list": OperationSpec(PresetListCommand, PresetList),
+    "preset.save": OperationSpec(PresetSaveCommand, PresetRecord, mutating=True),
+    "media.inspect": OperationSpec(MediaInspectCommand, MediaRecord, long_running=True),
+    "media.analyze": OperationSpec(
+        MediaAnalyzeCommand, MediaAnalysisResult, long_running=True
+    ),
+    "realtime.devices": OperationSpec(EmptyCommand, AudioDevicesResult),
+    "realtime.audio_test": OperationSpec(
+        RealtimeAudioTestCommand, AudioTestResult, mutating=True
+    ),
+    "realtime.prepare": OperationSpec(
+        RealtimeStartCommand, RealtimeStatusResult, mutating=True
+    ),
+    "realtime.start": OperationSpec(
+        RealtimeStartCommand, RealtimeStatusResult, mutating=True
+    ),
+    "realtime.status": OperationSpec(EmptyCommand, RealtimeStatusResult),
+    "realtime.stop": OperationSpec(
+        EmptyCommand, RealtimeStatusResult, mutating=True
+    ),
+    "realtime.release": OperationSpec(
+        EmptyCommand, RealtimeStatusResult, mutating=True
+    ),
+    "conversion.preview": OperationSpec(
+        ConversionPreviewCommand, ConversionPreviewResult, long_running=True
+    ),
+    "conversion.run": OperationSpec(
+        ConversionRunCommand, ConversionResult, long_running=True
+    ),
+    "batch.create": OperationSpec(BatchCreateCommand, BatchRecord, mutating=True),
+    "batch.update": OperationSpec(BatchUpdateCommand, BatchRecord, mutating=True),
+    "batch.archive": OperationSpec(BatchArchiveCommand, BatchRecord, mutating=True),
+    "batch.get": OperationSpec(BatchIdCommand, BatchRecord),
+    "batch.list": OperationSpec(BatchListCommand, BatchPage),
+    "batch.run": OperationSpec(BatchIdCommand, BatchExecutionResult, long_running=True),
+    "batch.retry": OperationSpec(BatchIdCommand, BatchExecutionResult, long_running=True),
+    "batch.watch": OperationSpec(BatchWatchCommand, BatchRecord, mutating=True),
+    "storage.archive": OperationSpec(
+        StorageArchiveCommand, StorageArchiveResult, long_running=True
+    ),
+    "task.list": OperationSpec(TaskListCommand, TaskPage),
+    "task.events": OperationSpec(TaskEventsCommand, EventList),
+    "task.get": OperationSpec(TaskIdCommand, TaskDetail),
+    "task.cancel": OperationSpec(TaskIdCommand, TaskRecord, mutating=True),
+    "task.retry": OperationSpec(TaskIdCommand, TaskRecord, mutating=True),
 }
 
 
@@ -452,7 +903,9 @@ def validate_completion_result(operation: str, result: Any) -> Any:
     if spec is None:
         return result
     try:
-        return spec.result.model_validate(result).model_dump(mode="json")
+        return spec.result.model_validate(result).model_dump(
+            mode="json", exclude_unset=True
+        )
     except ValidationError as exc:
         raise OperationError(
             "invalid_result", f"{operation} produced a result that violates its contract"
@@ -463,7 +916,7 @@ def validate_execute_result(operation: str, result: Any) -> Any:
     spec = OPERATION_SPECS[operation]
     if spec.long_running:
         try:
-            return TaskRecord.model_validate(result).model_dump(mode="json")
+            return TaskRecord.model_validate(result).model_dump(mode="json", exclude_unset=True)
         except ValidationError as exc:
             raise OperationError(
                 "invalid_result",
@@ -477,6 +930,8 @@ def describe() -> dict[str, Any]:
     for name, spec in OPERATION_SPECS.items():
         operations[name] = {
             "long_running": spec.long_running,
+            "mutating": spec.mutating or spec.long_running,
+            "request_id_required": spec.mutating or spec.long_running,
             "arguments_schema": spec.command.model_json_schema(),
             "result_schema": spec.result.model_json_schema(),
         }

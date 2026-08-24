@@ -9,6 +9,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from .runtime_contract import runtime_contract
+except ImportError:  # Direct worker script execution.
+    from runtime_contract import runtime_contract
+
 
 def emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
@@ -22,11 +27,14 @@ def configure(rvc_root: Path, model_root: Path | None = None) -> None:
     ]
     sys.path.insert(0, str(rvc_root))
     assets = rvc_root / "assets"
+    contract = runtime_contract()
     os.environ["weight_root"] = str(model_root or assets / "weights")
-    os.environ.setdefault("weight_pymss_root", str(assets / "pymss_weights"))
+    separation_directory = Path(contract.source_separation.model_file).parent
+    rmvpe_directory = Path(contract.runtime_assets.rmvpe_file).parent
+    os.environ.setdefault("weight_pymss_root", str(assets / separation_directory))
     os.environ.setdefault("index_root", str(rvc_root / "logs"))
     os.environ.setdefault("outside_index_root", str(assets / "indices"))
-    os.environ.setdefault("rmvpe_root", str(assets / "rmvpe"))
+    os.environ.setdefault("rmvpe_root", str(assets / rmvpe_directory))
     os.environ.setdefault("RVC_CUDA_GRAPH", "0")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
@@ -37,11 +45,11 @@ def doctor(arguments: argparse.Namespace) -> int:
     configure(root)
     import torch  # noqa: PLC0415
 
+    asset_contract = runtime_contract().runtime_assets
     required = [
         root / "configs" / "config.py",
         root / "infer" / "vc" / "modules.py",
-        root / "assets" / "hubert_base" / "pytorch_model.bin",
-        root / "assets" / "rmvpe" / "rmvpe.pt",
+        *(root / "assets" / relative for relative in asset_contract.required_files),
     ]
     payload = {
         "ok": all(path.is_file() for path in required),

@@ -4,12 +4,14 @@ import json
 import re
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .capabilities import MODEL_PROTOCOL, MODEL_PROTOCOL_VERSION
 from .database import Database
-from .hashing import sha256_file
+from .hashing import VerifiedFile, sha256_file, verify_file
 from .model_files import family_and_epoch
 from .model_repository import ModelRepository
 from .protocol import ModelRecommendedParameters, OperationError
@@ -60,6 +62,26 @@ class ModelConflictError(RuntimeError):
     pass
 
 
+_VERIFIED_SNAPSHOT = "__verified_snapshot__"
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedModelSnapshot:
+    model: VerifiedFile
+    index: VerifiedFile | None
+
+    def assert_unchanged(self, record: dict[str, Any]) -> None:
+        try:
+            self.model.assert_unchanged(Path(record["model_path"]))
+            if self.index is not None:
+                self.index.assert_unchanged(Path(str(record["index_path"])))
+        except OSError as exc:
+            raise OperationError(
+                "model_changed",
+                f"model files changed after verification: {record['id']}",
+            ) from exc
+
+
 def slugify(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", normalized).strip("-").lower()
@@ -93,6 +115,9 @@ class ModelRegistry:
         license_spdx: str | None = None,
         source_url: str | None = None,
         recommended: dict[str, Any] | None = None,
+        verified_model: VerifiedFile | None = None,
+        verified_index: VerifiedFile | None = None,
+        allow_catalog_update: bool = False,
     ) -> dict[str, Any]:
         model = model.expanduser().resolve()
         if model.suffix.casefold() != ".pth" or not model.is_file():
@@ -117,9 +142,21 @@ class ModelRegistry:
                 raise ModelConflictError(
                     f"name or alias is already owned by {owners[value.casefold()]}: {value}"
                 )
-        model_hash = sha256_file(model)
+        model_hash = (
+            verified_model.assert_unchanged(model).sha256
+            if verified_model is not None
+            else sha256_file(model)
+        )
         previous = self.repository.get(model_id)
-        if previous and previous["model_sha256"] != model_hash:
+        if (
+            previous
+            and previous["model_sha256"] != model_hash
+            and not (
+                allow_catalog_update
+                and source_kind == "catalog"
+                and previous.get("source_kind") == "catalog"
+            )
+        ):
             raise ModelConflictError(f"model id {model_id} already exists with another hash")
         candidates = candidates or ([] if index else [])
         status = inspection.get("status", "invalid")
@@ -145,7 +182,13 @@ class ModelRegistry:
                 str(model),
                 model_hash,
                 str(index) if index else None,
-                sha256_file(index) if index else None,
+                (
+                    verified_index.assert_unchanged(index).sha256
+                    if index and verified_index is not None
+                    else sha256_file(index)
+                    if index
+                    else None
+                ),
                 json.dumps([str(path) for path in candidates], ensure_ascii=False),
                 inspection.get("version"),
                 inspection.get("sample_rate"),
@@ -167,15 +210,58 @@ class ModelRegistry:
             model = Database.decode_json_row(
                 row, ("aliases_json", "index_candidates_json", "recommended_json")
             )
-            model["protocol"] = "voxweave-rvc-model"
-            model["version"] = 1
+            model["protocol"] = MODEL_PROTOCOL
+            model["version"] = MODEL_PROTOCOL_VERSION
             model["f0"] = bool(model["f0"]) if model["f0"] is not None else None
             model["archived"] = bool(model.get("archived"))
+            model_path = Path(str(model["model_path"]))
+            index_path = Path(str(model["index_path"])) if model.get("index_path") else None
+            if not model_path.is_file():
+                model["status"] = "missing"
+            elif index_path is not None and not index_path.is_file():
+                model["status"] = "index_missing"
             results.append(model)
         return results
 
     def is_registered(self, model_id: str) -> bool:
         return self.repository.get(model_id) is not None
+
+    def catalog_state(self, entry: dict[str, Any]) -> dict[str, Any]:
+        model_id = str(entry["id"])
+        record = self.repository.get(model_id)
+        if record is None:
+            return {
+                "registered": False,
+                "installed": False,
+                "available": False,
+                "archived": False,
+                "status": "not_installed",
+                "repairable": False,
+            }
+        model_exists = Path(str(record["model_path"])).is_file()
+        index_required = bool(entry.get("index_url"))
+        index_exists = bool(record.get("index_path")) and Path(
+            str(record["index_path"])
+        ).is_file()
+        installed = model_exists and (not index_required or index_exists)
+        archived = bool(record.get("archived"))
+        stored_status = str(record.get("status") or "invalid")
+        status = (
+            "missing"
+            if not model_exists
+            else "index_missing"
+            if index_required and not index_exists
+            else stored_status
+        )
+        catalog_owned = str(record.get("source_kind") or "") == "catalog"
+        return {
+            "registered": True,
+            "installed": installed,
+            "available": installed and status == "ready" and not archived,
+            "archived": archived,
+            "status": status,
+            "repairable": catalog_owned,
+        }
 
     def mark_catalog(self, model_id: str) -> None:
         self.repository.mark_catalog(model_id)
@@ -187,33 +273,49 @@ class ModelRegistry:
         return self.resolve(model_id)
 
     @staticmethod
-    def verify_snapshot(model: dict[str, Any]) -> None:
+    def verify_snapshot(model: dict[str, Any]) -> VerifiedModelSnapshot:
+        existing = model.get(_VERIFIED_SNAPSHOT)
+        if isinstance(existing, VerifiedModelSnapshot):
+            existing.assert_unchanged(model)
+            return existing
         model_path = Path(model["model_path"])
         if not model_path.is_file():
             raise OperationError("model_missing", f"model file no longer exists: {model_path}")
-        actual_model_hash = sha256_file(model_path)
-        if actual_model_hash.casefold() != str(model["model_sha256"]).casefold():
+        try:
+            verified_model = verify_file(
+                model_path, expected_sha256=str(model["model_sha256"])
+            )
+        except ValueError as exc:
             raise OperationError(
                 "model_changed",
                 f"model file changed after registration: {model['id']}",
-            )
+            ) from exc
         index_path_value = model.get("index_path")
         expected_index_hash = model.get("index_sha256")
+        verified_index = None
         if index_path_value:
             index_path = Path(index_path_value)
             if not index_path.is_file():
                 raise OperationError(
                     "model_index_missing", f"model index no longer exists: {index_path}"
                 )
-            actual_index_hash = sha256_file(index_path)
-            if (
-                not expected_index_hash
-                or actual_index_hash.casefold() != str(expected_index_hash).casefold()
-            ):
+            if not expected_index_hash:
                 raise OperationError(
                     "model_index_changed",
                     f"model index changed after registration: {model['id']}",
                 )
+            try:
+                verified_index = verify_file(
+                    index_path, expected_sha256=str(expected_index_hash)
+                )
+            except ValueError as exc:
+                raise OperationError(
+                    "model_index_changed",
+                    f"model index changed after registration: {model['id']}",
+                ) from exc
+        snapshot = VerifiedModelSnapshot(verified_model, verified_index)
+        model[_VERIFIED_SNAPSHOT] = snapshot
+        return snapshot
 
     def resolve_for_execution(self, selector: str) -> dict[str, Any]:
         model = self.resolve(selector)

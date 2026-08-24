@@ -8,6 +8,7 @@ from .config import Settings
 from .model_files import candidate_indices, scan_roots
 from .model_inspector import ModelInspector
 from .model_registry import ModelRegistry
+from .settings_service import SettingsService
 
 
 class ModelScanner:
@@ -16,10 +17,12 @@ class ModelScanner:
         settings: Settings,
         registry: ModelRegistry,
         inspector: ModelInspector,
+        settings_service: SettingsService,
     ) -> None:
         self.settings = settings
         self.registry = registry
         self.inspector = inspector
+        self.settings_service = settings_service
 
     def execute(
         self,
@@ -42,7 +45,10 @@ class ModelScanner:
             for value in arguments.get("index_roots") or []:
                 if value not in index_roots:
                     index_roots.append(value)
-            self.settings.update(weight_roots=weight_roots, index_roots=index_roots)
+            self.settings_service.replace(
+                weight_roots=weight_roots,
+                index_roots=index_roots,
+            )
         return result
 
     def scan(

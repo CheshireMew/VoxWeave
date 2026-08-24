@@ -1,8 +1,72 @@
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 from pathlib import Path
+from typing import Any
+
+
+def cluster_average_linkage(
+    np: Any,
+    embeddings: list[Any | None],
+    anchors: list[int],
+    threshold: float,
+) -> tuple[list[list[int]], int]:
+    """Cluster normalized embeddings with exact average linkage in O(n² log n)."""
+
+    active: dict[int, tuple[list[int], Any, int]] = {
+        cluster_id: ([anchor], embeddings[anchor].copy(), 1)
+        for cluster_id, anchor in enumerate(anchors)
+    }
+    candidates: list[tuple[float, tuple[int, ...], tuple[int, ...], int, int]] = []
+    pair_evaluations = 0
+
+    def add_candidate(left_id: int, right_id: int) -> None:
+        nonlocal pair_evaluations
+        left_members, left_sum, left_size = active[left_id]
+        right_members, right_sum, right_size = active[right_id]
+        similarity = float(np.dot(left_sum, right_sum)) / (left_size * right_size)
+        pair_evaluations += 1
+        heapq.heappush(
+            candidates,
+            (
+                -similarity,
+                tuple(left_members),
+                tuple(right_members),
+                left_id,
+                right_id,
+            ),
+        )
+
+    cluster_ids = list(active)
+    for left in range(len(cluster_ids)):
+        for right in range(left + 1, len(cluster_ids)):
+            add_candidate(cluster_ids[left], cluster_ids[right])
+
+    next_id = len(active)
+    while candidates and len(active) > 1:
+        negative_score, _left_members, _right_members, left_id, right_id = heapq.heappop(
+            candidates
+        )
+        if left_id not in active or right_id not in active:
+            continue
+        if -negative_score < threshold:
+            break
+        left_members, left_sum, left_size = active.pop(left_id)
+        right_members, right_sum, right_size = active.pop(right_id)
+        merged_id = next_id
+        next_id += 1
+        active[merged_id] = (
+            sorted([*left_members, *right_members]),
+            left_sum + right_sum,
+            left_size + right_size,
+        )
+        for other_id in list(active):
+            if other_id != merged_id:
+                add_candidate(min(other_id, merged_id), max(other_id, merged_id))
+
+    return sorted((value[0] for value in active.values()), key=min), pair_evaluations
 
 
 def main() -> int:
@@ -69,27 +133,9 @@ def main() -> int:
     ]
     if not anchors:
         anchors = valid
-    clusters = [[index] for index in anchors]
-    while len(clusters) > 1:
-        best_pair: tuple[int, int] | None = None
-        best_score = -1.0
-        for left in range(len(clusters)):
-            for right in range(left + 1, len(clusters)):
-                scores = [
-                    float(np.dot(embeddings[a], embeddings[b]))
-                    for a in clusters[left]
-                    for b in clusters[right]
-                ]
-                score = float(np.mean(scores))
-                if score > best_score:
-                    best_score = score
-                    best_pair = (left, right)
-        if best_pair is None or best_score < args.threshold:
-            break
-        left, right = best_pair
-        clusters[left] = sorted([*clusters[left], *clusters[right]])
-        del clusters[right]
-    clusters.sort(key=min)
+    clusters, pair_evaluations = cluster_average_linkage(
+        np, embeddings, anchors, args.threshold
+    )
     centroids = []
     for cluster in clusters:
         centroid = np.mean([embeddings[index] for index in cluster], axis=0)
@@ -137,6 +183,7 @@ def main() -> int:
                     "method": "global-average-linkage",
                     "merge_threshold": args.threshold,
                     "ambiguity_margin": args.ambiguity_margin,
+                    "pair_evaluations": pair_evaluations,
                 },
                 "segments": segments,
             },

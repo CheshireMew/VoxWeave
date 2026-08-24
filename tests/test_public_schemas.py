@@ -8,9 +8,10 @@ from urllib.parse import quote
 import pytest
 from jsonschema import Draft202012Validator
 
-from voxweave.config import Settings, load_settings
+from voxweave.config import Settings
 from voxweave.database import Database
 from voxweave.model_registry import ModelRegistry
+from voxweave.settings_file_store import load_settings
 
 ROOT = Path(__file__).parents[1]
 

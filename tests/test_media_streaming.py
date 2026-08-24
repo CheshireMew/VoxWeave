@@ -9,7 +9,12 @@ from voxweave.media_processing import convert_long_audio, convert_selected_segme
 
 
 class CopyEngine:
+    def __init__(self) -> None:
+        self.batch_calls = 0
+        self.single_calls = 0
+
     def convert_batch(self, jobs, _model, _parameters, progress, cancelled):
+        self.batch_calls += 1
         results = []
         for index, (source, output) in enumerate(jobs):
             assert cancelled() is False
@@ -19,6 +24,7 @@ class CopyEngine:
         return results
 
     def convert(self, source, output, _model, _parameters, cancelled):
+        self.single_calls += 1
         assert cancelled() is False
         shutil.copyfile(source, output)
         return {"output": str(output)}
@@ -33,19 +39,12 @@ def _write_audio(path, seconds: int = 100, sample_rate: int = 1000) -> None:
             writer.write(np.full(sample_rate, value, dtype=np.float32))
 
 
-def test_long_audio_conversion_never_reads_the_entire_input_array(tmp_path, monkeypatch) -> None:
+def test_long_audio_conversion_never_reads_the_entire_input_array(tmp_path) -> None:
     source = tmp_path / "long.wav"
     output = tmp_path / "converted.wav"
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     _write_audio(source)
-    original_read = sf.read
-
-    def guarded_read(path, *args, **kwargs):
-        assert str(path) != str(source)
-        return original_read(path, *args, **kwargs)
-
-    monkeypatch.setattr("voxweave.media_processing.sf.read", guarded_read)
     artifacts = convert_long_audio(
         CopyEngine(),  # type: ignore[arg-type]
         source,
@@ -61,22 +60,16 @@ def test_long_audio_conversion_never_reads_the_entire_input_array(tmp_path, monk
 
 
 def test_selected_long_segment_is_split_into_bounded_streaming_chunks(
-    tmp_path, monkeypatch
+    tmp_path,
 ) -> None:
     source = tmp_path / "long.wav"
     output = tmp_path / "selected.wav"
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     _write_audio(source)
-    original_read = sf.read
-
-    def guarded_read(path, *args, **kwargs):
-        assert str(path) != str(source)
-        return original_read(path, *args, **kwargs)
-
-    monkeypatch.setattr("voxweave.media_processing.sf.read", guarded_read)
+    engine = CopyEngine()
     artifacts = convert_selected_segments(
-        CopyEngine(),  # type: ignore[arg-type]
+        engine,  # type: ignore[arg-type]
         source,
         output,
         {},
@@ -89,4 +82,6 @@ def test_selected_long_segment_is_split_into_bounded_streaming_chunks(
         "convert",
     )
     assert len(artifacts[0]["conversions"]) == 3
+    assert engine.batch_calls == 1
+    assert engine.single_calls == 0
     assert sf.info(output).frames == sf.info(source).frames

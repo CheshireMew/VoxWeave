@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .hashing import sha256_file
+from .hashing import FileVerificationLedger, sha256_file
 from .model_registry import ModelRegistry
+from .parameter_contracts import normalize_realtime_start, normalize_rvc_parameters
 from .process_control import run_capture, start_managed_process, terminate_process_tree
 from .runtime import resolve_rvc_entry, resolve_rvc_python
 
@@ -26,6 +27,7 @@ class RvcEngineError(RuntimeError):
 
 LOGGER = logging.getLogger(__name__)
 OFFLINE_IDLE_SECONDS = 60.0
+OFFLINE_STARTUP_TIMEOUT_SECONDS = 20.0
 
 
 class _ResidentOfflineClient:
@@ -86,11 +88,23 @@ class _ResidentOfflineClient:
             if value:
                 stderr_tail.append(value)
 
-    def _wait(self, request_id: str | None, cancelled: Callable[[], bool] | None) -> dict[str, Any]:
+    def _wait(
+        self,
+        request_id: str | None,
+        cancelled: Callable[[], bool] | None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout if timeout is not None else None
         while True:
             if cancelled and cancelled():
                 self._terminate_locked(graceful=False)
                 raise InterruptedError("task cancellation requested")
+            if deadline is not None and time.monotonic() >= deadline:
+                self._terminate_locked(graceful=False)
+                raise RvcEngineError(
+                    f"resident offline worker did not start within {timeout:g} seconds"
+                )
             process = self.process
             if not process or process.poll() is not None:
                 detail = "\n".join(self.stderr_tail) or "resident offline worker exited"
@@ -142,7 +156,7 @@ class _ResidentOfflineClient:
             name="voxweave-offline-stderr",
             daemon=True,
         ).start()
-        self._wait(None, None)
+        self._wait(None, None, timeout=OFFLINE_STARTUP_TIMEOUT_SECONDS)
 
     def _terminate_locked(self, *, graceful: bool = True) -> None:
         timer = self.idle_timer
@@ -209,33 +223,10 @@ class _ResidentOfflineClient:
             self._terminate_locked()
 
 
-def _bounded(name: str, value: float, minimum: float, maximum: float) -> float:
-    if not minimum <= value <= maximum:
-        raise ValueError(f"{name} must be between {minimum} and {maximum}")
-    return value
-
-
 class RvcEngine:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._offline = _ResidentOfflineClient(settings)
-
-    @staticmethod
-    def _parameters(parameters: dict[str, Any]) -> dict[str, Any]:
-        values = {
-            "pitch": int(parameters.get("pitch", 0)),
-            "f0": parameters.get("f0", "rmvpe"),
-            "index_rate": _bounded(
-                "index_rate", float(parameters.get("index_rate", 0.72)), 0.0, 1.0
-            ),
-            "rms_mix_rate": _bounded(
-                "rms_mix_rate", float(parameters.get("rms_mix_rate", 0.25)), 0.0, 1.0
-            ),
-            "protect": _bounded("protect", float(parameters.get("protect", 0.33)), 0.0, 0.5),
-        }
-        if values["f0"] not in {"rmvpe", "fcpe", "pm"}:
-            raise ValueError("f0 must be rmvpe, fcpe, or pm")
-        return values
 
     def _runtime(self) -> tuple[Path, Path]:
         python = resolve_rvc_python(self.settings)
@@ -291,7 +282,7 @@ class RvcEngine:
         model: dict[str, Any],
         parameters: dict[str, Any],
     ) -> dict[str, Any]:
-        values = self._parameters(parameters)
+        values = normalize_realtime_start(parameters)
         payload = {
             "command": "start",
             "model_id": model["id"],
@@ -301,13 +292,13 @@ class RvcEngine:
             "f0": values["f0"],
             "index_rate": values["index_rate"],
             "rms_mix_rate": values["rms_mix_rate"],
-            "input_device": int(parameters["input_device"]),
-            "output_device": int(parameters["output_device"]),
-            "block_seconds": float(parameters["block_seconds"]),
-            "crossfade_seconds": float(parameters.get("crossfade_seconds", 0.05)),
-            "extra_seconds": float(parameters.get("extra_seconds", 2.5)),
-            "vad_threshold": float(parameters.get("vad_threshold", 0.35)),
-            "input_gate_db": float(parameters.get("input_gate_db", -40.0)),
+            "input_device": values["input_device"],
+            "output_device": values["output_device"],
+            "block_seconds": values["block_seconds"],
+            "crossfade_seconds": values["crossfade_seconds"],
+            "extra_seconds": values["extra_seconds"],
+            "vad_threshold": values["vad_threshold"],
+            "input_gate_db": values["input_gate_db"],
         }
         converter_identity = {
             "model_sha256": model["model_sha256"],
@@ -329,7 +320,7 @@ class RvcEngine:
         payload["cache_key"] = hashlib.sha256(
             json.dumps(cache_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        payload["test_mode"] = bool(parameters.get("test_mode", False))
+        payload["test_mode"] = values["test_mode"]
         return payload
 
     @staticmethod
@@ -392,6 +383,7 @@ class RvcEngine:
         parameters: dict[str, Any],
         progress: Callable[[float, str, str | None], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        ledger: FileVerificationLedger | None = None,
     ) -> dict[str, Any]:
         input_path = input_path.expanduser().resolve()
         output_path = output_path.expanduser().resolve()
@@ -400,7 +392,7 @@ class RvcEngine:
         if output_path.exists() and not parameters.get("overwrite", False):
             raise FileExistsError(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        values = self._parameters(parameters)
+        values = normalize_rvc_parameters(parameters)
         if progress:
             progress(0.35, "converting", f"loading {model['display_name']}")
         ModelRegistry.verify_snapshot(model)
@@ -430,7 +422,11 @@ class RvcEngine:
                 **values,
             },
             "output_path": str(output_path),
-            "output_sha256": sha256_file(output_path),
+            "output_sha256": (
+                ledger.verify(output_path, cancelled=cancelled).sha256
+                if ledger is not None
+                else sha256_file(output_path)
+            ),
             "upstream": {**payload, **payload["results"][0]},
         }
 
@@ -441,11 +437,12 @@ class RvcEngine:
         parameters: dict[str, Any],
         progress: Callable[[float, str, str | None], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        ledger: FileVerificationLedger | None = None,
     ) -> list[dict[str, Any]]:
         if not jobs:
             raise ValueError("RVC batch requires at least one job")
         ModelRegistry.verify_snapshot(model)
-        values = self._parameters(parameters)
+        values = normalize_rvc_parameters(parameters)
         items = []
         for input_path, output_path in jobs:
             input_path = input_path.expanduser().resolve()
@@ -487,7 +484,11 @@ class RvcEngine:
                     "parameters": values,
                     "input_path": str(input_path),
                     "output_path": str(output_path),
-                    "output_sha256": sha256_file(output_path),
+                    "output_sha256": (
+                        ledger.verify(output_path, cancelled=cancelled).sha256
+                        if ledger is not None
+                        else sha256_file(output_path)
+                    ),
                     "upstream": upstream,
                 }
             )

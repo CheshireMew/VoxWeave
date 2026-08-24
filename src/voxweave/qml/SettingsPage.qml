@@ -102,10 +102,10 @@ Basic.Dialog {
     anchors.centerIn: parent
     width: Math.min(420, root.width - 48)
     height: 180
-    title: root.bridge.text("storage.archive.confirm_title")
+    title: root.bridge.text(root.bridge.language, "storage.archive.confirm_title")
     standardButtons: Basic.Dialog.Ok | Basic.Dialog.Cancel
     contentItem: Label {
-        text: root.bridge.text("storage.archive.confirm_detail")
+        text: root.bridge.text(root.bridge.language, "storage.archive.confirm_detail")
         color: root.theme.text
         font.family: root.theme.uiFont
         wrapMode: Text.Wrap
@@ -121,7 +121,7 @@ Basic.Dialog {
 
         PageHeader {
             Layout.fillWidth: true
-            title: root.bridge.text("nav.settings")
+            title: root.bridge.text(root.bridge.language, "nav.settings")
         }
 
         AppScrollView {
@@ -141,10 +141,10 @@ Basic.Dialog {
 
                     SectionHeader {
                         Layout.fillWidth: true
-                        title: root.bridge.text("section.audio_devices")
+                        title: root.bridge.text(root.bridge.language, "section.audio_devices")
                     }
 
-                    FieldLabel { text: root.bridge.text("field.audio_host") }
+                    FieldLabel { text: root.bridge.text(root.bridge.language, "field.audio_host") }
                     RowLayout {
                         Layout.fillWidth: true
                         AppComboBox {
@@ -154,12 +154,12 @@ Basic.Dialog {
                             model: root.devicePayload.hostapis || []
                             textRole: "name"
                             valueRole: "id"
-                            emptyText: root.bridge.text("audio.no_devices")
+                            emptyText: root.bridge.text(root.bridge.language, "audio.no_devices")
                             enabled: !root.realtimeActive && count > 0
                             onActivated: Qt.callLater(root.selectDefaultAudioRoute)
                         }
                         AppButton {
-                            text: root.bridge.text("action.refresh")
+                            text: root.bridge.text(root.bridge.language, "action.refresh")
                             enabled: !root.realtimeActive
                             onClicked: root.bridge.realtime.refreshDevices()
                         }
@@ -172,7 +172,7 @@ Basic.Dialog {
                         rowSpacing: 8
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.input_device") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.input_device") }
                             AppComboBox {
                                 id: audioInputDevice
                                 objectName: "settingsAudioInputDevice"
@@ -180,14 +180,14 @@ Basic.Dialog {
                                 model: root.inputDevices
                                 textRole: "name"
                                 valueRole: "id"
-                                emptyText: root.bridge.text("audio.no_input")
+                                emptyText: root.bridge.text(root.bridge.language, "audio.no_input")
                                 enabled: !root.realtimeActive && count > 0
                                 onActivated: root.saveCurrentAudioRoute()
                             }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.output_device") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.output_device") }
                             AppComboBox {
                                 id: audioOutputDevice
                                 objectName: "settingsAudioOutputDevice"
@@ -195,7 +195,7 @@ Basic.Dialog {
                                 model: root.outputDevices
                                 textRole: "name"
                                 valueRole: "id"
-                                emptyText: root.bridge.text("audio.no_output")
+                                emptyText: root.bridge.text(root.bridge.language, "audio.no_output")
                                 enabled: !root.realtimeActive && count > 0
                                 onActivated: root.saveCurrentAudioRoute()
                             }
@@ -209,8 +209,8 @@ Basic.Dialog {
                         AppButton {
                             text: root.bridge.realtime.audioTesting
                                 && root.bridge.realtime.audioTest.mode === "input"
-                                ? root.bridge.text("audio.test.running")
-                                : root.bridge.text("audio.test.input")
+                                ? root.bridge.text(root.bridge.language, "audio.test.running")
+                                : root.bridge.text(root.bridge.language, "audio.test.input")
                             enabled: !root.realtimeActive && !root.bridge.realtime.audioTesting
                                 && audioInputDevice.currentIndex >= 0
                             onClicked: root.bridge.realtime.testAudioDevice(
@@ -220,8 +220,8 @@ Basic.Dialog {
                         AppButton {
                             text: root.bridge.realtime.audioTesting
                                 && root.bridge.realtime.audioTest.mode === "output"
-                                ? root.bridge.text("audio.test.running")
-                                : root.bridge.text("audio.test.output")
+                                ? root.bridge.text(root.bridge.language, "audio.test.running")
+                                : root.bridge.text(root.bridge.language, "audio.test.output")
                             enabled: !root.realtimeActive && !root.bridge.realtime.audioTesting
                                 && audioOutputDevice.currentIndex >= 0
                             onClicked: root.bridge.realtime.testAudioDevice(
@@ -232,15 +232,15 @@ Basic.Dialog {
                             visible: String(root.bridge.realtime.audioTest.state || "").length > 0
                                 && root.bridge.realtime.audioTest.state !== "running"
                             text: root.bridge.realtime.audioTest.state === "completed"
-                                ? root.bridge.text("audio.test.completed")
-                                : root.bridge.text("audio.test.failed")
+                                ? root.bridge.text(root.bridge.language, "audio.test.completed")
+                                : root.bridge.text(root.bridge.language, "audio.test.failed")
                             tone: root.bridge.realtime.audioTest.state === "completed"
                                 ? "success" : "danger"
                         }
                         Label {
                             visible: root.bridge.realtime.audioTest.mode === "input"
                                 && root.bridge.realtime.audioTest.state === "completed"
-                            text: root.bridge.text("audio.test.level") + " "
+                            text: root.bridge.text(root.bridge.language, "audio.test.level") + " "
                                 + Math.round(Number(root.bridge.realtime.audioTest.peak || 0) * 100) + "%"
                             color: root.theme.textMuted
                             font.pixelSize: 11
@@ -249,7 +249,7 @@ Basic.Dialog {
 
                     Label {
                         Layout.fillWidth: true
-                        text: root.bridge.text("audio.headphones_hint")
+                        text: root.bridge.text(root.bridge.language, "audio.headphones_hint")
                         color: root.theme.warning
                         font.family: root.theme.uiFont
                         font.pixelSize: 11
@@ -267,7 +267,7 @@ Basic.Dialog {
                         Layout.fillWidth: true
                         SectionHeader {
                             Layout.fillWidth: true
-                            title: root.bridge.text("label.data_root")
+                            title: root.bridge.text(root.bridge.language, "label.data_root")
                         }
                         Rectangle {
                             Layout.fillWidth: true
@@ -287,7 +287,7 @@ Basic.Dialog {
                             }
                         }
                         AppButton {
-                            text: root.bridge.text("action.open_folder")
+                            text: root.bridge.text(root.bridge.language, "action.open_folder")
                             onClicked: root.bridge.maintenance.openDataRoot()
                         }
                     }
@@ -296,11 +296,11 @@ Basic.Dialog {
                         Layout.fillWidth: true
                         SectionHeader {
                             Layout.fillWidth: true
-                            title: root.bridge.text("section.diagnostics")
+                            title: root.bridge.text(root.bridge.language, "section.diagnostics")
                         }
                         Label {
                             Layout.fillWidth: true
-                            text: root.bridge.text("settings.diagnostics.detail")
+                            text: root.bridge.text(root.bridge.language, "settings.diagnostics.detail")
                             color: root.theme.textMuted
                             font.family: root.theme.uiFont
                             font.pixelSize: 12
@@ -311,22 +311,22 @@ Basic.Dialog {
                             spacing: 6
                             AppButton {
                                 text: root.bridge.activity.busyKeys.includes("runtime-inspect")
-                                    ? root.bridge.text("task.state.running") : root.bridge.text("action.inspect")
+                                    ? root.bridge.text(root.bridge.language, "task.state.running") : root.bridge.text(root.bridge.language, "action.inspect")
                                 kind: "primary"
                                 enabled: !root.bridge.activity.busyKeys.includes("runtime-inspect")
                                 onClicked: root.bridge.maintenance.inspectRuntime()
                             }
                             AppButton {
                                 text: root.bridge.activity.busyKeys.includes("diagnostics-export")
-                                    ? root.bridge.text("task.state.running")
-                                    : root.bridge.text("action.export_diagnostics")
+                                    ? root.bridge.text(root.bridge.language, "task.state.running")
+                                    : root.bridge.text(root.bridge.language, "action.export_diagnostics")
                                 enabled: !root.bridge.activity.busyKeys.includes("diagnostics-export")
                                 onClicked: diagnosticDialog.open()
                             }
                         }
                         StatusPill {
                             visible: root.bridge.maintenance.diagnosticPath.length > 0
-                            text: root.bridge.text("badge.exported")
+                            text: root.bridge.text(root.bridge.language, "badge.exported")
                             tone: "success"
                         }
                         Label {
@@ -344,13 +344,13 @@ Basic.Dialog {
                         Layout.fillWidth: true
                         SectionHeader {
                             Layout.fillWidth: true
-                            title: root.bridge.text("section.storage_archive")
-                            badgeText: root.bridge.text("badge.manual_only")
+                            title: root.bridge.text(root.bridge.language, "section.storage_archive")
+                            badgeText: root.bridge.text(root.bridge.language, "badge.manual_only")
                             badgeTone: "warning"
                         }
                         Label {
                             Layout.fillWidth: true
-                            text: root.bridge.text("storage.archive.detail")
+                            text: root.bridge.text(root.bridge.language, "storage.archive.detail")
                             color: root.theme.textMuted
                             font.family: root.theme.uiFont
                             font.pixelSize: 12
@@ -359,7 +359,7 @@ Basic.Dialog {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            FieldLabel { text: root.bridge.text("storage.archive.age") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "storage.archive.age") }
                             AppSpinBox {
                                 id: archiveDays
                                 from: 1
@@ -369,7 +369,7 @@ Basic.Dialog {
                             Item { Layout.fillWidth: true }
                             AppButton {
                                 text: root.bridge.activity.busyKeys.includes("storage-archive")
-                                    ? root.bridge.text("task.state.running") : root.bridge.text("action.archive")
+                                    ? root.bridge.text(root.bridge.language, "task.state.running") : root.bridge.text(root.bridge.language, "action.archive")
                                 kind: "primary"
                                 enabled: !root.bridge.activity.busyKeys.includes("storage-archive")
                                 onClicked: archiveDialog.open()
@@ -382,19 +382,19 @@ Basic.Dialog {
                     Layout.fillWidth: true
                     SectionHeader {
                         Layout.fillWidth: true
-                        title: root.bridge.text("section.runtime_install")
+                        title: root.bridge.text(root.bridge.language, "section.runtime_install")
                         badgeText: root.runtimeInspecting
-                            ? root.bridge.text("task.state.running")
+                            ? root.bridge.text(root.bridge.language, "task.state.running")
                             : root.bridge.maintenance.runtimeReady
-                                ? root.bridge.text("runtime.ready")
-                                : root.bridge.text("runtime.not_ready")
+                                ? root.bridge.text(root.bridge.language, "runtime.ready")
+                                : root.bridge.text(root.bridge.language, "runtime.not_ready")
                         badgeTone: root.runtimeInspecting
                             ? "info"
                             : root.bridge.maintenance.runtimeReady ? "success" : "warning"
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: root.bridge.text("runtime.install_detail")
+                        text: root.bridge.text(root.bridge.language, "runtime.install_detail")
                         color: root.theme.textMuted
                         font.family: root.theme.uiFont
                         font.pixelSize: 12
@@ -405,12 +405,12 @@ Basic.Dialog {
                         AppButton {
                             objectName: "installRuntimeButton"
                             text: root.runtimeInspecting
-                                ? root.bridge.text("task.state.running")
+                                ? root.bridge.text(root.bridge.language, "task.state.running")
                                 : root.bridge.activity.busyKeys.includes("runtime-install")
-                                ? root.bridge.text("runtime.installing")
+                                ? root.bridge.text(root.bridge.language, "runtime.installing")
                                 : root.bridge.maintenance.runtimeReady
-                                    ? root.bridge.text("runtime.installed")
-                                    : root.bridge.text("runtime.install")
+                                    ? root.bridge.text(root.bridge.language, "runtime.installed")
+                                    : root.bridge.text(root.bridge.language, "runtime.install")
                             kind: "primary"
                             enabled: !root.bridge.maintenance.runtimeReady
                                 && !root.runtimeInspecting
@@ -420,7 +420,7 @@ Basic.Dialog {
                         Label {
                             Layout.fillWidth: true
                             visible: root.bridge.activity.busyKeys.includes("runtime-install")
-                            text: root.bridge.text("runtime.install_wait")
+                            text: root.bridge.text(root.bridge.language, "runtime.install_wait")
                             color: root.theme.warning
                             font.family: root.theme.uiFont
                             font.pixelSize: 11
@@ -432,13 +432,13 @@ Basic.Dialog {
                         columns: width >= 680 ? 2 : 1
                         columnSpacing: 10
                         rowSpacing: 6
-                        Label { text: root.bridge.text("runtime.device") + ": " + root.bridge.maintenance.runtimeInfo.device; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                        Label { text: root.bridge.text(root.bridge.language, "runtime.device") + ": " + root.bridge.maintenance.runtimeInfo.device; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
                         Label { text: "Python: " + root.bridge.maintenance.runtimeInfo.python; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
                         Label { text: "RVC: " + root.bridge.maintenance.runtimeInfo.rvc_root; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
                         Label { text: "FFmpeg: " + root.bridge.maintenance.runtimeInfo.ffmpeg; color: root.theme.textMuted; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
                     }
                     AppCheckBox {
-                        text: root.bridge.text("runtime.show_details")
+                        text: root.bridge.text(root.bridge.language, "runtime.show_details")
                         checked: root.showRuntimeDetails
                         onToggled: root.showRuntimeDetails = checked
                     }
@@ -449,7 +449,7 @@ Basic.Dialog {
                         clip: true
                         AppTextArea {
                             width: parent.width
-                            text: root.bridge.maintenance.runtimeText.length > 2 ? root.bridge.maintenance.runtimeText : root.bridge.text("empty.runtime.detail")
+                            text: root.bridge.maintenance.runtimeText.length > 2 ? root.bridge.maintenance.runtimeText : root.bridge.text(root.bridge.language, "empty.runtime.detail")
                             readOnly: true
                         }
                     }
@@ -457,16 +457,16 @@ Basic.Dialog {
 
                 AppPanel {
                     Layout.fillWidth: true
-                    SectionHeader { Layout.fillWidth: true; title: root.bridge.text("section.background_service") }
+                    SectionHeader { Layout.fillWidth: true; title: root.bridge.text(root.bridge.language, "section.background_service") }
                     Label {
                         Layout.fillWidth: true
-                        text: root.bridge.text("service.exit_behavior")
+                        text: root.bridge.text(root.bridge.language, "service.exit_behavior")
                         color: root.theme.textMuted
                         font.pixelSize: 12
                         wrapMode: Text.Wrap
                     }
                     AppButton {
-                        text: root.bridge.text("service.stop")
+                        text: root.bridge.text(root.bridge.language, "service.stop")
                         kind: "danger"
                         enabled: !root.realtimeActive
                         onClicked: root.bridge.stopBackgroundService()
@@ -477,19 +477,19 @@ Basic.Dialog {
                     Layout.fillWidth: true
                     SectionHeader {
                         Layout.fillWidth: true
-                        title: root.bridge.text("section.about")
+                        title: root.bridge.text(root.bridge.language, "section.about")
                         badgeText: "v" + root.bridge.applicationVersion
                         badgeTone: "neutral"
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: root.bridge.text("about.detail")
+                        text: root.bridge.text(root.bridge.language, "about.detail")
                         color: root.theme.textMuted
                         font.pixelSize: 12
                         wrapMode: Text.Wrap
                     }
                     AppButton {
-                        text: root.bridge.text("about.project_page")
+                        text: root.bridge.text(root.bridge.language, "about.project_page")
                         onClicked: root.bridge.openProjectPage()
                     }
                 }

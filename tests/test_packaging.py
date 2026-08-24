@@ -23,6 +23,8 @@ def test_windows_package_keeps_required_runtime_sources() -> None:
     specification = (ROOT / "packaging" / "VoxWeave.spec").read_text(encoding="utf-8")
     for name in (
         "analysis_worker.py",
+        "media_postprocess.py",
+        "media_postprocess_worker.py",
         "model_inspect_worker.py",
         "runtime_assets_worker.py",
         "runtime_worker.py",

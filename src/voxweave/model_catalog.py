@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .capabilities import CATALOG_PROTOCOL, CATALOG_PROTOCOL_VERSION
 from .config import PACKAGE_ROOT
 from .protocol import ModelImportCommand
 
@@ -18,12 +19,85 @@ class ModelCatalogClient:
 
     @staticmethod
     def _validate(catalog: dict[str, Any]) -> dict[str, Any]:
-        if catalog.get("protocol") != "voxweave-model-catalog" or catalog.get("version") != 1:
+        if (
+            catalog.get("protocol") != CATALOG_PROTOCOL
+            or catalog.get("version") != CATALOG_PROTOCOL_VERSION
+        ):
             raise ValueError("unsupported VoxWeave model catalog")
         models = catalog.get("models")
         if not isinstance(models, list):
             raise ValueError("catalog models must be a list")
+        if not models:
+            raise ValueError("catalog must contain at least one model")
+        validated: list[dict[str, Any]] = []
+        identities: set[str] = set()
+        for index, raw_entry in enumerate(models):
+            if not isinstance(raw_entry, dict):
+                raise ValueError(f"catalog model {index} must be an object")
+            entry = dict(raw_entry)
+            model_id = str(entry.get("id") or "").strip()
+            if not model_id:
+                raise ValueError(f"catalog model {index} has no id")
+            if model_id in identities:
+                raise ValueError(f"catalog model id is duplicated: {model_id}")
+            identities.add(model_id)
+            arguments = ModelCatalogClient._import_arguments(entry, None)
+            if int(arguments["download_size_bytes"]) <= 0:
+                raise ValueError(f"catalog model has no download size: {model_id}")
+            validated.append(entry)
+        catalog["models"] = validated
         return catalog
+
+    @staticmethod
+    def _import_arguments(
+        entry: dict[str, Any], catalog_url: str | None
+    ) -> dict[str, Any]:
+        model_id = str(entry.get("id") or "").strip()
+        if not entry.get("license_spdx"):
+            raise ValueError(f"catalog model has no SPDX license: {model_id}")
+        required = {
+            "id",
+            "model_url",
+            "model_sha256",
+            "model_size_bytes",
+            "display_name",
+        }
+        missing = required - {key for key, value in entry.items() if value not in (None, "")}
+        if missing:
+            raise ValueError(
+                f"catalog model is missing fields: {sorted(missing)} ({model_id})"
+            )
+        arguments = {
+            "model": entry["model_url"],
+            "id": entry["id"],
+            "display_name": entry["display_name"],
+            "aliases": entry.get("aliases", []),
+            "license_spdx": entry["license_spdx"],
+            "source_url": entry.get("source_url") or catalog_url,
+            "model_sha256": entry["model_sha256"],
+            "download_size_bytes": entry["model_size_bytes"],
+            "recommended": entry.get("recommended"),
+        }
+        if entry.get("index_url"):
+            missing_index = {
+                "index_sha256",
+                "index_size_bytes",
+            } - {key for key, value in entry.items() if value not in (None, "")}
+            if missing_index:
+                raise ValueError(
+                    f"catalog index is missing fields: {sorted(missing_index)} ({model_id})"
+                )
+            arguments.update(
+                {
+                    "index_url": entry["index_url"],
+                    "index_sha256": entry["index_sha256"],
+                    "index_size_bytes": entry["index_size_bytes"],
+                }
+            )
+        return ModelImportCommand.model_validate(arguments).model_dump(
+            mode="json",
+            exclude_none=True,
+        )
 
     def load(
         self,
@@ -60,35 +134,4 @@ class ModelCatalogClient:
         )
         if not entry:
             raise LookupError(f"catalog model not found: {model_id}")
-        if not entry.get("license_spdx"):
-            raise ValueError("catalog model has no SPDX license")
-        required = {"model_url", "model_sha256", "model_size_bytes", "display_name"}
-        missing = required - set(entry)
-        if missing:
-            raise ValueError(f"catalog model is missing fields: {sorted(missing)}")
-        arguments = {
-            "model": entry["model_url"],
-            "id": entry["id"],
-            "display_name": entry["display_name"],
-            "aliases": entry.get("aliases", []),
-            "license_spdx": entry["license_spdx"],
-            "source_url": entry.get("source_url") or catalog_url,
-            "model_sha256": entry["model_sha256"],
-            "download_size_bytes": entry["model_size_bytes"],
-            "recommended": entry.get("recommended"),
-        }
-        if entry.get("index_url"):
-            missing_index = {"index_sha256", "index_size_bytes"} - set(entry)
-            if missing_index:
-                raise ValueError(f"catalog index is missing fields: {sorted(missing_index)}")
-            arguments.update(
-                {
-                    "index_url": entry["index_url"],
-                    "index_sha256": entry["index_sha256"],
-                    "index_size_bytes": entry["index_size_bytes"],
-                }
-            )
-        return ModelImportCommand.model_validate(arguments).model_dump(
-            mode="json",
-            exclude_none=True,
-        )
+        return self._import_arguments(dict(entry), catalog_url)

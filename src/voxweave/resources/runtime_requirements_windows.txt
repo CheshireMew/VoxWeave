@@ -1,5 +1,3 @@
---index-url https://mirrors.pku.edu.cn/pypi/simple
---extra-index-url https://pypi.org/simple
 --only-binary=:all:
 
 # VoxWeave inference, realtime audio, model inspection, VAD and speaker analysis.

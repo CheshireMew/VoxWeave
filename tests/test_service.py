@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import time
 
@@ -12,6 +13,34 @@ from voxweave.config import Settings
 from voxweave.controller import Controller
 from voxweave.protocol import OPERATION_SPECS
 from voxweave.service import create_app
+from voxweave.settings_file_store import SettingsFileStore
+
+
+def test_high_frequency_status_successes_do_not_fill_info_log(tmp_path, caplog) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    caplog.set_level(logging.INFO, logger="voxweave.service")
+    with TestClient(create_app(settings, token="secret")) as client:
+        for index in range(20):
+            response = client.post(
+                "/v1/execute",
+                headers={"Authorization": "Bearer secret"},
+                json={
+                    "protocol": "voxweave-control",
+                    "version": 1,
+                    "request_id": f"quiet-status-{index}",
+                    "operation": "realtime.status",
+                    "arguments": {},
+                },
+            ).json()
+            assert response["ok"] is True
+
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == "voxweave.service"
+        and record.levelno >= logging.INFO
+        and getattr(record, "operation", None) == "realtime.status"
+    ]
 
 
 def test_health_describe_and_stable_error(tmp_path) -> None:
@@ -60,7 +89,8 @@ def test_every_described_long_operation_has_a_registered_handler(tmp_path) -> No
 
 def test_service_owned_settings_update_preserves_runtime_fields(tmp_path) -> None:
     settings = Settings(data_root=str(tmp_path))
-    settings.update(
+    SettingsFileStore(settings).commit(
+        settings,
         rvc_root=str(tmp_path / "runtime"),
         rvc_python=str(tmp_path / "runtime" / "python.exe"),
     )
@@ -85,8 +115,13 @@ def test_service_owned_settings_update_preserves_runtime_fields(tmp_path) -> Non
             json={
                 "protocol": "voxweave-control",
                 "version": 1,
+                "request_id": "settings-update-profile",
                 "operation": "settings.update",
-                "arguments": {"language": "en", "realtime": realtime},
+                "arguments": {
+                    "expected_revision": settings.revision,
+                    "language": "en",
+                    "realtime": realtime,
+                },
             },
         ).json()
     assert response["ok"] is True
@@ -95,7 +130,84 @@ def test_service_owned_settings_update_preserves_runtime_fields(tmp_path) -> Non
     assert payload["rvc_root"] == str(tmp_path / "runtime")
     assert payload["rvc_python"] == str(tmp_path / "runtime" / "python.exe")
     assert payload["realtime"] == realtime
-    assert response["result"]["realtime"] == realtime
+    assert response["result"]["settings"]["realtime"] == realtime
+
+
+def test_settings_updates_are_revisioned_replayable_and_evented_once(tmp_path) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    headers = {"Authorization": "Bearer secret"}
+
+    with TestClient(create_app(settings, token="secret")) as client:
+
+        def command(
+            operation: str, arguments: dict, request_id: str | None = None
+        ) -> dict:
+            payload = {
+                "protocol": "voxweave-control",
+                "version": 1,
+                "operation": operation,
+                "arguments": arguments,
+            }
+            if request_id:
+                payload["request_id"] = request_id
+            return client.post("/v1/execute", headers=headers, json=payload).json()
+
+        initial = command("settings.get", {})["result"]
+        update_arguments = {
+            "expected_revision": initial["revision"],
+            "language": "en",
+            "realtime": {"pitch": 5},
+        }
+        first = command("settings.update", update_arguments, "settings-once")
+        replayed = command("settings.update", update_arguments, "settings-once")
+        stale = command(
+            "settings.update",
+            {"expected_revision": initial["revision"], "realtime": {"pitch": 8}},
+            "settings-stale",
+        )
+        conflict = command(
+            "settings.update",
+            {**update_arguments, "language": "zh-CN"},
+            "settings-once",
+        )
+        events = command(
+            "settings.events", {"after_revision": initial["revision"], "limit": 10}
+        )["result"]
+
+    assert first["ok"] is True
+    assert replayed == first
+    assert first["result"]["revision"] == initial["revision"] + 1
+    assert first["result"]["settings"]["language"] == "en"
+    assert first["result"]["settings"]["realtime"]["pitch"] == 5
+    assert first["result"]["settings"]["realtime"]["input_gate_db"] == -40.0
+    assert stale["error_type"] == "revision_conflict"
+    assert conflict["error_type"] == "idempotency_conflict"
+    assert events["current_revision"] == first["result"]["revision"]
+    assert len(events["events"]) == 1
+    assert set(events["events"][0]["changed_fields"]) == {"language", "realtime"}
+
+
+def test_long_request_replay_happens_before_input_snapshot_preparation(tmp_path) -> None:
+    source = tmp_path / "changing.wav"
+    source.write_bytes(b"first-version")
+    settings = Settings(data_root=str(tmp_path / "data"))
+    headers = {"Authorization": "Bearer secret"}
+    command = {
+        "protocol": "voxweave-control",
+        "version": 1,
+        "request_id": "inspect-before-preparer",
+        "operation": "media.inspect",
+        "arguments": {"input": str(source)},
+    }
+    with TestClient(create_app(settings, token="secret")) as client:
+        first = client.post("/v1/execute", headers=headers, json=command).json()
+        source.write_bytes(b"second-version-with-different-metadata")
+        replayed = client.post("/v1/execute", headers=headers, json=command).json()
+
+    assert first["ok"] is True
+    assert replayed["ok"] is True
+    assert replayed["result"]["id"] == first["result"]["id"]
+    assert replayed["result"]["snapshot"] == first["result"]["snapshot"]
 
 
 def test_diagnostics_snapshot_comes_from_service_state(tmp_path) -> None:

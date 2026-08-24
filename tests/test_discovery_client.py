@@ -10,7 +10,7 @@ import pytest
 from voxweave import client
 from voxweave.config import Settings
 from voxweave.discovery import Discovery, ServiceLock, reserve_loopback_socket
-from voxweave.protocol import PROTOCOL, PROTOCOL_VERSION
+from voxweave.protocol import OPERATION_SPECS, PROTOCOL, PROTOCOL_VERSION
 
 
 def test_reserved_service_socket_keeps_the_selected_port_owned() -> None:
@@ -74,6 +74,39 @@ def test_concurrent_clients_launch_only_one_service(tmp_path, monkeypatch) -> No
     assert launch_count == 1
 
 
+def test_service_ownership_requires_the_discovered_pid_to_match_spawned_pid(
+    tmp_path, monkeypatch
+) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    settings.ensure_layout()
+    discovery = Discovery(
+        pid=222,
+        port=12345,
+        token="token",
+        protocol=PROTOCOL,
+        protocol_version=PROTOCOL_VERSION,
+        created_at=1.0,
+    )
+    reads = iter([None, None, discovery])
+
+    class Process:
+        pid = 111
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    monkeypatch.setattr(client, "read_discovery", lambda _settings: next(reads))
+    monkeypatch.setattr(client, "_handshake", lambda _discovery: True)
+    monkeypatch.setattr(client, "start_managed_process", lambda *_args, **_kwargs: Process())
+
+    result, started = client.ensure_service_with_state(settings, timeout=1)
+
+    assert result is discovery
+    assert started is False
+
+
 def test_frozen_service_uses_the_desktop_executable(monkeypatch) -> None:
     monkeypatch.setattr(client.sys, "frozen", True, raising=False)
     monkeypatch.setattr(client.sys, "executable", r"C:\Apps\VoxWeave\VoxWeave.exe")
@@ -95,6 +128,16 @@ def test_managed_gui_client_only_stops_a_service_it_started(tmp_path, monkeypatc
     )
     stopped = []
     monkeypatch.setattr(client, "ensure_service_with_state", lambda _settings: (discovery, True))
+    monkeypatch.setattr(
+        client,
+        "_describe",
+        lambda _discovery: {
+            "protocol": PROTOCOL,
+            "version": PROTOCOL_VERSION,
+            "product_version": client.__version__,
+            "operations": {name: {} for name in OPERATION_SPECS},
+        },
+    )
     monkeypatch.setattr(
         client, "shutdown_service", lambda _settings: stopped.append(True) or {"ok": True}
     )
@@ -127,3 +170,43 @@ def test_managed_gui_client_cannot_restart_after_shutdown(tmp_path, monkeypatch)
         managed.ensure()
 
     assert starts == []
+
+
+def test_client_retries_only_safe_or_idempotent_requests(tmp_path, monkeypatch) -> None:
+    settings = Settings(data_root=str(tmp_path))
+    discovery = Discovery(
+        pid=os.getpid(),
+        port=12345,
+        token="token",
+        protocol=PROTOCOL,
+        protocol_version=PROTOCOL_VERSION,
+        created_at=1.0,
+    )
+    managed = client.ManagedServiceClient(settings)
+    monkeypatch.setattr(managed, "ensure", lambda: discovery)
+    attempts: list[tuple[str, str]] = []
+
+    def flaky(_discovery, method, route, _payload=None):
+        attempts.append((method, route))
+        if len(attempts) == 1:
+            raise client.ServiceUnavailable("connection reset")
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_request_json", flaky)
+    assert managed.request(settings, "GET", "/v1/describe") == {"ok": True}
+    assert len(attempts) == 2
+
+    attempts.clear()
+    with pytest.raises(client.ServiceUnavailable):
+        managed.request(settings, "POST", "/v1/shutdown")
+    assert len(attempts) == 1
+
+    attempts.clear()
+    result = managed.request(
+        settings,
+        "POST",
+        "/v1/execute",
+        {"request_id": "stable-request", "operation": "settings.update"},
+    )
+    assert result == {"ok": True}
+    assert len(attempts) == 2

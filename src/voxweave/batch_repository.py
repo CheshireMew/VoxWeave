@@ -42,19 +42,35 @@ class BatchRepository:
             parameters: tuple[Any, ...] = (created_at, created_at, batch_id, limit + 1)
         else:
             parameters = (limit + 1,)
-        rows = self.database.fetch_all(
-            f"SELECT * FROM batch_rules {where} ORDER BY created_at DESC,id DESC LIMIT ?",  # noqa: S608
-            parameters,
-        )
+        with self.database.connect() as db:
+            rows = [
+                dict(row)
+                for row in db.execute(
+                    f"SELECT * FROM batch_rules {where} "  # noqa: S608
+                    "ORDER BY created_at DESC,id DESC LIMIT ?",
+                    parameters,
+                ).fetchall()
+            ]
+            visible_ids = [str(row["id"]) for row in rows[:limit]]
+            counts_by_rule: dict[str, dict[str, int]] = {
+                batch_id: {} for batch_id in visible_ids
+            }
+            if visible_ids:
+                placeholders = ",".join("?" for _ in visible_ids)
+                count_rows = db.execute(
+                    "SELECT batch_id,state,COUNT(*) AS count FROM batch_items "
+                    f"WHERE batch_id IN ({placeholders}) GROUP BY batch_id,state",  # noqa: S608
+                    tuple(visible_ids),
+                ).fetchall()
+                for count in count_rows:
+                    counts_by_rule[str(count["batch_id"])][str(count["state"])] = int(
+                        count["count"]
+                    )
         has_more = len(rows) > limit
         items = []
         for row in rows[:limit]:
             item = self.decode_rule(row)
-            counts = self.database.fetch_all(
-                "SELECT state,COUNT(*) AS count FROM batch_items WHERE batch_id=? GROUP BY state",
-                (item["id"],),
-            )
-            item["item_counts"] = {count["state"]: count["count"] for count in counts}
+            item["item_counts"] = counts_by_rule[str(item["id"])]
             items.append(item)
         next_cursor = None
         if has_more and items:
@@ -63,7 +79,7 @@ class BatchRepository:
 
     def set_watch(self, batch_id: str, enabled: bool) -> None:
         self.database.execute(
-            "UPDATE batch_rules SET watch_enabled=?,updated_at=? WHERE id=?",
+            "UPDATE batch_rules SET watch_enabled=?,revision=revision+1,updated_at=? WHERE id=?",
             (int(enabled), utc_now(), batch_id),
         )
 
@@ -71,15 +87,35 @@ class BatchRepository:
         self.database.execute(
             "UPDATE batch_rules SET input_root=?,output_root=?,model_id=?,model_sha256=?,"
             "index_sha256=?,preset_json=?,preset_name=?,recursive=?,watch_enabled=?,"
-            "extensions_json=?,updated_at=? WHERE id=?",
+            "extensions_json=?,revision=revision+1,updated_at=? WHERE id=?",
             (*values, batch_id),
         )
 
     def set_archived(self, batch_id: str, archived: bool) -> None:
         self.database.execute(
-            "UPDATE batch_rules SET state=?,watch_enabled=0,updated_at=? WHERE id=?",
+            "UPDATE batch_rules SET state=?,watch_enabled=0,revision=revision+1,updated_at=? "
+            "WHERE id=?",
             ("archived" if archived else "active", utc_now(), batch_id),
         )
+
+    @staticmethod
+    def assert_revision(
+        db: sqlite3.Connection,
+        batch_id: str,
+        revision: int,
+    ) -> None:
+        row = db.execute(
+            "SELECT revision,state FROM batch_rules WHERE id=?", (batch_id,)
+        ).fetchone()
+        if not row:
+            raise LookupError(f"batch not found: {batch_id}")
+        if int(row["revision"]) != revision or row["state"] != "active":
+            from .protocol import OperationError
+
+            raise OperationError(
+                "batch_rule_changed",
+                "batch rule changed while a file was being prepared; it will be reconsidered",
+            )
 
     @staticmethod
     def find_item(

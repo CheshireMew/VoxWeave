@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from voxweave.config import Settings
+from voxweave.database import Database
 from voxweave.runtime_install import (
     _install_dependencies,
     _replace_directory,
@@ -16,6 +18,31 @@ from voxweave.runtime_install import (
     _run_install_step,
     install_runtime,
 )
+from voxweave.settings_repository import SettingsRepository
+from voxweave.settings_service import SettingsService
+
+
+def _settings_service(settings: Settings) -> SettingsService:
+    return SettingsService(settings, SettingsRepository(Database(settings.database_path)))
+
+
+def test_runtime_contract_loads_in_dependency_isolated_worker_python() -> None:
+    package_root = Path(__file__).parents[1] / "src" / "voxweave"
+    code = (
+        "import sys; "
+        f"sys.path.insert(0, {str(package_root)!r}); "
+        "from runtime_contract import runtime_contract; "
+        "contract = runtime_contract(); "
+        "print(contract.runtime_assets.hubert_file)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-S", "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "hubert_base/pytorch_model.bin"
 
 
 def test_runtime_install_rejects_data_directory_without_safe_free_space(
@@ -73,10 +100,6 @@ def test_existing_rvc_only_downloads_missing_ffmpeg(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr("voxweave.runtime_install.inspect_runtime", inspect)
     monkeypatch.setattr(
-        "voxweave.runtime_install._component_manifest",
-        lambda: {"ffmpeg": {}, "python": {}},
-    )
-    monkeypatch.setattr(
         "voxweave.runtime_install._ensure_managed_ffmpeg",
         lambda *_args: (ffmpeg, ffprobe),
     )
@@ -91,6 +114,7 @@ def test_existing_rvc_only_downloads_missing_ffmpeg(tmp_path, monkeypatch) -> No
 
     result = install_runtime(
         settings,
+        _settings_service(settings),
         {},
         lambda _value, _stage, _detail: None,
         lambda: False,
@@ -135,13 +159,22 @@ def test_nvidia_runtime_installs_pinned_cuda_torch_before_rvc_dependencies(
         "--extra-index-url",
         "https://mirrors.pku.edu.cn/pypi/simple",
     ]
-    assert commands[1][-2:] == [
-        "-r",
+    requirements = (
         Path(__file__).parents[1]
         / "src"
         / "voxweave"
         / "resources"
-        / "runtime_requirements_windows.txt",
+        / "runtime_requirements_windows.txt"
+    )
+    assert commands[1][4:6] == [
+        "-r",
+        requirements,
+    ]
+    assert commands[1][-4:] == [
+        "--index-url",
+        "https://mirrors.pku.edu.cn/pypi/simple",
+        "--extra-index-url",
+        "https://pypi.org/simple",
     ]
 
 
@@ -214,6 +247,7 @@ def test_failed_runtime_install_archives_staging_and_does_not_change_settings(
     with pytest.raises(InterruptedError, match="cancellation requested"):
         install_runtime(
             settings,
+            _settings_service(settings),
             {},
             lambda _value, _stage, _detail: None,
             lambda: False,

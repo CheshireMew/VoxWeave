@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .media_io import inspect_media
+from .hashing import FileVerificationLedger, VerifiedFile
+from .media_io import inspect_media_verified
 from .model_registry import ModelRegistry
 from .protocol import OperationError
 from .task_manager import TaskContext
@@ -41,8 +42,20 @@ class MediaInputResolver:
         arguments: dict[str, Any],
         context: TaskContext,
     ) -> dict[str, Any]:
+        media, _verified = self.inspect_verified(path, arguments, context)
+        return media
+
+    def inspect_verified(
+        self,
+        path: Path,
+        arguments: dict[str, Any],
+        context: TaskContext,
+        ledger: FileVerificationLedger | None = None,
+    ) -> tuple[dict[str, Any], VerifiedFile]:
         self._verify_submission_revision(path, context)
-        media = inspect_media(self.settings, path, context.cancelled)
+        media, verified = inspect_media_verified(
+            self.settings, path, context.cancelled, ledger
+        )
         expected = arguments.get("input_sha256") or context.snapshot.get("input", {}).get(
             "sha256"
         )
@@ -51,7 +64,7 @@ class MediaInputResolver:
                 "input_changed",
                 "input SHA-256 does not match the submitted media revision",
             )
-        return media
+        return media, verified
 
     def model(
         self,

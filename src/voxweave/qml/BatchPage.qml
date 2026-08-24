@@ -10,12 +10,16 @@ Item {
     required property var bridge
     required property var theme
     property var models: []
+    property var allModels: []
     property var batches: []
     property string editingBatchId: ""
     property bool showArchived: false
     readonly property var visibleBatches: root.batches.filter(function(rule) {
         return root.showArchived || rule.state !== "archived"
     })
+    readonly property int activeBatchCount: root.batches.filter(function(rule) {
+        return rule.state !== "archived"
+    }).length
 
     function modelIndex(modelId) {
         for (var index = 0; index < batchModel.count; ++index)
@@ -32,6 +36,39 @@ Item {
         if (values.index_rate !== undefined) batchIndexRate.value = Number(values.index_rate)
         if (values.rms_mix_rate !== undefined) batchRmsMix.value = Number(values.rms_mix_rate)
         if (values.protect !== undefined) batchProtect.value = Number(values.protect)
+    }
+
+    function modelName(modelId) {
+        for (var index = 0; index < root.allModels.length; ++index)
+            if (String(root.allModels[index].id) === String(modelId))
+                return String(root.allModels[index].localized_name || modelId)
+        return String(modelId)
+    }
+
+    function resetForm() {
+        root.editingBatchId = ""
+        batchInput.text = ""
+        batchOutput.text = ""
+        batchModel.currentIndex = root.models.length > 0 ? 0 : -1
+        batchPresetName.text = "custom"
+        batchMode.currentIndex = 0
+        batchF0.currentIndex = 0
+        batchPitch.value = 0
+        batchIndexRate.value = 0.72
+        batchRmsMix.value = 0.25
+        batchProtect.value = 0.33
+        watchCheck.checked = false
+        root.applyRecommendations()
+    }
+
+    function itemCountText(counts) {
+        var values = counts || ({})
+        return root.bridge.text(root.bridge.language, "batch.counts")
+            .replace("{queued}", Number(values.queued || 0))
+            .replace("{running}", Number(values.running || 0))
+            .replace("{completed}", Number(values.completed || 0))
+            .replace("{failed}", Number(values.failed || 0)
+                + Number(values.cancelled || 0) + Number(values.interrupted || 0))
     }
 
     function editRule(rule) {
@@ -69,17 +106,21 @@ Item {
                 "content_mode": ["clean", "mixed", "singing"][batchMode.currentIndex]
             }
         })
-        root.editingBatchId = ""
     }
 
 FolderDialog {
     id: inputFolderDialog
-    onAccepted: batchInput.text = selectedFolder
+    onAccepted: batchInput.text = root.bridge.media.localPath(selectedFolder)
 }
 FolderDialog {
     id: outputFolderDialog
-    onAccepted: batchOutput.text = selectedFolder
+    onAccepted: batchOutput.text = root.bridge.media.localPath(selectedFolder)
 }
+
+    Connections {
+        target: root.bridge.batchRules
+        function onRuleSaved(_batchId) { root.resetForm() }
+    }
 
     objectName: "batchPage"
     ColumnLayout {
@@ -89,11 +130,11 @@ FolderDialog {
 
         PageHeader {
             Layout.fillWidth: true
-            title: root.bridge.text("nav.batch")
-            StatusPill { text: root.batches.length + " " + root.bridge.text("label.batch_rules"); tone: root.batches.length > 0 ? "info" : "neutral" }
+            title: root.bridge.text(root.bridge.language, "nav.batch")
+            StatusPill { text: root.activeBatchCount + " " + root.bridge.text(root.bridge.language, "label.batch_rules"); tone: root.activeBatchCount > 0 ? "info" : "neutral" }
             AppIconButton {
                 glyph: "\uE72C"
-                accessibleName: root.bridge.text("action.refresh")
+                accessibleName: root.bridge.text(root.bridge.language, "action.refresh")
                 onClicked: root.bridge.batchRules.refresh()
             }
         }
@@ -113,7 +154,7 @@ FolderDialog {
                     Layout.fillWidth: true
                     SectionHeader {
                         Layout.fillWidth: true
-                        title: root.bridge.text("section.batch_rule")
+                        title: root.bridge.text(root.bridge.language, "section.batch_rule")
                     }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.theme.border }
 
@@ -125,34 +166,34 @@ FolderDialog {
 
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.input_dir") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.input_dir") }
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 6
-                                AppTextField { id: batchInput; Layout.fillWidth: true; placeholderText: root.bridge.text("placeholder.input_dir") }
-                                AppButton { text: root.bridge.text("action.choose"); onClicked: inputFolderDialog.open() }
+                                AppTextField { id: batchInput; Layout.fillWidth: true; placeholderText: root.bridge.text(root.bridge.language, "placeholder.input_dir") }
+                                AppButton { text: root.bridge.text(root.bridge.language, "action.choose"); onClicked: inputFolderDialog.open() }
                             }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.output_dir") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.output_dir") }
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 6
-                                AppTextField { id: batchOutput; Layout.fillWidth: true; placeholderText: root.bridge.text("placeholder.output_dir") }
-                                AppButton { text: root.bridge.text("action.choose"); onClicked: outputFolderDialog.open() }
+                                AppTextField { id: batchOutput; Layout.fillWidth: true; placeholderText: root.bridge.text(root.bridge.language, "placeholder.output_dir") }
+                                AppButton { text: root.bridge.text(root.bridge.language, "action.choose"); onClicked: outputFolderDialog.open() }
                             }
                         }
                     }
 
-                    FieldLabel { text: root.bridge.text("field.model") }
+                    FieldLabel { text: root.bridge.text(root.bridge.language, "field.model") }
                     AppComboBox {
                         id: batchModel
                         Layout.fillWidth: true
                         model: root.models
                         textRole: "localized_name"
                         valueRole: "id"
-                        emptyText: root.bridge.text("empty.models.short")
+                        emptyText: root.bridge.text(root.bridge.language, "empty.models.short")
                         enabled: root.models.length > 0
                         onActivated: root.applyRecommendations()
                     }
@@ -164,42 +205,42 @@ FolderDialog {
                         rowSpacing: 8
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.preset_name") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.preset_name") }
                             AppTextField { id: batchPresetName; Layout.fillWidth: true; text: "custom" }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.mode") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.mode") }
                             AppComboBox {
                                 id: batchMode
                                 Layout.fillWidth: true
-                                model: [root.bridge.text("mode.clean"), root.bridge.text("mode.mixed"), root.bridge.text("mode.singing")]
+                                model: [root.bridge.text(root.bridge.language, "mode.clean"), root.bridge.text(root.bridge.language, "mode.mixed"), root.bridge.text(root.bridge.language, "mode.singing")]
                             }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.f0") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.f0") }
                             AppComboBox { id: batchF0; Layout.fillWidth: true; model: ["RMVPE", "FCPE", "PM"] }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.pitch") }
-                            AppSlider { id: batchPitch; Layout.fillWidth: true; from: -36; to: 36; value: 0; stepSize: 1; showPositiveSign: true; accessibleName: root.bridge.text("field.pitch") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.pitch") }
+                            AppSlider { id: batchPitch; Layout.fillWidth: true; from: -36; to: 36; value: 0; stepSize: 1; showPositiveSign: true; accessibleName: root.bridge.text(root.bridge.language, "field.pitch") }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.index_rate") }
-                            AppSlider { id: batchIndexRate; Layout.fillWidth: true; from: 0; to: 1; value: 0.72; stepSize: 0.01; decimals: 2; accessibleName: root.bridge.text("field.index_rate") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.index_rate") }
+                            AppSlider { id: batchIndexRate; Layout.fillWidth: true; from: 0; to: 1; value: 0.72; stepSize: 0.01; decimals: 2; accessibleName: root.bridge.text(root.bridge.language, "field.index_rate") }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.rms_mix") }
-                            AppSlider { id: batchRmsMix; Layout.fillWidth: true; from: 0; to: 1; value: 0.25; stepSize: 0.01; decimals: 2; accessibleName: root.bridge.text("field.rms_mix") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.rms_mix") }
+                            AppSlider { id: batchRmsMix; Layout.fillWidth: true; from: 0; to: 1; value: 0.25; stepSize: 0.01; decimals: 2; accessibleName: root.bridge.text(root.bridge.language, "field.rms_mix") }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
-                            FieldLabel { text: root.bridge.text("field.protect") }
-                            AppSlider { id: batchProtect; Layout.fillWidth: true; from: 0; to: 0.5; value: 0.33; stepSize: 0.01; decimals: 2; accessibleName: root.bridge.text("field.protect") }
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.protect") }
+                            AppSlider { id: batchProtect; Layout.fillWidth: true; from: 0; to: 0.5; value: 0.33; stepSize: 0.01; decimals: 2; accessibleName: root.bridge.text(root.bridge.language, "field.protect") }
                         }
                     }
 
@@ -216,17 +257,17 @@ FolderDialog {
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 2
-                                Label { text: root.bridge.text("batch.watch"); color: root.theme.text; font.family: root.theme.uiFont; font.pixelSize: 13; font.weight: Font.DemiBold }
+                                Label { text: root.bridge.text(root.bridge.language, "batch.watch"); color: root.theme.text; font.family: root.theme.uiFont; font.pixelSize: 13; font.weight: Font.DemiBold }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: root.bridge.text("batch.watch.detail")
+                                    text: root.bridge.text(root.bridge.language, "batch.watch.detail")
                                     color: root.theme.textDim
                                     font.family: root.theme.uiFont
                                     font.pixelSize: 11
                                     wrapMode: Text.Wrap
                                 }
                             }
-                            AppCheckBox { id: watchCheck; text: root.bridge.text("action.enable") }
+                            AppCheckBox { id: watchCheck; text: root.bridge.text(root.bridge.language, "action.enable") }
                         }
                     }
 
@@ -234,7 +275,7 @@ FolderDialog {
                         Layout.fillWidth: true
                         Label {
                             Layout.fillWidth: true
-                            text: root.bridge.text("hint.batch")
+                            text: root.bridge.text(root.bridge.language, "hint.batch")
                             color: root.theme.textDim
                             font.family: root.theme.uiFont
                             font.pixelSize: 11
@@ -242,29 +283,29 @@ FolderDialog {
                         }
                         AppButton {
                             text: root.editingBatchId.length > 0
-                                ? root.bridge.text("action.save_changes")
-                                : root.bridge.text("action.create_batch")
+                                ? root.bridge.text(root.bridge.language, "action.save_changes")
+                                : root.bridge.text(root.bridge.language, "action.create_batch")
                             kind: "primary"
                             enabled: batchInput.text.length > 0 && batchOutput.text.length > 0 && batchModel.currentIndex >= 0
                             onClicked: root.saveRule()
                         }
                         AppButton {
                             visible: root.editingBatchId.length > 0
-                            text: root.bridge.text("action.cancel")
-                            onClicked: root.editingBatchId = ""
+                            text: root.bridge.text(root.bridge.language, "action.cancel")
+                            onClicked: root.resetForm()
                         }
                     }
                 }
 
                 AppPanel {
                     Layout.fillWidth: true
-                    visible: root.batches.length > 0
+                    visible: root.batches.length > 0 || root.bridge.batchRules.loading
                     SectionHeader {
                         Layout.fillWidth: true
-                        title: root.bridge.text("section.batch_rules")
+                        title: root.bridge.text(root.bridge.language, "section.batch_rules")
                     }
                     AppCheckBox {
-                        text: root.bridge.text("batch.show_archived")
+                        text: root.bridge.text(root.bridge.language, "batch.show_archived")
                         checked: root.showArchived
                         onToggled: root.showArchived = checked
                     }
@@ -274,7 +315,7 @@ FolderDialog {
                             id: batchRule
                             required property var modelData
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 126
+                            Layout.preferredHeight: 146
                             radius: root.theme.radiusSmall
                             color: root.theme.field
                             border.color: root.theme.border
@@ -287,7 +328,7 @@ FolderDialog {
                                     Layout.fillWidth: true
                                     Label {
                                         Layout.fillWidth: true
-                                        text: batchRule.modelData.model_id + " · " + batchRule.modelData.preset_name
+                                        text: root.modelName(batchRule.modelData.model_id) + " · " + batchRule.modelData.preset_name
                                         color: root.theme.text
                                         font.family: root.theme.uiFont
                                         font.weight: Font.DemiBold
@@ -295,31 +336,31 @@ FolderDialog {
                                     }
                                     StatusPill {
                                         text: batchRule.modelData.state === "archived"
-                                            ? root.bridge.text("batch.state.archived")
+                                            ? root.bridge.text(root.bridge.language, "batch.state.archived")
                                             : batchRule.modelData.watch_enabled
-                                            ? root.bridge.text("batch.state.watching")
-                                            : root.bridge.text("batch.state.paused")
+                                            ? root.bridge.text(root.bridge.language, "batch.state.watching")
+                                            : root.bridge.text(root.bridge.language, "batch.state.paused")
                                         tone: batchRule.modelData.state === "archived"
                                             ? "warning" : batchRule.modelData.watch_enabled ? "success" : "neutral"
                                     }
                                     AppButton {
                                         compact: true
                                         visible: batchRule.modelData.state !== "archived"
-                                        text: root.bridge.text("action.run_batch")
+                                        text: root.bridge.text(root.bridge.language, "action.run_batch")
                                         enabled: !root.bridge.activity.busyKeys.includes("batch-run:" + batchRule.modelData.id)
                                         onClicked: root.bridge.batchRules.run(batchRule.modelData.id)
                                     }
                                     AppButton {
                                         compact: true
                                         visible: batchRule.modelData.state !== "archived"
-                                        text: root.bridge.text("action.edit")
+                                        text: root.bridge.text(root.bridge.language, "action.edit")
                                         onClicked: root.editRule(batchRule.modelData)
                                     }
                                     AppButton {
                                         compact: true
                                         text: batchRule.modelData.state === "archived"
-                                            ? root.bridge.text("action.restore")
-                                            : root.bridge.text("action.archive_rule")
+                                            ? root.bridge.text(root.bridge.language, "action.restore")
+                                            : root.bridge.text(root.bridge.language, "action.archive_rule")
                                         onClicked: root.bridge.batchRules.setArchived(
                                             batchRule.modelData.id,
                                             batchRule.modelData.state !== "archived"
@@ -331,7 +372,7 @@ FolderDialog {
                                             && Number(batchRule.modelData.item_counts.failed || 0)
                                             + Number(batchRule.modelData.item_counts.cancelled || 0)
                                             + Number(batchRule.modelData.item_counts.interrupted || 0) > 0
-                                        text: root.bridge.text("action.retry_failed")
+                                        text: root.bridge.text(root.bridge.language, "action.retry_failed")
                                         enabled: !root.bridge.activity.busyKeys.includes("batch-retry:" + batchRule.modelData.id)
                                         onClicked: root.bridge.batchRules.retry(batchRule.modelData.id)
                                     }
@@ -339,8 +380,8 @@ FolderDialog {
                                         compact: true
                                         visible: batchRule.modelData.state !== "archived"
                                         text: batchRule.modelData.watch_enabled
-                                            ? root.bridge.text("action.pause_watch")
-                                            : root.bridge.text("action.resume_watch")
+                                            ? root.bridge.text(root.bridge.language, "action.pause_watch")
+                                            : root.bridge.text(root.bridge.language, "action.resume_watch")
                                         onClicked: root.bridge.batchRules.setWatch(
                                             batchRule.modelData.id, !batchRule.modelData.watch_enabled
                                         )
@@ -356,32 +397,63 @@ FolderDialog {
                                 }
                                 Label {
                                     Layout.fillWidth: true
-                                    text: root.bridge.text("field.pitch") + " "
+                                    text: root.bridge.text(root.bridge.language, "field.pitch") + " "
                                         + Number((batchRule.modelData.preset || {}).pitch || 0)
                                         + " · " + String((batchRule.modelData.preset || {}).f0 || "rmvpe").toUpperCase()
-                                        + " · " + root.bridge.text("field.index_rate") + " "
+                                        + " · " + root.bridge.text(root.bridge.language, "field.index_rate") + " "
                                         + Number((batchRule.modelData.preset || {}).index_rate || 0.72).toFixed(2)
                                     color: root.theme.textMuted
                                     font.family: root.theme.uiFont
                                     font.pixelSize: 11
                                     elide: Text.ElideRight
                                 }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: root.itemCountText(batchRule.modelData.item_counts)
+                                    color: root.theme.textMuted
+                                    font.family: root.theme.uiFont
+                                    font.pixelSize: 10
+                                    elide: Text.ElideRight
+                                }
                             }
                         }
                     }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: root.bridge.batchRules.loading
+                        text: root.bridge.text(root.bridge.language, "batch.loading")
+                        color: root.theme.textMuted
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: !root.bridge.batchRules.loading
+                            && root.batches.length > 0 && root.visibleBatches.length === 0
+                        text: root.bridge.text(root.bridge.language, "batch.filtered_empty")
+                        color: root.theme.textMuted
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                }
+
+                EmptyState {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 150
+                    visible: !root.bridge.batchRules.loading && root.batches.length === 0
+                    title: root.bridge.text(root.bridge.language, "batch.empty.title")
+                    detail: root.bridge.text(root.bridge.language, "batch.empty.detail")
                 }
 
                 AppPanel {
                     Layout.fillWidth: true
                     SectionHeader {
                         Layout.fillWidth: true
-                        title: root.bridge.text("section.batch_behavior")
-                        badgeText: root.bridge.text("badge.non_destructive")
+                        title: root.bridge.text(root.bridge.language, "section.batch_behavior")
+                        badgeText: root.bridge.text(root.bridge.language, "badge.non_destructive")
                         badgeTone: "success"
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: root.bridge.text("batch.behavior.detail")
+                        text: root.bridge.text(root.bridge.language, "batch.behavior.detail")
                         color: root.theme.textMuted
                         font.family: root.theme.uiFont
                         font.pixelSize: 12

@@ -2,25 +2,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 
+from .bounded_ids import BoundedIdSet
+from .capabilities import STARTER_MODEL_IDS
 from .gui_activity import TaskActivity
-from .gui_presenters import localized_model_name
+from .gui_presenters import localized_model_name, localized_text
 from .gui_requests import RequestCoordinator
 from .gui_support import local_path
 from .gui_tasks import TaskFeed
 
 MODEL_OPERATIONS = {"model.import", "model.catalog.install", "model.scan"}
-STARTER_MODEL_IDS = (
-    "community.zh-male-young",
-    "community.zh-female-senior",
-)
 
 
 class ModelCatalogViewModel(QObject):
     itemsChanged = Signal()
     catalogItemsChanged = Signal()
+    loadingChanged = Signal()
     starterInstallRequested = Signal(object)
+    conversionModelRequested = Signal(str)
 
     def __init__(
         self,
@@ -38,48 +39,105 @@ class ModelCatalogViewModel(QObject):
         self.status_callback = status_callback
         self._items: list[dict[str, Any]] = []
         self._catalog_items: list[dict[str, Any]] = []
+        self._starter_details: dict[str, dict[str, Any]] = {}
         self._catalog_downloads: dict[str, float] = {}
-        self._handled_tasks: set[str] = set()
-        self._automatic_scan_started = False
+        self._handled_tasks = BoundedIdSet()
         self._automatic_provisioning = False
+        self._startup_requested = False
+        self._startup_scan_started = False
+        self._startup_scan_complete = False
+        self._model_list_loaded = False
+        self._catalog_loaded = False
+        self._models_loading = False
+        self._catalog_loading = False
+        self._provision_pending = False
+        self._startup_provisioned = False
         self._starter_queue: list[str] = []
+        self._starter_total = 0
         task_feed.taskUpdated.connect(self._consume_task)
-
-    def _text(self, key: str) -> str:
-        language, translations = self.locale_context()
-        table = translations.get(language, translations["en"])
-        return table.get(key, key)
 
     def _set_status(self, key: str, kind: str = "info", **values: Any) -> None:
         if self.status_callback:
-            self.status_callback(self._text(key).format(**values), kind)
+            self.status_callback(
+                localized_text(key, self.locale_context).format(**values), kind
+            )
 
     def _set_items(self, result: list[dict[str, Any]]) -> None:
         self._items = result
         self.itemsChanged.emit()
 
-    def _request_catalog(self) -> None:
+    def _emit_loading_changed(self) -> None:
+        self.loadingChanged.emit()
+
+    @Property(bool, notify=loadingChanged)
+    def loading(self) -> bool:
+        return (
+            self._models_loading
+            or self._catalog_loading
+            or not self._model_list_loaded
+            or not self._catalog_loaded
+        )
+
+    @Property(bool, notify=loadingChanged)
+    def catalogLoading(self) -> bool:
+        return self._catalog_loading or not self._catalog_loaded
+
+    def _request_catalog(self, completed: Any = None) -> None:
+        self._catalog_loading = True
+        self._emit_loading_changed()
+
         def update(result: list[dict[str, Any]]) -> None:
             self._catalog_items = result
+            self._starter_details = {
+                str(entry["id"]): dict(entry)
+                for entry in result
+                if bool(entry.get("starter"))
+                and int(entry.get("download_size_bytes") or 0) > 0
+            }
             installed = {str(entry["id"]) for entry in result if bool(entry.get("installed"))}
             for model_id in installed:
                 self._catalog_downloads.pop(model_id, None)
+            self._catalog_loaded = True
+            self._catalog_loading = False
             self.catalogItemsChanged.emit()
+            self._emit_loading_changed()
+            if completed:
+                completed()
+            self._continue_startup_provisioning()
+
+        def failed(message: str) -> None:
+            self._catalog_items = []
+            self._starter_details = {}
+            self._catalog_loaded = True
+            self._catalog_loading = False
+            self.catalogItemsChanged.emit()
+            self._emit_loading_changed()
+            self._provision_failed(message)
+            self._set_status("models.catalog_unavailable", "danger")
 
         self.requests.submit(
             "model.catalog.list",
             {},
             update,
+            show_status=False,
+            error_callback=failed,
             request_key="model-catalog",
         )
 
     @Property("QVariantList", notify=itemsChanged)
     def items(self) -> list[dict[str, Any]]:
         language, translations = self.locale_context()
+        table = translations.get(language, translations.get("en", {}))
         projected = []
         for model in self._items:
             item = dict(model)
             item["localized_name"] = localized_model_name(model, language, translations)
+            item["license_label"] = (
+                table.get("models.license_unknown", "Unknown license")
+                if not model.get("license_spdx")
+                or model.get("license_spdx") == "LicenseRef-Unknown"
+                else str(model["license_spdx"])
+            )
             projected.append(item)
         return projected
 
@@ -114,20 +172,53 @@ class ModelCatalogViewModel(QObject):
             projected.append(item)
         return projected
 
+    @Property("QVariantMap", notify=catalogItemsChanged)
+    def starterDetails(self) -> dict[str, dict[str, Any]]:
+        return {key: dict(value) for key, value in self._starter_details.items()}
+
     def _refresh(self, *, discover_local: bool) -> None:
+        self._models_loading = True
+        self._emit_loading_changed()
+
         def update(result: list[dict[str, Any]]) -> None:
             self._set_items(result)
-            if discover_local and not result and not self._automatic_scan_started:
-                self._automatic_scan_started = True
-                self.scan()
+            self._model_list_loaded = True
+            self._models_loading = False
+            self._emit_loading_changed()
+            if discover_local:
+                if not result and not self._startup_scan_started:
+                    self._startup_scan_started = True
+                    self.activity.submit(
+                        "model.scan",
+                        {},
+                        action_key="model-scan",
+                        completed=self._startup_scan_completed,
+                        failure_callback=self._provision_failed,
+                    )
+                self._continue_startup_provisioning()
 
-        self.requests.submit("model.list", {}, update, request_key="models")
+        def failed(_message: str) -> None:
+            self._model_list_loaded = True
+            self._models_loading = False
+            self._emit_loading_changed()
+            self._provision_failed(_message)
+
+        self.requests.submit(
+            "model.list",
+            {},
+            update,
+            error_callback=failed,
+            request_key="models",
+        )
         self._request_catalog()
 
     @Slot()
     def discover(self) -> None:
-        """Load the library and scan configured RVC roots when it is empty."""
+        """Load model and catalog state once; runtime readiness owns provisioning."""
 
+        if self._startup_requested:
+            return
+        self._startup_requested = True
         self._refresh(discover_local=True)
 
     @Slot()
@@ -138,34 +229,50 @@ class ModelCatalogViewModel(QObject):
     def provision(self) -> None:
         """Make a packaged first run usable without asking for setup choices."""
 
-        if self._automatic_provisioning:
+        if self._startup_provisioned or self._automatic_provisioning:
             return
+        self._provision_pending = True
+        if not self._startup_requested:
+            self.discover()
+        self._continue_startup_provisioning()
+
+    def _continue_startup_provisioning(self) -> None:
+        if (
+            not self._provision_pending
+            or self._startup_provisioned
+            or self._automatic_provisioning
+            or not self._model_list_loaded
+            or not self._catalog_loaded
+            or (self._startup_scan_started and not self._startup_scan_complete)
+        ):
+            return
+        self._provision_pending = False
         self._automatic_provisioning = True
         self._set_status("models.auto.checking")
-        self._request_catalog()
-
-        def update(result: list[dict[str, Any]]) -> None:
-            self._set_items(result)
-            ready = [
-                item
-                for item in result
-                if item.get("status") == "ready" and not item.get("archived")
-            ]
-            if not ready and any(item.get("archived") for item in result):
-                self._finish_provisioning()
-                return
-            installed_starters = {
-                str(item["id"]) for item in ready if item.get("id") in STARTER_MODEL_IDS
-            }
-            if ready and not installed_starters:
-                self._finish_provisioning()
-                return
-            if installed_starters:
-                self._starter_queue = [
-                    model_id for model_id in STARTER_MODEL_IDS if model_id not in installed_starters
-                ]
-                self._request_starter_install()
-                return
+        ready = [
+            item
+            for item in self._items
+            if item.get("status") == "ready" and not item.get("archived")
+        ]
+        # Startup provisioning exists to make an empty installation usable. Once
+        # any active model is ready, prompting for additional starter models is
+        # both unnecessary and contradicts the dialog's "no usable models" text.
+        if ready:
+            self._finish_provisioning()
+            return
+        archived_ready = [
+            item
+            for item in self._items
+            if item.get("status") == "ready" and item.get("archived")
+        ]
+        if archived_ready:
+            self._finish_provisioning("models.auto.archived", "warning")
+            return
+        if self._startup_scan_complete:
+            self._starter_queue = self._available_starter_ids()
+            self._request_starter_install()
+        else:
+            self._startup_scan_started = True
             self.activity.submit(
                 "model.scan",
                 {},
@@ -174,17 +281,40 @@ class ModelCatalogViewModel(QObject):
                 failure_callback=self._provision_failed,
             )
 
-        self.requests.submit("model.list", {}, update, request_key="models")
+    def _startup_scan_completed(self, result: list[dict[str, Any]]) -> None:
+        self._startup_scan_complete = True
+        self._set_items(result)
+        self._continue_startup_provisioning()
 
     def _local_scan_completed(self, result: list[dict[str, Any]]) -> None:
         self._set_items(result)
-        if any(item.get("status") == "ready" for item in result):
+        if any(
+            item.get("status") == "ready" and not item.get("archived")
+            for item in result
+        ):
             self._finish_provisioning()
             return
-        self._starter_queue = list(STARTER_MODEL_IDS)
+        if any(
+            item.get("status") == "ready" and item.get("archived")
+            for item in result
+        ):
+            self._finish_provisioning("models.auto.archived", "warning")
+            return
+        self._starter_queue = self._available_starter_ids()
         self._request_starter_install()
 
+    def _available_starter_ids(self) -> list[str]:
+        return [
+            model_id
+            for model_id in STARTER_MODEL_IDS
+            if model_id in self._starter_details
+        ]
+
     def _request_starter_install(self) -> None:
+        if not self._starter_queue:
+            self._finish_provisioning("models.auto.no_starter", "warning")
+            return
+        self._starter_total = len(self._starter_queue)
         self.starterInstallRequested.emit(list(self._starter_queue))
 
     @Slot()
@@ -195,6 +325,7 @@ class ModelCatalogViewModel(QObject):
     def declineStarterInstall(self) -> None:
         self._starter_queue.clear()
         self._automatic_provisioning = False
+        self._startup_provisioned = True
         self._set_status("models.auto.cancelled")
 
     def _install_next_starter(self) -> None:
@@ -202,11 +333,11 @@ class ModelCatalogViewModel(QObject):
             self._finish_provisioning()
             return
         model_id = self._starter_queue.pop(0)
-        current = len(STARTER_MODEL_IDS) - len(self._starter_queue)
+        current = self._starter_total - len(self._starter_queue)
         self._set_status(
             "models.auto.installing",
             current=current,
-            total=len(STARTER_MODEL_IDS),
+            total=self._starter_total,
         )
 
         def installed(model: dict[str, Any]) -> None:
@@ -226,10 +357,28 @@ class ModelCatalogViewModel(QObject):
         self._starter_queue.clear()
         self._automatic_provisioning = False
 
-    def _finish_provisioning(self) -> None:
+    def _finish_provisioning(
+        self, status_key: str = "models.auto.ready", kind: str = "success"
+    ) -> None:
         self._automatic_provisioning = False
-        self._set_status("models.auto.ready", "success")
-        self.refresh()
+        self._startup_provisioned = True
+        self._set_status(status_key, kind)
+
+    @Slot(str)
+    def useInConversion(self, model_id: str) -> None:
+        if any(
+            item.get("id") == model_id
+            and item.get("status") == "ready"
+            and not item.get("archived")
+            for item in self._items
+        ):
+            self.conversionModelRequested.emit(model_id)
+
+    @Slot(str)
+    def openSource(self, source_url: str) -> None:
+        url = QUrl(source_url)
+        if url.scheme().casefold() != "https" or not QDesktopServices.openUrl(url):
+            self._set_status("models.source_open_failed", "danger")
 
     @Slot(str)
     def installCatalogModel(self, model_id: str) -> None:
@@ -268,48 +417,62 @@ class ModelCatalogViewModel(QObject):
             action_key="model-scan",
         )
 
-    @Slot(str, str, str, str, str, str)
-    def importLocal(
-        self,
-        model_value: str,
-        index_value: str,
-        model_id: str,
-        display_name: str,
-        license_spdx: str,
-        source_url: str,
-    ) -> None:
+    @Slot("QVariantMap")
+    def importLocal(self, value: dict[str, Any]) -> None:
+        command = dict(value)
+        model_value = str(command["model"])
+        index_value = str(command.get("index") or "")
         arguments: dict[str, Any] = {"model": local_path(model_value)}
         optional = {
             "index": local_path(index_value) if index_value else "",
-            "id": model_id.strip(),
-            "display_name": display_name.strip(),
-            "license_spdx": license_spdx.strip(),
-            "source_url": source_url.strip(),
+            "id": str(command.get("id") or "").strip(),
+            "display_name": str(command.get("display_name") or "").strip(),
+            "license_spdx": str(command.get("license_spdx") or "").strip(),
+            "source_url": str(command.get("source_url") or "").strip(),
         }
         arguments.update({key: value for key, value in optional.items() if value})
         self.activity.submit("model.import", arguments, action_key="model-import")
 
-    @Slot(str, str, str, str, str, int, str)
-    def importUrl(
-        self,
-        model_url: str,
-        model_id: str,
-        display_name: str,
-        license_spdx: str,
-        model_sha256: str,
-        download_size_bytes: int,
-        source_url: str,
-    ) -> None:
+    @Slot(str, str)
+    def chooseIndex(self, model_id: str, index_path: str) -> None:
+        model = next((item for item in self._items if item.get("id") == model_id), None)
+        if model is None or index_path not in list(model.get("index_candidates") or []):
+            self._set_status("models.index_choice_invalid", "danger")
+            return
+        self.importLocal(
+            {
+                "model": str(model["model_path"]),
+                "index": index_path,
+                "id": model_id,
+                "display_name": str(model["display_name"]),
+                "license_spdx": str(model.get("license_spdx") or ""),
+                "source_url": str(model.get("source_url") or ""),
+            }
+        )
+
+    @Slot("QVariantMap")
+    def importUrl(self, value: dict[str, Any]) -> None:
+        command = dict(value)
         arguments = {
-            "model": model_url.strip(),
-            "id": model_id.strip(),
-            "display_name": display_name.strip(),
-            "license_spdx": license_spdx.strip(),
-            "model_sha256": model_sha256.strip(),
-            "download_size_bytes": download_size_bytes,
+            "model": str(command["model"]).strip(),
+            "id": str(command["id"]).strip(),
+            "display_name": str(command["display_name"]).strip(),
+            "license_spdx": str(command["license_spdx"]).strip(),
+            "model_sha256": str(command["model_sha256"]).strip(),
+            "download_size_bytes": int(command["download_size_bytes"]),
         }
+        source_url = str(command.get("source_url") or "")
         if source_url.strip():
             arguments["source_url"] = source_url.strip()
+        index_url = str(command.get("index_url") or "").strip()
+        if index_url:
+            arguments.update(
+                {
+                    "index_url": index_url,
+                    "index_sha256": str(command["index_sha256"]).strip(),
+                    "index_size_bytes": int(command["index_size_bytes"]),
+                }
+            )
         self.activity.submit("model.import", arguments, action_key="model-import")
 
     @Slot(object)
