@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .batch_repository import BatchRepository
+from .batch_variants import BatchVariantService
 from .capabilities import MEDIA_EXTENSIONS
 from .database import utc_now
 
 DEFAULT_EXTENSIONS = list(MEDIA_EXTENSIONS)
-
-
-def filesystem_slug(value: str) -> str:
-    normalized = re.sub(r"[<>:\"/\\|?*\x00-\x1f]+", "-", value.strip())
-    return re.sub(r"[-\s]+", "-", normalized).strip("-. ") or "default"
 
 
 class BatchRuleService:
@@ -28,7 +23,7 @@ class BatchRuleService:
         resolve_model: Callable[[str], dict[str, Any]],
     ) -> None:
         self.repository = repository
-        self.resolve_model = resolve_model
+        self.variants = BatchVariantService(resolve_model)
 
     @staticmethod
     def _roots(arguments: dict[str, Any]) -> tuple[Path, Path]:
@@ -43,7 +38,8 @@ class BatchRuleService:
 
     def create(self, arguments: dict[str, Any]) -> dict[str, Any]:
         input_root, output_root = self._roots(arguments)
-        model = self.resolve_model(arguments["model"])
+        variants = self.variants.resolve_many(arguments)
+        model = variants[0]
         batch_id = str(uuid.uuid4())
         now = utc_now()
         self.repository.create_rule(
@@ -51,14 +47,21 @@ class BatchRuleService:
                 batch_id,
                 str(input_root),
                 str(output_root),
-                model["id"],
+                model["model_id"],
                 model["model_sha256"],
                 model["index_sha256"],
-                json.dumps(arguments.get("preset") or {}, ensure_ascii=False),
-                filesystem_slug(arguments.get("preset_name") or "default"),
+                json.dumps(model["preset"], ensure_ascii=False),
+                model["preset_name"],
                 int(bool(arguments.get("recursive", True))),
                 int(bool(arguments.get("watch", False))),
                 json.dumps(arguments.get("extensions") or DEFAULT_EXTENSIONS),
+                arguments.get("naming_template", "{stem}_{source_ext}_{model}_{preset}_{hash}"),
+                int(arguments.get("preserve_structure", True)),
+                arguments.get("collision_policy", "skip"),
+                model["output_format"],
+                json.dumps(model["include_globs"], ensure_ascii=False),
+                json.dumps(model["exclude_globs"], ensure_ascii=False),
+                json.dumps(variants, ensure_ascii=False),
                 "active",
                 now,
                 now,
@@ -70,20 +73,28 @@ class BatchRuleService:
         batch_id = arguments["batch_id"]
         self.get(batch_id)
         input_root, output_root = self._roots(arguments)
-        model = self.resolve_model(arguments["model"])
+        variants = self.variants.resolve_many(arguments)
+        model = variants[0]
         self.repository.update_rule(
             batch_id,
             (
                 str(input_root),
                 str(output_root),
-                model["id"],
+                model["model_id"],
                 model["model_sha256"],
                 model["index_sha256"],
-                json.dumps(arguments.get("preset") or {}, ensure_ascii=False),
-                filesystem_slug(arguments.get("preset_name") or "default"),
+                json.dumps(model["preset"], ensure_ascii=False),
+                model["preset_name"],
                 int(bool(arguments.get("recursive", True))),
                 int(bool(arguments.get("watch", False))),
                 json.dumps(arguments.get("extensions") or DEFAULT_EXTENSIONS),
+                arguments.get("naming_template", "{stem}_{source_ext}_{model}_{preset}_{hash}"),
+                int(arguments.get("preserve_structure", True)),
+                arguments.get("collision_policy", "skip"),
+                model["output_format"],
+                json.dumps(model["include_globs"], ensure_ascii=False),
+                json.dumps(model["exclude_globs"], ensure_ascii=False),
+                json.dumps(variants, ensure_ascii=False),
                 utc_now(),
             ),
         )

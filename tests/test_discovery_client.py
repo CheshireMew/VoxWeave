@@ -107,6 +107,93 @@ def test_service_ownership_requires_the_discovered_pid_to_match_spawned_pid(
     assert started is False
 
 
+def test_spawned_service_inherits_the_gui_data_root_and_is_owned(tmp_path, monkeypatch) -> None:
+    settings = Settings(data_root=str(tmp_path / "selected-data"))
+    settings.ensure_layout()
+    discovery = Discovery(
+        pid=321,
+        port=12345,
+        token="token",
+        protocol=PROTOCOL,
+        protocol_version=PROTOCOL_VERSION,
+        created_at=1.0,
+    )
+    reads = iter([None, None, discovery])
+    captured: dict[str, object] = {}
+
+    class Process:
+        pid = 321
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    def launch(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return Process()
+
+    monkeypatch.setattr(client, "read_discovery", lambda _settings: next(reads))
+    monkeypatch.setattr(client, "_handshake", lambda _discovery: True)
+    monkeypatch.setattr(client, "start_managed_process", launch)
+
+    result, started = client.ensure_service_with_state(settings, timeout=1)
+
+    assert result is discovery
+    assert started is True
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["VOXWEAVE_HOME"] == str(settings.root.resolve())
+    assert environment["VOXWEAVE_SERVICE_OWNER_TOKEN"]
+
+
+def test_service_owner_token_survives_a_windows_launcher_pid_change(
+    tmp_path, monkeypatch
+) -> None:
+    settings = Settings(data_root=str(tmp_path / "selected-data"))
+    settings.ensure_layout()
+    captured: dict[str, object] = {}
+    reads = 0
+
+    class Process:
+        pid = 111
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    def launch(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return Process()
+
+    def read(_settings):
+        nonlocal reads
+        reads += 1
+        if reads < 3:
+            return None
+        environment = captured["env"]
+        assert isinstance(environment, dict)
+        return Discovery(
+            pid=222,
+            port=12345,
+            token="token",
+            protocol=PROTOCOL,
+            protocol_version=PROTOCOL_VERSION,
+            created_at=1.0,
+            owner_token=environment["VOXWEAVE_SERVICE_OWNER_TOKEN"],
+        )
+
+    monkeypatch.setattr(client, "read_discovery", read)
+    monkeypatch.setattr(client, "_handshake", lambda _discovery: True)
+    monkeypatch.setattr(client, "start_managed_process", launch)
+
+    discovery, started = client.ensure_service_with_state(settings, timeout=1)
+
+    assert discovery.pid == 222
+    assert started is True
+
+
 def test_frozen_service_uses_the_desktop_executable(monkeypatch) -> None:
     monkeypatch.setattr(client.sys, "frozen", True, raising=False)
     monkeypatch.setattr(client.sys, "executable", r"C:\Apps\VoxWeave\VoxWeave.exe")

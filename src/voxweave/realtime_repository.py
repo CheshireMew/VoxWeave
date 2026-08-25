@@ -166,6 +166,29 @@ class RealtimeRepository:
                     merged,
                 )
 
+    def update_control(self, session_id: str, changes: dict[str, Any]) -> None:
+        with self.database.connect() as db:
+            current = db.execute(
+                "SELECT state,metrics_json FROM realtime_sessions WHERE id=?",
+                (session_id,),
+            ).fetchone()
+            if not current or current["state"] not in {"starting", "running"}:
+                raise RuntimeError("realtime session is not active")
+            metrics = json.loads(current["metrics_json"] or "{}")
+            metrics.update(changes)
+            db.execute(
+                "UPDATE realtime_sessions SET metrics_json=?,updated_at=? WHERE id=?",
+                (json.dumps(metrics, ensure_ascii=False), utc_now(), session_id),
+            )
+            self._insert_event(
+                db,
+                session_id,
+                current["state"],
+                "control",
+                "realtime controls changed",
+                metrics,
+            )
+
     def get(self, session_id: str) -> dict[str, Any]:
         row = self.database.fetch_one(
             "SELECT * FROM realtime_sessions WHERE id=?", (session_id,)

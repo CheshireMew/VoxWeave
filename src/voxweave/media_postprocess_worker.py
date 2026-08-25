@@ -16,6 +16,7 @@ def main() -> int:
 
     from voxweave.media_postprocess import (
         align,
+        dereverb,
         finalize_long,
         finalize_selected,
         prepare_long,
@@ -25,6 +26,12 @@ def main() -> int:
     if args.operation == "align":
         result = align(
             Path(request["converted"]), Path(request["original"]), Path(request["output"])
+        )
+    elif args.operation == "dereverb":
+        result = dereverb(
+            Path(request["input"]),
+            Path(request["output"]),
+            float(request["strength"]),
         )
     elif args.operation == "prepare-long":
         result = prepare_long(Path(request["input"]), Path(request["chunk_dir"]))
@@ -38,6 +45,9 @@ def main() -> int:
             list(request["segments"]),
             set(request["selected_speakers"]),
             str(request["overlap_policy"]),
+            set(request["selected_segment_ids"])
+            if request.get("selected_segment_ids") is not None
+            else None,
         )
     elif args.operation == "finalize-selected":
         result = finalize_selected(request["manifest"])

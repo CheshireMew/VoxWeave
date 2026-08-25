@@ -82,6 +82,7 @@ BLOCK_SECONDS_SPEC = ParameterSpec(
     ),
 )
 TEST_MODE_SPEC = ParameterSpec("boolean", False)
+PUSH_TO_TALK_SPEC = ParameterSpec("boolean", False)
 
 RVC_PARAMETER_SPECS = {
     "pitch": PITCH_SPEC,
@@ -100,6 +101,7 @@ REALTIME_PARAMETER_SPECS = {
     "input_gate_db": INPUT_GATE_DB_SPEC,
     "block_seconds": BLOCK_SECONDS_SPEC,
     "test_mode": TEST_MODE_SPEC,
+    "push_to_talk": PUSH_TO_TALK_SPEC,
 }
 
 DEFAULT_REALTIME_SETTINGS: dict[str, Any] = {
@@ -176,9 +178,20 @@ def normalize_realtime_start(arguments: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer")
         values[name] = value
-    for name in ("vad_threshold", "input_gate_db", "block_seconds", "test_mode"):
+    for name in (
+        "vad_threshold",
+        "input_gate_db",
+        "block_seconds",
+        "test_mode",
+        "push_to_talk",
+    ):
         spec = REALTIME_PARAMETER_SPECS[name]
         values[name] = _normalize_parameter(name, arguments.get(name, spec.default), spec)
+    values["recording"] = bool(arguments.get("recording", False))
+    recording_directory = arguments.get("recording_directory")
+    if recording_directory is not None and not isinstance(recording_directory, str):
+        raise ValueError("recording_directory must be a path string")
+    values["recording_directory"] = recording_directory
     values.update(REALTIME_WORKER_DEFAULTS)
     return values
 

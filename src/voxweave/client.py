@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -68,9 +69,13 @@ def ensure_service_with_state(settings: Settings, timeout: float = 120) -> tuple
         if discovery and _handshake(discovery):
             return discovery, False
         command = service_command()
+        child_environment = os.environ.copy()
+        child_environment["VOXWEAVE_HOME"] = str(settings.root.resolve())
+        owner_token = secrets.token_urlsafe(24)
+        child_environment["VOXWEAVE_SERVICE_OWNER_TOKEN"] = owner_token
         kwargs: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
-            "env": os.environ.copy(),
+            "env": child_environment,
         }
         settings.logs_dir.mkdir(parents=True, exist_ok=True)
         startup_log = settings.logs_dir / "service-startup.log"
@@ -80,6 +85,8 @@ def ensure_service_with_state(settings: Settings, timeout: float = 120) -> tuple
         while time.monotonic() < deadline:
             discovery = read_discovery(settings)
             if discovery and _handshake(discovery):
+                if discovery.owner_token is not None:
+                    return discovery, discovery.owner_token == owner_token
                 return discovery, discovery.pid == getattr(process, "pid", None)
             if process.poll() is not None:
                 break
@@ -144,8 +151,13 @@ class ManagedServiceClient:
             if self._discovery is not None:
                 return self._discovery
         discovery, started = ensure_service_with_state(self.settings)
-        capabilities = _describe(discovery)
-        _validate_capabilities(capabilities)
+        try:
+            capabilities = _describe(discovery)
+            _validate_capabilities(capabilities)
+        except Exception:
+            if started:
+                shutdown_service(self.settings)
+            raise
         stop_after_start = False
         closing = False
         with self._lock:

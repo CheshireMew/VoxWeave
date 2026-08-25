@@ -31,15 +31,23 @@
       ]
     },
     "model": {
-      "type": "object",
-      "required": ["id", "display_name", "model_sha256"],
-      "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "display_name": {"type": "string", "minLength": 1},
-        "model_sha256": {"$ref": "#/$defs/sha256"},
-        "index_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
-      },
-      "additionalProperties": false
+      "oneOf": [
+        {"$ref": "#/$defs/model"},
+        {
+          "type": "object",
+          "required": ["id", "display_name", "models"],
+          "properties": {
+            "id": {"const": "multiple"},
+            "display_name": {"type": "string", "minLength": 1},
+            "models": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"$ref": "#/$defs/model"}
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "parameters": {
       "type": "object",
@@ -50,19 +58,66 @@
         "index_rate": {"type": "number", "minimum": 0, "maximum": 1},
         "rms_mix_rate": {"type": "number", "minimum": 0, "maximum": 1},
         "protect": {"type": "number", "minimum": 0, "maximum": 0.5},
-        "content_mode": {"enum": ["clean", "mixed", "singing"]}
+        "content_mode": {"enum": ["clean", "mixed", "singing"]},
+        "processing_chain": {"$ref": "#/$defs/processingChain"}
       },
       "additionalProperties": false
     },
     "selected_speakers": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "assignments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["segment_ids", "model", "parameters"],
+        "properties": {
+          "segment_ids": {"type": "array", "items": {"type": "string"}},
+          "model": {"$ref": "#/$defs/model"},
+          "parameters": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "project": {"type": ["object", "null"]},
     "separation": {"type": ["object", "null"]},
     "loudness_match": {"type": ["object", "null"]},
+    "processing_chain": {"type": "object"},
     "segments": {"type": "array", "items": {"type": "object"}},
     "manifest_path": {"type": "string", "minLength": 1}
   },
   "additionalProperties": false,
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model": {
+      "type": "object",
+      "required": ["id", "display_name", "model_sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "display_name": {"type": "string", "minLength": 1},
+        "model_sha256": {"$ref": "#/$defs/sha256"},
+        "index_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}
+      },
+      "additionalProperties": false
+    },
+    "processingChain": {
+      "type": "object",
+      "properties": {
+        "noise_reduction_db": {"type": "number", "minimum": 0, "maximum": 30},
+        "highpass_hz": {"type": "integer", "minimum": 0, "maximum": 400},
+        "low_eq_db": {"type": "number", "minimum": -12, "maximum": 12},
+        "presence_eq_db": {"type": "number", "minimum": -12, "maximum": 12},
+        "compressor": {"type": "boolean"},
+        "deesser": {"type": "boolean"},
+        "target_lufs": {
+          "anyOf": [
+            {"type": "number", "minimum": -24, "maximum": -9},
+            {"type": "null"}
+          ]
+        },
+        "limiter_dbfs": {"type": "number", "minimum": -3, "maximum": -0.1},
+        "trim_silence": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "media": {
       "type": "object",
       "required": [

@@ -11,12 +11,26 @@ from .parameter_contracts import (
     realtime_parameter_capabilities,
 )
 
+DEFAULT_GLOBAL_HOTKEYS = {
+    "start_stop": "Ctrl+Alt+F9",
+    "bypass": "Ctrl+Alt+F10",
+    "mute": "Ctrl+Alt+F11",
+    "push_to_talk": "Ctrl+Alt+F12",
+}
+
 
 class RealtimeViewModel(QObject):
     devicesChanged = Signal()
     audioRouteChanged = Signal()
     statusChanged = Signal()
     audioTestChanged = Signal()
+    scenesChanged = Signal()
+    routingChanged = Signal()
+    hotkeysChanged = Signal()
+    calibrationChanged = Signal()
+    routingTestChanged = Signal()
+    recordingPromotionChanged = Signal()
+    miniPanelRequested = Signal()
 
     def __init__(
         self,
@@ -46,6 +60,18 @@ class RealtimeViewModel(QObject):
         self._devices_loaded = False
         self._audio_test: dict[str, Any] = {}
         self._audio_testing = False
+        self._scenes: list[dict[str, Any]] = []
+        self._routing: dict[str, Any] = {
+            "virtual_audio_available": False,
+            "detected_products": [],
+            "routes": [],
+            "instructions": [],
+        }
+        self._active_scene_id = ""
+        self._hotkeys = dict(DEFAULT_GLOBAL_HOTKEYS)
+        self._calibration: dict[str, Any] = {}
+        self._routing_test: dict[str, Any] = {}
+        self._recording_promotion: dict[str, Any] = {}
         self._closed = False
         self.timer = QTimer(self)
         self.timer.setInterval(250)
@@ -160,6 +186,30 @@ class RealtimeViewModel(QObject):
     @Property(bool, notify=audioTestChanged)
     def audioTesting(self) -> bool:
         return self._audio_testing
+
+    @Property("QVariantList", notify=scenesChanged)
+    def scenes(self) -> list[dict[str, Any]]:
+        return self._scenes
+
+    @Property("QVariantMap", notify=routingChanged)
+    def routing(self) -> dict[str, Any]:
+        return self._routing
+
+    @Property("QVariantMap", notify=hotkeysChanged)
+    def hotkeys(self) -> dict[str, str]:
+        return dict(self._hotkeys)
+
+    @Property("QVariantMap", notify=calibrationChanged)
+    def calibration(self) -> dict[str, Any]:
+        return dict(self._calibration)
+
+    @Property("QVariantMap", notify=routingTestChanged)
+    def routingTest(self) -> dict[str, Any]:
+        return dict(self._routing_test)
+
+    @Property("QVariantMap", notify=recordingPromotionChanged)
+    def recordingPromotion(self) -> dict[str, Any]:
+        return dict(self._recording_promotion)
 
     preferencesChanged = Signal()
 
@@ -395,6 +445,8 @@ class RealtimeViewModel(QObject):
         input_gate_db: float,
         block_seconds: float,
         test_mode: bool,
+        recording: bool,
+        push_to_talk: bool,
     ) -> dict[str, Any]:
         return {
             "model": model,
@@ -408,6 +460,8 @@ class RealtimeViewModel(QObject):
             "input_gate_db": input_gate_db,
             "block_seconds": block_seconds,
             "test_mode": test_mode,
+            "recording": recording,
+            "push_to_talk": push_to_talk,
         }
 
     @Slot("QVariantMap")
@@ -427,6 +481,8 @@ class RealtimeViewModel(QObject):
             float(command["input_gate_db"]),
             float(command["block_seconds"]),
             False,
+            False,
+            bool(command.get("push_to_talk", False)),
         )
         worker = self._status.get("worker") or {}
         if (
@@ -485,6 +541,8 @@ class RealtimeViewModel(QObject):
         input_gate_db = float(command["input_gate_db"])
         block_seconds = float(command["block_seconds"])
         test_mode = bool(command.get("test_mode", False))
+        recording = bool(command.get("recording", False))
+        push_to_talk = bool(command.get("push_to_talk", False))
         input_record = self._device(input_device)
         output_record = self._device(output_device)
         remembered = {
@@ -498,6 +556,7 @@ class RealtimeViewModel(QObject):
             "input_gate_db": input_gate_db,
             "block_seconds": block_seconds,
             "test_mode": test_mode,
+            "push_to_talk": push_to_talk,
         }
         if input_record:
             remembered["hostapi"] = str(input_record.get("hostapi", ""))
@@ -519,6 +578,8 @@ class RealtimeViewModel(QObject):
             input_gate_db,
             block_seconds,
             test_mode,
+            recording,
+            push_to_talk,
         )
 
         def update(result: dict[str, Any]) -> None:
@@ -543,6 +604,240 @@ class RealtimeViewModel(QObject):
             request_key="realtime-control",
         )
 
+    @Slot("QVariantMap")
+    def controlSession(self, value: dict[str, Any]) -> None:
+        if not self._status.get("session_id"):
+            return
+        changes = {
+            key: bool(value[key])
+            for key in (
+                "bypass",
+                "muted",
+                "recording",
+                "push_to_talk_enabled",
+                "push_to_talk_pressed",
+            )
+            if key in value
+        }
+        if not changes:
+            return
+        self.requests.submit(
+            "realtime.control",
+            changes,
+            self._apply_status,
+            request_key="realtime-control-state",
+        )
+
+    @Slot()
+    def toggleBypass(self) -> None:
+        metrics = self._status.get("metrics") or {}
+        self.controlSession({"bypass": not bool(metrics.get("bypass"))})
+
+    @Slot()
+    def toggleMute(self) -> None:
+        metrics = self._status.get("metrics") or {}
+        self.controlSession({"muted": not bool(metrics.get("muted"))})
+
+    @Slot()
+    def toggleRecording(self) -> None:
+        metrics = self._status.get("metrics") or {}
+        self.controlSession({"recording": not bool(metrics.get("recording"))})
+
+    @Slot()
+    def pushToTalkPressed(self) -> None:
+        self.controlSession({"push_to_talk_pressed": True})
+
+    @Slot()
+    def pushToTalkReleased(self) -> None:
+        self.controlSession({"push_to_talk_pressed": False})
+
+    @Slot()
+    def showMiniPanel(self) -> None:
+        self.miniPanelRequested.emit()
+
+    @Slot()
+    def toggleStartStop(self) -> None:
+        if self._status.get("state") in {"starting", "running", "stopping"}:
+            self.stopSession()
+            return
+        if self._active_scene_id:
+            self.applyScene(self._active_scene_id, True)
+
+    @Slot()
+    def refreshScenes(self) -> None:
+        self.requests.submit(
+            "realtime.scene.list",
+            {"include_archived": True},
+            self._apply_scenes,
+            show_status=False,
+            request_key="realtime-scenes",
+        )
+
+    def _apply_scenes(self, result: dict[str, Any]) -> None:
+        self._scenes = list(result.get("items") or [])
+        selected = next(
+            (item for item in self._scenes if item["id"] == self._active_scene_id),
+            None,
+        )
+        if selected is None or selected["archived"]:
+            selected = next((item for item in self._scenes if not item["archived"]), None)
+            self._active_scene_id = str(selected["id"]) if selected else ""
+            self._hotkeys = (
+                dict(selected["hotkeys"]) if selected else dict(DEFAULT_GLOBAL_HOTKEYS)
+            )
+            self.hotkeysChanged.emit()
+        self.scenesChanged.emit()
+
+    @Slot("QVariantMap")
+    def createScene(self, value: dict[str, Any]) -> None:
+        payload = dict(value)
+
+        def updated(result: dict[str, Any]) -> None:
+            self._active_scene_id = str(result["id"])
+            self._hotkeys = dict(result["hotkeys"])
+            self.hotkeysChanged.emit()
+            self.refreshScenes()
+
+        self.requests.submit(
+            "realtime.scene.create",
+            payload,
+            updated,
+            request_key="realtime-scene-edit",
+        )
+
+    @Slot("QVariantMap")
+    def updateScene(self, value: dict[str, Any]) -> None:
+        def updated(result: dict[str, Any]) -> None:
+            if str(result["id"]) == self._active_scene_id:
+                self._hotkeys = dict(result["hotkeys"])
+                self.hotkeysChanged.emit()
+            self.refreshScenes()
+
+        self.requests.submit(
+            "realtime.scene.update",
+            dict(value),
+            updated,
+            request_key="realtime-scene-edit",
+        )
+
+    @Slot(str, int, bool)
+    def archiveScene(self, scene_id: str, revision: int, archived: bool) -> None:
+        self.requests.submit(
+            "realtime.scene.archive",
+            {
+                "scene_id": scene_id,
+                "expected_revision": revision,
+                "archived": archived,
+            },
+            lambda _result: self.refreshScenes(),
+            request_key="realtime-scene-edit",
+        )
+
+    @Slot(str, bool)
+    def applyScene(self, scene_id: str, start: bool) -> None:
+        scene = next((item for item in self._scenes if item["id"] == scene_id), None)
+        if not scene or scene["archived"]:
+            return
+        self._active_scene_id = scene_id
+        self._hotkeys = dict(scene["hotkeys"])
+        self.hotkeysChanged.emit()
+        self.requests.submit(
+            "realtime.scene.apply",
+            {"scene_id": scene_id, "start": start},
+            self._apply_status,
+            request_key="realtime-control",
+        )
+
+    @Slot()
+    def inspectRouting(self) -> None:
+        self.requests.submit(
+            "realtime.routing.inspect",
+            {},
+            self._apply_routing,
+            show_status=False,
+            request_key="realtime-routing",
+        )
+
+    def _apply_routing(self, result: dict[str, Any]) -> None:
+        self._routing = dict(result)
+        self.routingChanged.emit()
+
+    @Slot()
+    def calibrate(self) -> None:
+        route = self._resolve_audio_route()
+        if not route["ready"] or self._status.get("state") in {
+            "starting",
+            "running",
+            "stopping",
+        }:
+            return
+
+        def updated(result: dict[str, Any]) -> None:
+            self._calibration = dict(result)
+            self.calibrationChanged.emit()
+            self.savePreferences(
+                {
+                    **self._preferences,
+                    "input_gate_db": result["recommended_input_gate_db"],
+                    "vad_threshold": result["recommended_vad_threshold"],
+                    "block_seconds": result["recommended_block_seconds"],
+                }
+            )
+
+        self.requests.submit(
+            "realtime.calibrate",
+            {
+                "input_device": int(route["input_device"]),
+                "output_device": int(route["output_device"]),
+                "duration_seconds": 3,
+                "model": str(self._preferences.get("model") or "") or None,
+            },
+            updated,
+            request_key="realtime-calibration",
+        )
+
+    @Slot()
+    def testRouting(self) -> None:
+        route = self._resolve_audio_route()
+        if not route["ready"] or self._status.get("state") in {
+            "starting",
+            "running",
+            "stopping",
+        }:
+            return
+
+        def updated(result: dict[str, Any]) -> None:
+            self._routing_test = dict(result)
+            self.routingTestChanged.emit()
+
+        self.requests.submit(
+            "realtime.routing.test",
+            {
+                "input_device": int(route["input_device"]),
+                "output_device": int(route["output_device"]),
+                "duration_seconds": 1.5,
+            },
+            updated,
+            request_key="realtime-routing-test",
+        )
+
+    @Slot(str)
+    def promoteRecording(self, project_name: str) -> None:
+        session_id = str(self._status.get("session_id") or "")
+        if not session_id or self._status.get("state") != "stopped":
+            return
+
+        def updated(result: dict[str, Any]) -> None:
+            self._recording_promotion = dict(result)
+            self.recordingPromotionChanged.emit()
+
+        self.requests.submit(
+            "realtime.recording.promote",
+            {"session_id": session_id, "project_name": project_name.strip()},
+            updated,
+            request_key="realtime-recording-promote",
+        )
+
     def _apply_status(self, result: dict[str, Any]) -> None:
         self._status = result
         self._set_poll_interval(result)
@@ -555,4 +850,9 @@ class RealtimeViewModel(QObject):
         self.requests.invalidate("realtime-prepare")
         self.requests.invalidate("realtime-control")
         self.requests.invalidate("realtime-release")
+        self.requests.invalidate("realtime-scenes")
+        self.requests.invalidate("realtime-routing")
+        self.requests.invalidate("realtime-calibration")
+        self.requests.invalidate("realtime-routing-test")
+        self.requests.invalidate("realtime-recording-promote")
         self._persist_preferences()

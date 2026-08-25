@@ -6,12 +6,100 @@ import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from math import ceil
+from pathlib import Path
 from typing import Any
 
 
 class RealtimeInferenceStopTimeout(RuntimeError):
     """The inference thread did not relinquish the resident worker in time."""
+
+
+class RealtimeAudioRecorder:
+    """Writes dry and wet streams away from the realtime inference thread."""
+
+    def __init__(
+        self,
+        np: Any,
+        directory: str,
+        session_id: str,
+        sample_rate: int,
+        output_channels: int,
+    ) -> None:
+        self.np = np
+        root = Path(directory).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        stem = f"{stamp}-{session_id}"
+        self.dry_path = root / f"{stem}-dry.wav"
+        self.wet_path = root / f"{stem}-wet.wav"
+        self.sample_rate = sample_rate
+        self.output_channels = output_channels
+        self.items: queue.Queue[tuple[Any, Any] | None] = queue.Queue(maxsize=32)
+        self.dropped_blocks = 0
+        self.error: str | None = None
+        self.thread = threading.Thread(
+            target=self._write,
+            name="voxweave-realtime-recorder",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def enqueue(self, dry: Any, wet: Any) -> None:
+        try:
+            self.items.put_nowait((dry.copy(), wet.copy()))
+        except queue.Full:
+            self.dropped_blocks += 1
+
+    def _write(self) -> None:
+        import soundfile as sf  # noqa: PLC0415
+
+        try:
+            with sf.SoundFile(
+                self.dry_path,
+                mode="w",
+                samplerate=self.sample_rate,
+                channels=1,
+                subtype="PCM_24",
+            ) as dry_file, sf.SoundFile(
+                self.wet_path,
+                mode="w",
+                samplerate=self.sample_rate,
+                channels=self.output_channels,
+                subtype="PCM_24",
+            ) as wet_file:
+                while True:
+                    item = self.items.get()
+                    if item is None:
+                        break
+                    dry, wet = item
+                    dry_file.write(dry)
+                    wet_file.write(wet)
+        except Exception:  # noqa: BLE001 - isolated recorder boundary
+            self.error = traceback.format_exc()
+
+    def close(self) -> dict[str, Any]:
+        while True:
+            try:
+                self.items.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self.items.get_nowait()
+                except queue.Empty:
+                    continue
+                self.dropped_blocks += 1
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            self.error = "realtime recorder did not stop within 5 seconds"
+        return {
+            "recording": False,
+            "recording_dry_path": str(self.dry_path),
+            "recording_wet_path": str(self.wet_path),
+            "recording_dropped_blocks": self.dropped_blocks,
+            "recording_error": self.error,
+        }
 
 VAD_SAMPLE_RATE = 16000
 VAD_WINDOW_SAMPLES = 512
@@ -316,6 +404,13 @@ class RealtimeAudioProcessor:
             threshold=vad_threshold,
         )
         self.output_active = False
+        self.control_lock = threading.RLock()
+        self.bypass = False
+        self.muted = False
+        self.push_to_talk_enabled = False
+        self.push_to_talk_pressed = False
+        self.recorder: RealtimeAudioRecorder | None = None
+        self.recording_result: dict[str, Any] = {}
         self.test_session = UtteranceTestMode()
         self.warming = True
         self.callback_error: list[str] = []
@@ -342,6 +437,11 @@ class RealtimeAudioProcessor:
             "input_overruns": 0,
             "output_underruns": 0,
             "pipeline_depth": 0,
+            "bypass": False,
+            "muted": False,
+            "push_to_talk_enabled": False,
+            "push_to_talk_pressed": False,
+            "recording": False,
         }
 
         buffer_frames = (
@@ -619,12 +719,52 @@ class RealtimeAudioProcessor:
             if status:
                 with self.metrics_lock:
                     self.metrics["xruns"] += 1
-            if not self.test_session.enabled:
+            with getattr(self, "control_lock", threading.RLock()):
+                bypass = bool(getattr(self, "bypass", False))
+                muted = bool(getattr(self, "muted", False))
+                push_to_talk_enabled = bool(
+                    getattr(self, "push_to_talk_enabled", False)
+                )
+                push_to_talk_pressed = bool(
+                    getattr(self, "push_to_talk_pressed", False)
+                )
+                recorder = getattr(self, "recorder", None)
+            effective_muted = muted or (
+                push_to_talk_enabled and not push_to_talk_pressed
+            )
+            if effective_muted or bypass:
+                mono, peak_in, input_db = self._measure_input(indata)
+                if effective_muted:
+                    outdata.fill(0)
+                else:
+                    outdata[:] = self.np.repeat(
+                        mono[:, None], self.spec.output_channels, axis=1
+                    )
+                peak_out = float(self.np.max(self.np.abs(outdata))) if outdata.size else 0.0
+                result = {
+                    "inference_delta": 0,
+                    "skipped_delta": 1,
+                    "suppressed_delta": int(effective_muted),
+                    "completed_delta": 0,
+                    "infer_ms": 0,
+                    "peak_in": peak_in,
+                    "peak_out": peak_out,
+                    "input_db": input_db,
+                    "vad_probability": 0.0,
+                    "speech_detected": False,
+                    "speech_source": None,
+                    "rvc_inference_active": False,
+                    "playback_active": bypass and not effective_muted,
+                    "microphone_suppressed": effective_muted,
+                }
+            elif not self.test_session.enabled:
                 result = self._normal_callback(indata, outdata, frames)
             elif self.test_session.phase == "capture":
                 result = self._test_capture_callback(indata, outdata, frames)
             else:
                 result = self._test_suppressed_callback(outdata)
+            if recorder is not None:
+                recorder.enqueue(select_mono_channel(self.np, indata), outdata)
             with self.metrics_lock:
                 self.metrics.update(
                     callbacks=self.metrics["callbacks"] + 1,
@@ -651,6 +791,11 @@ class RealtimeAudioProcessor:
                     buffered_blocks=len(self.test_session.outputs),
                     playback_active=result["playback_active"],
                     microphone_suppressed=result["microphone_suppressed"],
+                    bypass=bypass,
+                    muted=muted,
+                    push_to_talk_enabled=push_to_talk_enabled,
+                    push_to_talk_pressed=push_to_talk_pressed,
+                    recording=recorder is not None,
                 )
         except Exception:  # noqa: BLE001 - PortAudio callback boundary
             outdata.fill(0)
@@ -701,7 +846,70 @@ class RealtimeAudioProcessor:
                 input_overruns=0,
                 output_underruns=0,
                 pipeline_depth=0,
+                bypass=self.bypass,
+                muted=self.muted,
+                push_to_talk_enabled=self.push_to_talk_enabled,
+                push_to_talk_pressed=self.push_to_talk_pressed,
+                recording=self.recorder is not None,
             )
+
+    def configure_control(
+        self,
+        *,
+        bypass: bool | None,
+        muted: bool | None,
+        push_to_talk_enabled: bool | None = None,
+        push_to_talk_pressed: bool | None = None,
+    ) -> None:
+        with self.control_lock:
+            if bypass is not None:
+                self.bypass = bypass
+            if muted is not None:
+                self.muted = muted
+            if push_to_talk_enabled is not None:
+                self.push_to_talk_enabled = push_to_talk_enabled
+                if not push_to_talk_enabled:
+                    self.push_to_talk_pressed = False
+            if push_to_talk_pressed is not None:
+                self.push_to_talk_pressed = push_to_talk_pressed
+            self._clear_conversion_state()
+        with self.metrics_lock:
+            self.metrics.update(
+                bypass=self.bypass,
+                muted=self.muted,
+                push_to_talk_enabled=self.push_to_talk_enabled,
+                push_to_talk_pressed=self.push_to_talk_pressed,
+            )
+
+    def configure_recording(
+        self,
+        enabled: bool,
+        *,
+        directory: str | None,
+        session_id: str,
+    ) -> dict[str, Any]:
+        with self.control_lock:
+            if enabled and self.recorder is None:
+                if not directory:
+                    raise ValueError("recording directory is required")
+                self.recorder = RealtimeAudioRecorder(
+                    self.np,
+                    directory,
+                    session_id,
+                    self.spec.sample_rate,
+                    self.spec.output_channels,
+                )
+            elif not enabled and self.recorder is not None:
+                recorder = self.recorder
+                self.recorder = None
+                self.recording_result = recorder.close()
+        with self.metrics_lock:
+            self.metrics.update(self.recording_result)
+            self.metrics["recording"] = self.recorder is not None
+            return dict(self.metrics)
+
+    def close_recording(self) -> dict[str, Any]:
+        return self.configure_recording(False, directory=None, session_id="")
 
     def configure_test_mode(self, enabled: bool) -> None:
         self._clear_conversion_state()

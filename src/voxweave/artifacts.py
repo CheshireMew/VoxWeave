@@ -73,3 +73,26 @@ class ArtifactStore:
                 "WHERE id=?",
                 updates,
             )
+
+    def mark_restored(self, source: Path, archive: Path) -> None:
+        source = source.resolve()
+        archive = archive.resolve()
+        rows = self.database.fetch_all(
+            "SELECT id,archive_path FROM artifacts WHERE state='archived'"
+        )
+        updates = []
+        for row in rows:
+            archived_path = row.get("archive_path")
+            if not archived_path:
+                continue
+            try:
+                relative = Path(archived_path).resolve().relative_to(archive)
+            except ValueError:
+                continue
+            updates.append((str(source / relative), utc_now(), row["id"]))
+        with self.database.connect() as db:
+            db.executemany(
+                "UPDATE artifacts SET path=?,archive_path=NULL,state='active',updated_at=? "
+                "WHERE id=?",
+                updates,
+            )

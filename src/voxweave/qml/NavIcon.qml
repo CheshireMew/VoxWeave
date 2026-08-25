@@ -8,6 +8,7 @@ Item {
     readonly property string glyph: {
         if (kind === "convert") return "\uE8B1"
         if (kind === "realtime") return "\uE720"
+        if (kind === "projects") return "\uE8A5"
         if (kind === "models") return "\uE8F1"
         if (kind === "batch") return "\uE8B7"
         if (kind === "tasks") return "\uE9D5"

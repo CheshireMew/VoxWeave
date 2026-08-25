@@ -64,3 +64,72 @@ def test_current_machine_conversion_results_match_public_schema() -> None:
     validator = Draft202012Validator(_schema("voxweave-conversion-result.v1.schema.json"))
     for (payload,) in rows:
         validator.validate(json.loads(payload))
+
+
+def test_conversion_schema_accepts_project_multi_model_and_processing_result() -> None:
+    media = {
+        "path": "D:/VoxWeave/input.wav",
+        "sha256": "a" * 64,
+        "size_bytes": 1,
+        "media_type": "audio",
+        "duration_seconds": 1,
+        "format_name": "wav",
+        "audio_streams": [],
+        "video_streams": [],
+        "subtitle_streams": [],
+    }
+    model = {
+        "id": "voice.one",
+        "display_name": "Voice One",
+        "model_sha256": "b" * 64,
+        "index_sha256": None,
+    }
+    chain = {
+        "noise_reduction_db": 0,
+        "highpass_hz": 80,
+        "low_eq_db": 0,
+        "presence_eq_db": 2,
+        "compressor": True,
+        "deesser": False,
+        "target_lufs": -16,
+        "limiter_dbfs": -1,
+        "trim_silence": False,
+    }
+    result = {
+        "protocol": "voxweave-conversion-result",
+        "version": 1,
+        "input": media,
+        "output": {
+            **media,
+            "path": "D:/VoxWeave/output.wav",
+            "full_decode": "passed",
+            "audio_quality": [],
+        },
+        "model": {
+            "id": "multiple",
+            "display_name": "Multiple voices",
+            "models": [model],
+        },
+        "parameters": {
+            "pitch": 0,
+            "f0": "rmvpe",
+            "index_rate": 0.72,
+            "rms_mix_rate": 0.25,
+            "protect": 0.33,
+            "content_mode": "clean",
+            "processing_chain": chain,
+        },
+        "selected_speakers": [],
+        "assignments": [
+            {"segment_ids": ["segment-1"], "model": model, "parameters": {}}
+        ],
+        "project": {"id": "project-1", "revision": 3},
+        "separation": None,
+        "loudness_match": {},
+        "processing_chain": {"enabled": True, "settings": chain, "filters": []},
+        "segments": [],
+        "manifest_path": "D:/VoxWeave/result.json",
+    }
+    Draft202012Validator(_schema("voxweave-conversion-result.v1.schema.json")).validate(
+        result
+    )

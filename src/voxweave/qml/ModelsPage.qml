@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import QtMultimedia
 
 Item {
     id: root
@@ -13,19 +14,44 @@ Item {
     property bool showAdvancedImport: false
     property bool showArchived: false
     property bool includeUrlIndex: false
+    property string modelSortMode: "recent"
     signal navigateRequested(int index)
-    readonly property var filteredModels: root.models.filter(function(model) {
-        if (!root.showArchived && model.archived) return false
-        var query = modelSearch.text.trim().toLowerCase()
-        return query.length === 0
-            || String(model.localized_name || "").toLowerCase().includes(query)
-            || String(model.id || "").toLowerCase().includes(query)
-    })
+    readonly property var filteredModels: {
+        var values = root.models.filter(function(model) {
+            if (!root.showArchived && model.archived) return false
+            var query = modelSearch.text.trim().toLowerCase()
+            return query.length === 0
+                || String(model.localized_name || "").toLowerCase().includes(query)
+                || String(model.id || "").toLowerCase().includes(query)
+        })
+        values.sort(function(left, right) {
+            if (root.modelSortMode === "usage")
+                return Number(right.usage_count || 0) - Number(left.usage_count || 0)
+            if (root.modelSortMode === "name")
+                return String(left.localized_name || left.id).localeCompare(
+                    String(right.localized_name || right.id))
+            var recent = String(right.last_used_at || "").localeCompare(
+                String(left.last_used_at || ""))
+            return recent !== 0 ? recent
+                : String(left.localized_name || left.id).localeCompare(
+                    String(right.localized_name || right.id))
+        })
+        return values
+    }
 
     function statusText(status) {
         var key = "model.status." + status
         var value = root.bridge.text(root.bridge.language, key)
         return value === key ? status : value
+    }
+
+    function loadSelectedMetadata() {
+        if (!root.selectedModel) return
+        modelCustomName.text = String(root.selectedModel.custom_name || "")
+        modelTags.text = (root.selectedModel.tags || []).join(", ")
+        modelNotes.text = String(root.selectedModel.notes || "")
+        modelFavorite.checked = Boolean(root.selectedModel.favorite)
+        modelCoverPath.text = String(root.selectedModel.cover_path || "")
     }
 
 FolderDialog {
@@ -42,10 +68,23 @@ FileDialog {
     onAccepted: localModelPath.text = root.bridge.media.localPath(selectedFile)
 }
 FileDialog {
+    id: modelCoverDialog
+    nameFilters: ["Images (*.png *.jpg *.jpeg *.webp)"]
+    onAccepted: modelCoverPath.text = root.bridge.media.localPath(selectedFile)
+}
+FileDialog {
     id: localIndexDialog
     nameFilters: ["RVC index (*.index)"]
     onAccepted: localIndexPath.text = root.bridge.media.localPath(selectedFile)
 }
+FileDialog {
+    id: comparisonInputDialog
+    nameFilters: [root.bridge.text(root.bridge.language, "filter.media")
+        + " (" + root.bridge.mediaFileFilter + ")"]
+    onAccepted: comparisonInput.text = root.bridge.media.localPath(selectedFile)
+}
+AudioOutput { id: comparisonAudioOutput }
+MediaPlayer { id: comparisonPlayer; audioOutput: comparisonAudioOutput }
 
     objectName: "modelsPage"
     property int importTab: 0
@@ -99,12 +138,23 @@ FileDialog {
         AppPanel {
             Layout.fillWidth: true
 
-            AppTextField {
-                id: modelSearch
-                objectName: "modelSearchField"
+            RowLayout {
                 Layout.fillWidth: true
-                placeholderText: root.bridge.text(root.bridge.language, "models.search")
-                Accessible.name: root.bridge.text(root.bridge.language, "models.search")
+                AppTextField {
+                    id: modelSearch
+                    objectName: "modelSearchField"
+                    Layout.fillWidth: true
+                    placeholderText: root.bridge.text(root.bridge.language, "models.search")
+                    Accessible.name: root.bridge.text(root.bridge.language, "models.search")
+                }
+                AppComboBox {
+                    id: modelSortSelector
+                    objectName: "modelSortSelector"
+                    Layout.preferredWidth: 150
+                    model: ["Recently used", "Most used", "Name"]
+                    onCurrentIndexChanged: root.modelSortMode = currentIndex === 1
+                        ? "usage" : currentIndex === 2 ? "name" : "recent"
+                }
             }
 
             RowLayout {
@@ -126,6 +176,7 @@ FileDialog {
                             ? root.bridge.text(root.bridge.language, "models.discovering_local")
                             : root.bridge.text(root.bridge.language, "empty.models.title")
                         enabled: root.filteredModels.length > 0
+                        onCurrentIndexChanged: Qt.callLater(root.loadSelectedMetadata)
                     }
                 }
 
@@ -135,6 +186,39 @@ FileDialog {
                     text: root.models.length + " " + root.bridge.text(root.bridge.language, "label.models")
                     tone: root.models.length > 0 ? "info" : "neutral"
                 }
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: root.selectedModel !== null
+                text: root.selectedModel
+                    ? "Used " + Number(root.selectedModel.usage_count || 0)
+                        + " times · Last used " + String(root.selectedModel.last_used_at || "never")
+                        + " · Integrity " + String(root.selectedModel.integrity_status || "unchecked")
+                        + ((root.selectedModel.duplicate_model_ids || []).length > 0
+                            ? " · Duplicates: " + root.selectedModel.duplicate_model_ids.join(", ") : "")
+                    : ""
+                color: root.selectedModel && root.selectedModel.integrity_status === "verified"
+                    ? root.theme.success : root.theme.textMuted
+                wrapMode: Text.Wrap
+            }
+            Image {
+                objectName: "modelCoverPreview"
+                visible: root.selectedModel !== null
+                    && String(root.selectedModel.cover_url || "").length > 0
+                source: root.selectedModel ? String(root.selectedModel.cover_url || "") : ""
+                Layout.preferredWidth: 160
+                Layout.preferredHeight: 160
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                cache: false
+            }
+            AppButton {
+                visible: root.selectedModel !== null
+                text: root.bridge.activity.busyKeys.includes(
+                    "model-verify:" + root.selectedModel.id) ? "Verifying…" : "Verify files"
+                enabled: !root.bridge.activity.busyKeys.includes(
+                    "model-verify:" + root.selectedModel.id)
+                onClicked: root.bridge.modelCatalog.verifyIntegrity(root.selectedModel.id)
             }
 
             Label {
@@ -234,6 +318,181 @@ FileDialog {
                 font.family: root.theme.uiFont
                 font.pixelSize: 12
                 horizontalAlignment: Text.AlignHCenter
+            }
+        }
+
+        AppPanel {
+            Layout.fillWidth: true
+            visible: root.selectedModel !== null
+
+            SectionHeader {
+                Layout.fillWidth: true
+                title: root.bridge.text(root.bridge.language, "models.organize")
+            }
+            GridLayout {
+                Layout.fillWidth: true
+                columns: width >= 640 ? 2 : 1
+                columnSpacing: 10
+                rowSpacing: 8
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    FieldLabel {
+                        text: root.bridge.text(root.bridge.language,
+                            "models.custom_name")
+                    }
+                    AppTextField {
+                        id: modelCustomName
+                        Layout.fillWidth: true
+                        text: root.selectedModel ? root.selectedModel.custom_name || "" : ""
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    FieldLabel {
+                        text: root.bridge.text(root.bridge.language, "models.tags")
+                    }
+                    AppTextField {
+                        id: modelTags
+                        Layout.fillWidth: true
+                        text: root.selectedModel ? (root.selectedModel.tags || []).join(", ") : ""
+                    }
+                }
+            }
+            FieldLabel { text: root.bridge.text(root.bridge.language, "models.notes") }
+            AppTextField {
+                id: modelNotes
+                Layout.fillWidth: true
+                text: root.selectedModel ? root.selectedModel.notes || "" : ""
+            }
+            FieldLabel { text: "Cover image" }
+            RowLayout {
+                Layout.fillWidth: true
+                AppTextField {
+                    id: modelCoverPath
+                    objectName: "modelCoverPath"
+                    Layout.fillWidth: true
+                    text: root.selectedModel ? root.selectedModel.cover_path || "" : ""
+                    placeholderText: "PNG, JPG or WebP"
+                }
+                AppButton { compact: true; text: "Choose"; onClicked: modelCoverDialog.open() }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                AppCheckBox {
+                    id: modelFavorite
+                    text: root.bridge.text(root.bridge.language, "models.favorite")
+                    checked: root.selectedModel ? root.selectedModel.favorite : false
+                }
+                Item { Layout.fillWidth: true }
+                AppButton {
+                    text: root.bridge.text(root.bridge.language, "action.save_changes")
+                    onClicked: root.bridge.modelCatalog.updateMetadata({
+                        "model_id": root.selectedModel.id,
+                        "expected_revision": root.selectedModel.metadata_revision || 0,
+                        "custom_name": modelCustomName.text.trim(),
+                        "tags_text": modelTags.text,
+                        "favorite": modelFavorite.checked,
+                        "notes": modelNotes.text,
+                        "cover_path": modelCoverPath.text.trim().length > 0
+                            ? modelCoverPath.text.trim() : undefined
+                    })
+                }
+            }
+        }
+
+        AppPanel {
+            Layout.fillWidth: true
+
+            SectionHeader {
+                Layout.fillWidth: true
+                title: root.bridge.text(root.bridge.language, "models.compare")
+                badgeText: String(root.bridge.modelCatalog.comparisonModelIds.length) + "/8"
+                badgeTone: root.bridge.modelCatalog.comparisonModelIds.length >= 2
+                    ? "success" : "neutral"
+            }
+            Label {
+                Layout.fillWidth: true
+                text: root.bridge.text(root.bridge.language, "models.compare.detail")
+                color: root.theme.textMuted
+                font.pixelSize: 11
+                wrapMode: Text.Wrap
+            }
+            Flow {
+                Layout.fillWidth: true
+                spacing: 8
+                Repeater {
+                    model: root.models.filter(function(item) {
+                        return item.status === "ready" && !item.archived
+                    })
+                    delegate: AppCheckBox {
+                        id: comparisonChoice
+                        required property var modelData
+                        text: comparisonChoice.modelData.localized_name
+                        checked: root.bridge.modelCatalog.comparisonModelIds.includes(
+                            comparisonChoice.modelData.id)
+                        onClicked: root.bridge.modelCatalog.selectForComparison(
+                            comparisonChoice.modelData.id, checked)
+                    }
+                }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                AppTextField {
+                    id: comparisonInput
+                    Layout.fillWidth: true
+                    placeholderText: root.bridge.text(root.bridge.language,
+                        "models.compare.input")
+                }
+                AppButton {
+                    text: root.bridge.text(root.bridge.language, "action.choose")
+                    onClicked: comparisonInputDialog.open()
+                }
+                AppButton {
+                    kind: "primary"
+                    text: root.bridge.text(root.bridge.language, "models.compare.run")
+                    enabled: comparisonInput.text.length > 0
+                        && root.bridge.modelCatalog.comparisonModelIds.length >= 2
+                        && !root.bridge.activity.busyKeys.includes("model-compare")
+                    onClicked: root.bridge.modelCatalog.compareModels({
+                        "input": comparisonInput.text,
+                        "parameters": {},
+                        "content_mode": "clean"
+                    })
+                }
+            }
+            Repeater {
+                model: root.bridge.modelCatalog.comparisonOutputs
+                delegate: RowLayout {
+                    id: comparisonResult
+                    required property var modelData
+                    Layout.fillWidth: true
+                    Label {
+                        Layout.fillWidth: true
+                        text: comparisonResult.modelData.localized_name
+                        color: root.theme.text
+                        font.weight: Font.DemiBold
+                    }
+                    AppButton {
+                        compact: true
+                        text: comparisonPlayer.source.toString()
+                                === comparisonResult.modelData.url
+                                && comparisonPlayer.playbackState
+                                === MediaPlayer.PlayingState
+                            ? root.bridge.text(root.bridge.language, "action.pause")
+                            : root.bridge.text(root.bridge.language, "action.listen")
+                        onClicked: {
+                            if (comparisonPlayer.source.toString()
+                                    === comparisonResult.modelData.url
+                                    && comparisonPlayer.playbackState
+                                    === MediaPlayer.PlayingState) {
+                                comparisonPlayer.pause()
+                            } else {
+                                comparisonPlayer.source = comparisonResult.modelData.url
+                                comparisonPlayer.play()
+                            }
+                        }
+                    }
+                }
             }
         }
 

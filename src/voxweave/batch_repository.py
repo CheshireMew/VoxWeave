@@ -16,16 +16,28 @@ class BatchRepository:
         self.database.execute(
             "INSERT INTO batch_rules("
             "id,input_root,output_root,model_id,model_sha256,index_sha256,preset_json,preset_name,"
-            "recursive,watch_enabled,extensions_json,state,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "recursive,watch_enabled,extensions_json,naming_template,preserve_structure,"
+            "collision_policy,output_format,include_globs_json,exclude_globs_json,"
+            "variants_json,state,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             values,
         )
 
     @staticmethod
     def decode_rule(row: dict[str, Any]) -> dict[str, Any]:
-        result = Database.decode_json_row(row, ("preset_json", "extensions_json"))
+        result = Database.decode_json_row(
+            row,
+            (
+                "preset_json",
+                "extensions_json",
+                "include_globs_json",
+                "exclude_globs_json",
+                "variants_json",
+            ),
+        )
         result["recursive"] = bool(result["recursive"])
         result["watch_enabled"] = bool(result["watch_enabled"])
+        result["preserve_structure"] = bool(result["preserve_structure"])
         return result
 
     def get(self, batch_id: str) -> dict[str, Any]:
@@ -52,9 +64,7 @@ class BatchRepository:
                 ).fetchall()
             ]
             visible_ids = [str(row["id"]) for row in rows[:limit]]
-            counts_by_rule: dict[str, dict[str, int]] = {
-                batch_id: {} for batch_id in visible_ids
-            }
+            counts_by_rule: dict[str, dict[str, int]] = {batch_id: {} for batch_id in visible_ids}
             if visible_ids:
                 placeholders = ",".join("?" for _ in visible_ids)
                 count_rows = db.execute(
@@ -66,11 +76,27 @@ class BatchRepository:
                     counts_by_rule[str(count["batch_id"])][str(count["state"])] = int(
                         count["count"]
                     )
+                item_rows = db.execute(
+                    "SELECT * FROM batch_items "
+                    f"WHERE batch_id IN ({placeholders}) "  # noqa: S608
+                    "AND state IN ('failed','cancelled','interrupted') "
+                    "ORDER BY updated_at DESC",
+                    tuple(visible_ids),
+                ).fetchall()
+                items_by_rule: dict[str, list[dict[str, Any]]] = {
+                    batch_id: [] for batch_id in visible_ids
+                }
+                for item_row in item_rows:
+                    decoded = Database.decode_json_row(dict(item_row), ("variant_json",))
+                    items_by_rule[str(item_row["batch_id"])].append(decoded)
+            else:
+                items_by_rule = {}
         has_more = len(rows) > limit
         items = []
         for row in rows[:limit]:
             item = self.decode_rule(row)
             item["item_counts"] = counts_by_rule[str(item["id"])]
+            item["items"] = items_by_rule.get(str(item["id"]), [])
             items.append(item)
         next_cursor = None
         if has_more and items:
@@ -87,7 +113,10 @@ class BatchRepository:
         self.database.execute(
             "UPDATE batch_rules SET input_root=?,output_root=?,model_id=?,model_sha256=?,"
             "index_sha256=?,preset_json=?,preset_name=?,recursive=?,watch_enabled=?,"
-            "extensions_json=?,revision=revision+1,updated_at=? WHERE id=?",
+            "extensions_json=?,naming_template=?,preserve_structure=?,collision_policy=?,"
+            "output_format=?,include_globs_json=?,exclude_globs_json=?,"
+            "variants_json=?,"
+            "revision=revision+1,updated_at=? WHERE id=?",
             (*values, batch_id),
         )
 
@@ -119,11 +148,16 @@ class BatchRepository:
 
     @staticmethod
     def find_item(
-        db: sqlite3.Connection, batch_id: str, source_path: str, source_sha256: str
+        db: sqlite3.Connection,
+        batch_id: str,
+        source_path: str,
+        source_sha256: str,
+        variant_name: str,
     ) -> sqlite3.Row | None:
         return db.execute(
-            "SELECT * FROM batch_items WHERE batch_id=? AND source_path=? AND source_sha256=?",
-            (batch_id, source_path, source_sha256),
+            "SELECT * FROM batch_items WHERE batch_id=? AND source_path=? "
+            "AND source_sha256=? AND variant_name=?",
+            (batch_id, source_path, source_sha256, variant_name),
         ).fetchone()
 
     @staticmethod
@@ -131,8 +165,30 @@ class BatchRepository:
         db.execute(
             "INSERT INTO batch_items("
             "id,batch_id,source_path,source_size,source_mtime_ns,source_sha256,"
-            "output_path,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "variant_name,variant_json,output_path,state,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             values,
+        )
+
+    @staticmethod
+    def reconfigure_item(
+        db: sqlite3.Connection,
+        item_id: str,
+        *,
+        variant_name: str,
+        variant: dict[str, Any],
+        output_path: str,
+    ) -> None:
+        db.execute(
+            "UPDATE batch_items SET variant_name=?,variant_json=?,output_path=?,task_id=NULL,"
+            "state='submitting',error=NULL,updated_at=? WHERE id=?",
+            (
+                variant_name,
+                json.dumps(variant, ensure_ascii=False),
+                output_path,
+                utc_now(),
+                item_id,
+            ),
         )
 
     @staticmethod

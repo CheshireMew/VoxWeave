@@ -10,7 +10,7 @@ from typing import Any
 from .batch_directory_watcher import WindowsDirectoryWatcher
 from .batch_repository import BatchRepository
 from .batch_run import BatchRunCoordinator
-from .batch_submission import BatchSubmissionService
+from .batch_submission import BatchSubmissionService, submit_source
 
 LOGGER = logging.getLogger(__name__)
 WATCH_SETTLE_SECONDS = 5.0
@@ -122,7 +122,7 @@ class BatchWatchSupervisor:
                 continue
             if now - previous[2] < self.settle_seconds:
                 continue
-            self.submissions.submit_file(rule, path, self.stop_event.is_set)
+            submit_source(self.submissions, rule, path, self.stop_event.is_set)
             self.observed.pop(key, None)
             self.settled[key] = identity
 

@@ -35,6 +35,7 @@ voxweave = "voxweave.cli:main"
 voxweave-service = "voxweave.service:main"
 voxweave-gui = "voxweave.gui:main"
 voxweave-app = "voxweave.app:main"
+voxweave-mcp = "voxweave.mcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

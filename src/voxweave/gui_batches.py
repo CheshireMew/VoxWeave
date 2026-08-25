@@ -106,11 +106,28 @@ class BatchRulesViewModel(QObject):
         )
 
     @Slot(str)
+    def plan(self, batch_id: str) -> None:
+        self.activity.submit(
+            "batch.plan",
+            {"batch_id": batch_id},
+            action_key=f"batch-plan:{batch_id}",
+        )
+
+    @Slot(str)
     def retry(self, batch_id: str) -> None:
         self.activity.submit(
             "batch.retry",
             {"batch_id": batch_id},
             action_key=f"batch-retry:{batch_id}",
+        )
+
+    @Slot(str, "QVariantMap")
+    def retryItem(self, item_id: str, variant: dict[str, Any]) -> None:
+        self.requests.submit(
+            "batch.item.retry",
+            {"item_id": item_id, "variant": dict(variant)},
+            lambda _result: self.refresh(),
+            request_key=f"batch-item-retry:{item_id}",
         )
 
     @Slot(str, bool)

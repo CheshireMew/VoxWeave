@@ -265,6 +265,29 @@ class RvcEngine:
         ]
         return self._run_worker(command, entry, None)
 
+    def routing_test(
+        self,
+        input_device: int,
+        output_device: int,
+        duration_seconds: float,
+    ) -> dict[str, Any]:
+        python, entry = self._runtime()
+        command = [
+            str(python),
+            "-B",
+            str(entry),
+            "--rvc-root",
+            str(Path(self.settings.rvc_root).resolve()),
+            "route-test",
+            "--input-device",
+            str(input_device),
+            "--output-device",
+            str(output_device),
+            "--duration-seconds",
+            str(duration_seconds),
+        ]
+        return self._run_worker(command, entry, None)
+
     def realtime_worker_command(self) -> tuple[list[str], Path]:
         python, entry = self._runtime()
         command = [
@@ -299,6 +322,9 @@ class RvcEngine:
             "extra_seconds": values["extra_seconds"],
             "vad_threshold": values["vad_threshold"],
             "input_gate_db": values["input_gate_db"],
+            "recording": values["recording"],
+            "recording_directory": values["recording_directory"],
+            "push_to_talk": values["push_to_talk"],
         }
         converter_identity = {
             "model_sha256": model["model_sha256"],
@@ -309,8 +335,13 @@ class RvcEngine:
         payload["converter_key"] = hashlib.sha256(
             json.dumps(converter_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+        runtime_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"recording", "recording_directory", "push_to_talk"}
+        }
         cache_identity = {
-            **payload,
+            **runtime_payload,
             "input_device_name": parameters.get("input_device_name"),
             "output_device_name": parameters.get("output_device_name"),
             "input_device_sample_rate": parameters.get("input_device_sample_rate"),

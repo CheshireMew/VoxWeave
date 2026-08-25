@@ -18,6 +18,9 @@ Item {
     property var previewOutputs: []
     property var presets: []
     property var pendingPreset: null
+    readonly property var selectedPreset: presetCombo.currentIndex >= 0
+        && root.presets[presetCombo.currentIndex]
+        ? root.presets[presetCombo.currentIndex] : null
     property real pendingAudioPosition: -1
     property bool resumeAudioAfterSwitch: false
     property bool playbackPending: false
@@ -70,6 +73,36 @@ Item {
         rmsMixSlider.value = Number(values.rms_mix_rate)
         protectSlider.value = Number(values.protect)
         modeCombo.currentIndex = ["clean", "mixed", "singing"].indexOf(values.content_mode)
+        var chain = values.processing_chain || ({})
+        noiseReduction.value = Number(chain.noise_reduction_db || 0)
+        dereverb.value = Number(chain.dereverb_strength || 0) * 100
+        highpass.value = Number(chain.highpass_hz || 0)
+        lowEq.value = Number(chain.low_eq_db || 0)
+        presenceEq.value = Number(chain.presence_eq_db || 0)
+        compressor.checked = Boolean(chain.compressor)
+        deesser.checked = Boolean(chain.deesser)
+        targetLoudness.checked = chain.target_lufs !== null
+            && chain.target_lufs !== undefined
+        targetLufs.value = Number(chain.target_lufs === null
+            || chain.target_lufs === undefined ? -16 : chain.target_lufs)
+        limiter.value = Number(chain.limiter_dbfs === null
+            || chain.limiter_dbfs === undefined ? -1 : chain.limiter_dbfs)
+        trimSilence.checked = Boolean(chain.trim_silence)
+    }
+
+    function processingChain() {
+        return {
+            "noise_reduction_db": Number(noiseReduction.value),
+            "dereverb_strength": Number(dereverb.value) / 100.0,
+            "highpass_hz": Math.round(Number(highpass.value)),
+            "low_eq_db": Number(lowEq.value),
+            "presence_eq_db": Number(presenceEq.value),
+            "compressor": Boolean(compressor.checked),
+            "deesser": Boolean(deesser.checked),
+            "target_lufs": targetLoudness.checked ? Number(targetLufs.value) : null,
+            "limiter_dbfs": Number(limiter.value),
+            "trim_silence": Boolean(trimSilence.checked)
+        }
     }
 
     onSpeakersChanged: root.selectedSpeakers = []
@@ -178,6 +211,57 @@ Basic.Dialog {
                     SectionHeader {
                         Layout.fillWidth: true
                         title: root.bridge.text(root.bridge.language, "section.source")
+                    }
+
+                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.theme.border }
+
+                    SectionHeader {
+                        Layout.fillWidth: true
+                        title: root.bridge.text(root.bridge.language, "section.processing_chain")
+                    }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: width > 760 ? 4 : 2
+                        columnSpacing: 9
+                        rowSpacing: 7
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.noise_reduction") }
+                            AppSlider { id: noiseReduction; Layout.fillWidth: true; from: 0; to: 30; value: 0; stepSize: 1; suffix: " dB"; onUserEdited: root.parametersEdited() }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: "Dereverb" }
+                            AppSlider { id: dereverb; Layout.fillWidth: true; from: 0; to: 100; value: 0; stepSize: 5; suffix: "%"; onUserEdited: root.parametersEdited() }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.highpass") }
+                            AppSlider { id: highpass; Layout.fillWidth: true; from: 0; to: 400; value: 0; stepSize: 10; suffix: " Hz"; onUserEdited: root.parametersEdited() }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.low_eq") }
+                            AppSlider { id: lowEq; Layout.fillWidth: true; from: -12; to: 12; value: 0; stepSize: 1; suffix: " dB"; showPositiveSign: true; onUserEdited: root.parametersEdited() }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.presence_eq") }
+                            AppSlider { id: presenceEq; Layout.fillWidth: true; from: -12; to: 12; value: 0; stepSize: 1; suffix: " dB"; showPositiveSign: true; onUserEdited: root.parametersEdited() }
+                        }
+                        AppCheckBox { id: compressor; text: root.bridge.text(root.bridge.language, "field.compressor"); onClicked: root.parametersEdited() }
+                        AppCheckBox { id: deesser; text: root.bridge.text(root.bridge.language, "field.deesser"); onClicked: root.parametersEdited() }
+                        AppCheckBox { id: trimSilence; text: root.bridge.text(root.bridge.language, "field.trim_silence"); onClicked: root.parametersEdited() }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.limiter") }
+                            AppSlider { id: limiter; Layout.fillWidth: true; from: -3; to: -0.1; value: -1; stepSize: 0.1; decimals: 1; suffix: " dBFS"; onUserEdited: root.parametersEdited() }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            AppCheckBox { id: targetLoudness; text: root.bridge.text(root.bridge.language, "field.target_loudness"); onClicked: root.parametersEdited() }
+                            AppSlider { id: targetLufs; Layout.fillWidth: true; from: -24; to: -9; value: -16; stepSize: 1; suffix: " LUFS"; enabled: targetLoudness.checked; onUserEdited: root.parametersEdited() }
+                        }
                     }
 
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.theme.border }
@@ -403,6 +487,7 @@ Basic.Dialog {
                             textRole: "name"
                             onActivated: {
                                 var preset = root.presets[currentIndex]
+                                presetName.text = preset.name
                                 if (preset.needs_reconfirmation) {
                                     root.pendingPreset = preset
                                     presetConfirmation.open()
@@ -427,8 +512,67 @@ Basic.Dialog {
                                 "index_rate": indexRateSlider.value,
                                 "rms_mix_rate": rmsMixSlider.value,
                                 "protect": protectSlider.value,
-                                "content_mode": root.contentMode(modeCombo.currentIndex)
+                                "content_mode": root.contentMode(modeCombo.currentIndex),
+                                "processing_chain": root.processingChain()
                             })
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppButton {
+                            compact: true
+                            text: root.bridge.text(root.bridge.language, "preset.update")
+                            enabled: root.selectedPreset !== null
+                            onClicked: root.bridge.media.updatePreset({
+                                "preset_id": root.selectedPreset.id,
+                                "expected_revision": root.selectedPreset.revision,
+                                "name": presetName.text,
+                                "pitch": pitchSlider.value,
+                                "f0": f0Combo.currentText.toLowerCase(),
+                                "index_rate": indexRateSlider.value,
+                                "rms_mix_rate": rmsMixSlider.value,
+                                "protect": protectSlider.value,
+                                "content_mode": root.contentMode(modeCombo.currentIndex),
+                                "processing_chain": root.processingChain()
+                            })
+                        }
+                        AppButton {
+                            compact: true
+                            text: "Copy"
+                            enabled: root.selectedPreset !== null
+                                && presetName.text.trim().length > 0
+                                && presetName.text.trim() !== root.selectedPreset.name
+                            onClicked: root.bridge.media.copyPreset(
+                                root.selectedPreset.id, presetName.text.trim())
+                        }
+                        AppButton {
+                            compact: true
+                            text: root.selectedPreset && root.selectedPreset.archived
+                                ? root.bridge.text(root.bridge.language, "action.restore")
+                                : root.bridge.text(root.bridge.language, "preset.archive")
+                            enabled: root.selectedPreset !== null
+                            onClicked: root.bridge.media.archivePreset(
+                                root.selectedPreset.id,
+                                root.selectedPreset.revision,
+                                !root.selectedPreset.archived)
+                        }
+                        AppButton {
+                            compact: true
+                            text: root.bridge.text(root.bridge.language, "preset.export")
+                            enabled: root.selectedPreset !== null
+                            onClicked: root.bridge.media.exportPreset(root.selectedPreset.id)
+                        }
+                        AppButton {
+                            compact: true
+                            text: root.bridge.text(root.bridge.language, "preset.import")
+                            onClicked: root.bridge.media.importPresets()
+                        }
+                        Item { Layout.fillWidth: true }
+                        AppCheckBox {
+                            text: root.bridge.text(root.bridge.language,
+                                "preset.show_archived")
+                            onClicked: root.bridge.media.showArchivedPresets(checked)
                         }
                     }
 
@@ -503,7 +647,8 @@ Basic.Dialog {
                                 "protect": protectSlider.value,
                                 "content_mode": root.contentMode(modeCombo.currentIndex),
                                 "variant_count": previewCount.value,
-                                "pitch_step": previewPitchStep.value
+                                "pitch_step": previewPitchStep.value,
+                                "processing_chain": root.processingChain()
                             })
                         }
                         AppButton {
@@ -526,7 +671,8 @@ Basic.Dialog {
                                 "protect": protectSlider.value,
                                 "content_mode": root.contentMode(modeCombo.currentIndex),
                                 "selected_speakers": root.selectedSpeakers,
-                                "overlap_policy": overlapCombo.currentIndex === 0 ? "skip" : "convert"
+                                "overlap_policy": overlapCombo.currentIndex === 0 ? "skip" : "convert",
+                                "processing_chain": root.processingChain()
                             })
                         }
                     }

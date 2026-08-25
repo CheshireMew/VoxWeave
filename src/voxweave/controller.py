@@ -18,8 +18,15 @@ from .operation_receipt_repository import OperationReceiptRepository
 from .operation_router import OperationRouter
 from .preset_repository import PresetRepository
 from .presets import PresetService
+from .project_repository import ProjectRepository
+from .projects import ProjectService
 from .protocol import describe
 from .realtime import RealtimeSessionManager
+from .realtime_calibration import RealtimeCalibrationService
+from .realtime_control import RealtimeControlService
+from .realtime_recordings import RealtimeRecordingService
+from .realtime_routing_test import RealtimeRoutingTestService
+from .realtime_scenes import RealtimeWorkspaceService
 from .rvc_engine import RvcEngine
 from .settings_repository import SettingsRepository
 from .settings_service import SettingsService
@@ -27,6 +34,7 @@ from .storage import StorageArchiveManager
 from .task_event_stream import TaskEventStream
 from .task_manager import TaskManager
 from .task_service import TaskService
+from .updater import UpdateService
 
 
 class Controller:
@@ -57,6 +65,9 @@ class Controller:
         self.task_event_stream = TaskEventStream(self.tasks)
         self.artifacts = ArtifactStore(self.database)
         self.media = MediaPipeline(settings, self.models, self.artifacts)
+        self.projects = ProjectService(
+            ProjectRepository(self.database), self.media, self.models
+        )
         self.realtime = RealtimeSessionManager(
             self.database,
             self.models,
@@ -65,12 +76,39 @@ class Controller:
             self.tasks.resume_dispatch,
             self.media.release_engine,
         )
+        self.realtime_workspace = RealtimeWorkspaceService(
+            self.database, self.realtime
+        )
+        self.realtime_calibration = RealtimeCalibrationService(
+            self.realtime.devices,
+            self.realtime.audio_test,
+            self.models.resolve,
+        )
+        self.realtime_control = RealtimeControlService(
+            self.realtime.sessions,
+            self.realtime.worker,
+            settings.artifacts_dir,
+            self.realtime._control_lock,
+        )
+        self.realtime_routing_test = RealtimeRoutingTestService(
+            self.realtime.sessions,
+            self.realtime.worker,
+            self.realtime.requests.engine,
+            self.realtime._control_lock,
+            self.realtime._lock,
+            lambda: self.realtime._service_stopping,
+        )
+        self.realtime_recordings = RealtimeRecordingService(
+            self.realtime.sessions,
+            self.projects,
+        )
         self.batch = BatchManager(
             self.database,
             self.tasks,
             self.models.resolve_for_execution,
         )
         self.storage = StorageArchiveManager(settings, self.database, self.artifacts)
+        self.updater = UpdateService(settings)
         diagnostics = DiagnosticsService(settings, self.models, self.realtime, self.tasks)
         task_service = TaskService(self.tasks, self.artifacts, self.batch)
         self.router = OperationRouter(
@@ -83,9 +121,16 @@ class Controller:
             task_service,
             self.artifacts,
             self.media,
+            self.projects,
             self.realtime,
+            self.realtime_calibration,
+            self.realtime_control,
+            self.realtime_routing_test,
+            self.realtime_recordings,
+            self.realtime_workspace,
             self.batch,
             self.storage,
+            self.updater,
             diagnostics,
             self.settings_service,
             self.receipts,

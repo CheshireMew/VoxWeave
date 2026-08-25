@@ -110,7 +110,15 @@ Basic.Dialog {
         font.family: root.theme.uiFont
         wrapMode: Text.Wrap
     }
-    onAccepted: root.bridge.maintenance.archiveArtifacts(root.pendingArchiveRoot, archiveDays.value)
+    onAccepted: {
+        var states = []
+        if (archiveCompleted.checked) states.push("completed")
+        if (archiveFailed.checked) states.push("failed")
+        if (archiveCancelled.checked) states.push("cancelled")
+        if (archiveInterrupted.checked) states.push("interrupted")
+        root.bridge.maintenance.archiveArtifactStates(
+            root.pendingArchiveRoot, archiveDays.value, states)
+    }
 }
 
     objectName: "settingsPage"
@@ -324,6 +332,14 @@ Basic.Dialog {
                                 onClicked: diagnosticDialog.open()
                             }
                         }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            AppCheckBox { id: archiveCompleted; text: "Completed results"; checked: true }
+                            AppCheckBox { id: archiveFailed; text: "Failed runs"; checked: true }
+                            AppCheckBox { id: archiveCancelled; text: "Cancelled runs"; checked: true }
+                            AppCheckBox { id: archiveInterrupted; text: "Interrupted runs"; checked: true }
+                        }
                         StatusPill {
                             visible: root.bridge.maintenance.diagnosticPath.length > 0
                             text: root.bridge.text(root.bridge.language, "badge.exported")
@@ -356,6 +372,79 @@ Basic.Dialog {
                             font.pixelSize: 12
                             wrapMode: Text.Wrap
                         }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: root.bridge.maintenance.storage.categories !== undefined
+                            text: "Results: "
+                                + Number((root.bridge.maintenance.storage.categories.results || {}).bytes || 0)
+                                + " bytes · Intermediates: "
+                                + Number((root.bridge.maintenance.storage.categories.intermediates || {}).bytes || 0)
+                                + " bytes · Failed runs: "
+                                + Number((root.bridge.maintenance.storage.categories.failed_runs || {}).bytes || 0)
+                                + " bytes"
+                            color: root.theme.textMuted
+                            wrapMode: Text.Wrap
+                        }
+                        FieldLabel { text: "Restore archived task IDs" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            AppTextField {
+                                id: restoreTaskIds
+                                Layout.fillWidth: true
+                                placeholderText: "task-id-1, task-id-2"
+                            }
+                            AppButton {
+                                text: root.bridge.activity.busyKeys.includes("storage-restore")
+                                    ? "Restoring…" : "Restore"
+                                enabled: restoreTaskIds.text.trim().length > 0
+                                    && !root.bridge.activity.busyKeys.includes("storage-restore")
+                                onClicked: root.bridge.maintenance.restoreArtifacts(
+                                    restoreTaskIds.text)
+                            }
+                        }
+                        FieldLabel { text: "Move VoxWeave data root" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            AppTextField {
+                                id: migrationTarget
+                                objectName: "storageMigrationTarget"
+                                Layout.fillWidth: true
+                                placeholderText: "D:\\VoxWeaveData-New (must not exist yet)"
+                            }
+                            AppButton {
+                                text: root.bridge.activity.busyKeys.includes(
+                                    "storage-migration-plan") ? "Planning…" : "Plan migration"
+                                enabled: migrationTarget.text.trim().length > 0
+                                    && !root.bridge.activity.busyKeys.includes(
+                                        "storage-migration-plan")
+                                onClicked: root.bridge.maintenance.planStorageMigration(
+                                    migrationTarget.text.trim())
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: Boolean(root.bridge.maintenance.storage.migration_plan)
+                            text: root.bridge.maintenance.storage.migration_plan
+                                ? "Files: "
+                                    + root.bridge.maintenance.storage.migration_plan.file_count
+                                    + " · Bytes: "
+                                    + root.bridge.maintenance.storage.migration_plan.total_bytes
+                                    + " · Conflicts: "
+                                    + (root.bridge.maintenance.storage.migration_plan.conflicts || []).join("; ")
+                                : ""
+                            color: (root.bridge.maintenance.storage.migration_plan
+                                && (root.bridge.maintenance.storage.migration_plan.conflicts || []).length > 0)
+                                ? root.theme.danger : root.theme.textMuted
+                            wrapMode: Text.Wrap
+                        }
+                        AppButton {
+                            visible: Boolean(root.bridge.maintenance.storage.migration_plan)
+                            text: "Verify, copy, switch data root, and restart"
+                            kind: "primary"
+                            enabled: root.bridge.maintenance.storage.migration_plan
+                                && (root.bridge.maintenance.storage.migration_plan.conflicts || []).length === 0
+                            onClicked: root.bridge.maintenance.prepareStorageMigration()
+                        }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
@@ -374,6 +463,91 @@ Basic.Dialog {
                                 enabled: !root.bridge.activity.busyKeys.includes("storage-archive")
                                 onClicked: archiveDialog.open()
                             }
+                            AppButton {
+                                text: root.bridge.activity.busyKeys.includes("storage-inspect")
+                                    ? root.bridge.text(root.bridge.language, "task.state.running")
+                                    : root.bridge.text(root.bridge.language, "action.inspect_storage")
+                                enabled: !root.bridge.activity.busyKeys.includes("storage-inspect")
+                                onClicked: root.bridge.maintenance.inspectStorage(archiveDays.value)
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: root.bridge.maintenance.storage.total_bytes !== undefined
+                            text: root.bridge.text(root.bridge.language, "storage.summary")
+                                .arg((Number(root.bridge.maintenance.storage.total_bytes) / 1073741824).toFixed(2))
+                                .arg(Number(root.bridge.maintenance.storage.reclaimable_task_count || 0))
+                                .arg((Number(root.bridge.maintenance.storage.reclaimable_bytes || 0) / 1073741824).toFixed(2))
+                            color: root.theme.textMuted
+                            wrapMode: Text.Wrap
+                        }
+                    }
+                }
+
+                AppPanel {
+                    Layout.fillWidth: true
+                    SectionHeader {
+                        Layout.fillWidth: true
+                        title: root.bridge.text(root.bridge.language, "section.updates")
+                        badgeText: root.bridge.maintenance.updateInfo.update_available
+                            ? root.bridge.text(root.bridge.language, "update.available")
+                            : root.bridge.text(root.bridge.language, "update.current")
+                        badgeTone: root.bridge.maintenance.updateInfo.update_available
+                            ? "success" : "neutral"
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: root.bridge.maintenance.updateInfo.latest_version
+                            ? root.bridge.text(root.bridge.language, "update.version")
+                                .arg(root.bridge.maintenance.updateInfo.current_version)
+                                .arg(root.bridge.maintenance.updateInfo.latest_version)
+                            : root.bridge.text(root.bridge.language, "update.detail")
+                        color: root.theme.textMuted
+                        wrapMode: Text.Wrap
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        AppButton {
+                            text: root.bridge.activity.busyKeys.includes("update-check")
+                                ? root.bridge.text(root.bridge.language, "task.state.running")
+                                : root.bridge.text(root.bridge.language, "action.check_updates")
+                            enabled: !root.bridge.activity.busyKeys.includes("update-check")
+                            onClicked: root.bridge.maintenance.checkForUpdates()
+                        }
+                        AppButton {
+                            visible: Boolean(root.bridge.maintenance.updateInfo.update_available)
+                                && !root.bridge.maintenance.updateInfo.downloaded_path
+                            text: root.bridge.activity.busyKeys.includes("update-download")
+                                ? root.bridge.text(root.bridge.language, "task.state.running")
+                                : root.bridge.text(root.bridge.language, "action.download_update")
+                            enabled: !root.bridge.activity.busyKeys.includes("update-download")
+                            onClicked: root.bridge.maintenance.downloadUpdate()
+                        }
+                        AppButton {
+                            visible: Boolean(root.bridge.maintenance.updateInfo.downloaded_path)
+                                && !root.bridge.maintenance.updateInfo.install_path
+                            text: root.bridge.activity.busyKeys.includes("update-install")
+                                ? "Installing…" : "Install side by side"
+                            enabled: !root.bridge.activity.busyKeys.includes("update-install")
+                            onClicked: root.bridge.maintenance.installUpdate()
+                        }
+                        AppButton {
+                            visible: root.bridge.maintenance.updateInfo.state === "installed"
+                                || root.bridge.maintenance.updateInfo.state === "rolled_back"
+                            text: "Activate and restart"
+                            kind: "primary"
+                            onClicked: root.bridge.maintenance.activateUpdate()
+                        }
+                        AppButton {
+                            text: "Roll back to installed version"
+                            onClicked: root.bridge.maintenance.rollbackUpdate()
+                        }
+                        AppButton {
+                            visible: Boolean(root.bridge.maintenance.updateInfo.release_url)
+                            text: root.bridge.maintenance.updateInfo.downloaded_path
+                                ? root.bridge.text(root.bridge.language, "action.open_download")
+                                : root.bridge.text(root.bridge.language, "action.open_release")
+                            onClicked: root.bridge.maintenance.openUpdate()
                         }
                     }
                 }

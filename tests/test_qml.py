@@ -211,9 +211,7 @@ def test_use_in_conversion_emits_the_selected_ready_model() -> None:
     )
     selected = []
     view_model.conversionModelRequested.connect(selected.append)
-    view_model._set_items(
-        [{"id": "local.ready", "status": "ready", "archived": False}]
-    )
+    view_model._set_items([{"id": "local.ready", "status": "ready", "archived": False}])
 
     view_model.useInConversion("local.ready")
 
@@ -381,9 +379,7 @@ def test_starter_model_confirmation_dialog_controls_download(tmp_path, monkeypat
         lambda *_args, **_kwargs: next(answers),
     )
     starter_ids = ["community.zh-male-young", "community.zh-female-senior"]
-    bridge.modelCatalog._starter_details = {
-        item["id"]: item for item in _starter_catalog()
-    }
+    bridge.modelCatalog._starter_details = {item["id"]: item for item in _starter_catalog()}
 
     bridge._confirm_starter_install(starter_ids)
     bridge._confirm_starter_install(starter_ids)
@@ -551,17 +547,18 @@ def test_main_qml_loads(tmp_path) -> None:
     result_player = root.findChild(QObject, "resultPlayer")
     assert result_player is not None
     assert result_player.property("source").isEmpty()
-    for index, object_name in enumerate(
+    for index, (nav_name, object_name) in enumerate(
         [
-            "realtimePage",
-            "conversionPage",
-            "modelsPage",
-            "batchPage",
-            "tasksPage",
-            "settingsPage",
+            ("navButton0", "realtimePage"),
+            ("navButton1", "conversionPage"),
+            ("navButtonProjects", "projectsPage"),
+            ("navButton2", "modelsPage"),
+            ("navButton3", "batchPage"),
+            ("navButton4", "tasksPage"),
+            ("navButton5", "settingsPage"),
         ]
     ):
-        nav_button = root.findChild(QObject, f"navButton{index}")
+        nav_button = root.findChild(QObject, nav_name)
         assert nav_button is not None
         assert QMetaObject.invokeMethod(nav_button, "click")
         app.processEvents()
@@ -959,6 +956,7 @@ def test_realtime_preferences_survive_restart_and_device_id_changes(tmp_path, mo
             "input_gate_db": -34.0,
             "block_seconds": 1.0,
             "test_mode": True,
+            "push_to_talk": False,
         }
         bridge.shutdown()
         root.close()
@@ -1179,3 +1177,34 @@ def test_task_projection_exposes_safe_error_and_result_actions(tmp_path) -> None
     assert "Traceback" not in projected[0]["error_summary"]
     assert projected[1]["result_path"].endswith("output.wav")
     bridge.shutdown()
+
+
+def test_batch_page_exposes_and_persists_processing_chain() -> None:
+    qml_dir = Path(__file__).parents[1] / "src" / "voxweave" / "qml"
+    source = (qml_dir / "BatchPage.qml").read_text(encoding="utf-8")
+    assert 'objectName: "batchProcessingChain"' in source
+    assert '"processing_chain": root.processingChain()' in source
+
+
+def test_completion_workflows_are_reachable_from_the_desktop_ui() -> None:
+    qml_dir = Path(__file__).parents[1] / "src" / "voxweave" / "qml"
+    realtime = (qml_dir / "RealtimePage.qml").read_text(encoding="utf-8")
+    main = (qml_dir / "Main.qml").read_text(encoding="utf-8")
+    mini = (qml_dir / "RealtimeMiniPanel.qml").read_text(encoding="utf-8")
+    models = (qml_dir / "ModelsPage.qml").read_text(encoding="utf-8")
+    batch = (qml_dir / "BatchPage.qml").read_text(encoding="utf-8")
+    projects = (qml_dir / "ProjectsPage.qml").read_text(encoding="utf-8")
+    settings = (qml_dir / "SettingsPage.qml").read_text(encoding="utf-8")
+
+    assert 'objectName: "realtimePushToTalkMode"' in realtime
+    assert 'objectName: "realtimeMiniPanelButton"' in realtime
+    assert 'objectName: "realtimeMiniPanel"' in main
+    assert "push_to_talk_pressed" in mini
+    assert 'objectName: "modelCoverPreview"' in models
+    assert 'objectName: "modelSortSelector"' in models
+    assert "batchVariantsModel" in batch
+    assert "retryItem" in batch
+    assert "rerunResult" in projects
+    assert 'objectName: "storageMigrationTarget"' in settings
+    assert "activateUpdate" in settings
+    assert "rollbackUpdate" in settings

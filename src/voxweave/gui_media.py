@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QFileDialog
 
 from .bounded_ids import BoundedIdSet
 from .capabilities import AUDIO_EXTENSIONS, MEDIA_EXTENSIONS, VIDEO_EXTENSIONS
@@ -49,6 +51,8 @@ class MediaViewModel(QObject):
         self._speakers: list[dict[str, Any]] = []
         self._preview_outputs: list[dict[str, Any]] = []
         self._presets: list[dict[str, Any]] = []
+        self._preset_model = ""
+        self._show_archived_presets = False
         self._analysis_task_id: str | None = None
         self._analysis_manifest: str | None = None
         self._analysis_input_path: str | None = None
@@ -227,6 +231,7 @@ class MediaViewModel(QObject):
         mode = str(command["content_mode"])
         selected_speakers = list(command.get("selected_speakers") or [])
         overlap_policy = str(command["overlap_policy"])
+        processing_chain = dict(command.get("processing_chain") or {})
         input_path = local_path(input_value)
         input_sha256 = self._known_input_sha256(input_path, mode)
         arguments = {
@@ -243,6 +248,7 @@ class MediaViewModel(QObject):
             "analysis_manifest": self._analysis_manifest if selected_speakers else None,
             "overlap_policy": overlap_policy,
             "overwrite": False,
+            "processing_chain": processing_chain,
         }
         if input_sha256:
             arguments["input_sha256"] = input_sha256
@@ -279,6 +285,7 @@ class MediaViewModel(QObject):
             str(command["content_mode"]),
             int(command.get("variant_count", 2)),
             int(command.get("pitch_step", 3)),
+            dict(command.get("processing_chain") or {}),
         )
 
     def _submit_preview(
@@ -293,6 +300,7 @@ class MediaViewModel(QObject):
         mode: str,
         variant_count: int,
         pitch_step: int,
+        processing_chain: dict[str, Any],
     ) -> None:
         input_path = local_path(input_value)
         count = max(1, min(4, variant_count))
@@ -321,6 +329,7 @@ class MediaViewModel(QObject):
                     "index_rate": index_rate,
                     "rms_mix_rate": rms_mix_rate,
                     "protect": protect,
+                    "processing_chain": processing_chain,
                 }
                 for variant_pitch in pitches
             ],
@@ -337,6 +346,7 @@ class MediaViewModel(QObject):
 
     @Slot(str)
     def refreshPresets(self, model: str) -> None:
+        self._preset_model = model
         if not model:
             self._presets = []
             self.presetsChanged.emit()
@@ -348,7 +358,11 @@ class MediaViewModel(QObject):
 
         self.requests.submit(
             "preset.list",
-            {"model": model},
+            {
+                "model": model,
+                "kind": "conversion",
+                "include_archived": self._show_archived_presets,
+            },
             update,
             show_status=False,
             request_key="presets",
@@ -366,11 +380,112 @@ class MediaViewModel(QObject):
             "rms_mix_rate": float(command["rms_mix_rate"]),
             "protect": float(command["protect"]),
             "content_mode": str(command["content_mode"]),
+            "processing_chain": dict(command.get("processing_chain") or {}),
         }
         self.requests.submit(
             "preset.save",
-            {"model": model, "name": name, "parameters": parameters},
+            {
+                "model": model,
+                "name": name,
+                "kind": "conversion",
+                "parameters": parameters,
+            },
             lambda _result: self.refreshPresets(model),
+        )
+
+    @Slot(bool)
+    def showArchivedPresets(self, visible: bool) -> None:
+        self._show_archived_presets = visible
+        if self._preset_model:
+            self.refreshPresets(self._preset_model)
+
+    @Slot("QVariantMap")
+    def updatePreset(self, value: dict[str, Any]) -> None:
+        command = dict(value)
+        payload = {
+            "preset_id": command["preset_id"],
+            "expected_revision": int(command["expected_revision"]),
+            "name": str(command["name"]),
+            "parameters": {
+                "pitch": int(command["pitch"]),
+                "f0": str(command["f0"]),
+                "index_rate": float(command["index_rate"]),
+                "rms_mix_rate": float(command["rms_mix_rate"]),
+                "protect": float(command["protect"]),
+                "content_mode": str(command["content_mode"]),
+                "processing_chain": dict(command.get("processing_chain") or {}),
+            },
+        }
+        self.requests.submit(
+            "preset.update",
+            payload,
+            lambda _result: self.refreshPresets(self._preset_model),
+        )
+
+    @Slot(str, int, bool)
+    def archivePreset(self, preset_id: str, revision: int, archived: bool) -> None:
+        self.requests.submit(
+            "preset.archive",
+            {
+                "preset_id": preset_id,
+                "expected_revision": revision,
+                "archived": archived,
+            },
+            lambda _result: self.refreshPresets(self._preset_model),
+        )
+
+    @Slot(str, str)
+    def copyPreset(self, preset_id: str, name: str) -> None:
+        self.requests.submit(
+            "preset.copy",
+            {"preset_id": preset_id, "name": name.strip()},
+            lambda _result: self.refreshPresets(self._preset_model),
+            request_key="preset-copy",
+        )
+
+    @Slot(str)
+    def exportPreset(self, preset_id: str) -> None:
+        def exported(bundle: dict[str, Any]) -> None:
+            target, _filter = QFileDialog.getSaveFileName(
+                None,
+                self._text_callback("preset.export.title"),
+                "voxweave-presets.json",
+                "JSON (*.json)",
+            )
+            if not target:
+                return
+            Path(target).write_text(
+                json.dumps(bundle, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        self.requests.submit(
+            "preset.export",
+            {"preset_ids": [preset_id]},
+            exported,
+            request_key="preset-export",
+        )
+
+    @Slot()
+    def importPresets(self) -> None:
+        source, _filter = QFileDialog.getOpenFileName(
+            None,
+            self._text_callback("preset.import.title"),
+            "",
+            "JSON (*.json)",
+        )
+        if not source:
+            return
+        try:
+            payload = json.loads(Path(source).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self._status_callback(str(exc), "danger")
+            return
+        self.requests.submit(
+            "preset.import",
+            payload,
+            lambda _result: self.refreshPresets(self._preset_model),
+            request_key="preset-import",
         )
 
     @Slot(str)

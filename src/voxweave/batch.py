@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from .batch_item_retry import BatchItemRetryService
 from .batch_repository import BatchRepository
 from .batch_rules import BatchRuleService
 from .batch_run import BatchRunCoordinator
@@ -29,6 +30,12 @@ class BatchManager:
             tasks,
             self.submissions,
             self.rules.get,
+        )
+        self.item_retries = BatchItemRetryService(
+            repository,
+            tasks,
+            self.rules.get,
+            self.rules.variants,
         )
         self.watch = BatchWatchSupervisor(repository, self.submissions, self.runs)
 

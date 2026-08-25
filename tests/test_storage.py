@@ -51,9 +51,10 @@ def test_archive_moves_artifacts_without_rewriting_immutable_task_result(tmp_pat
         producer_task = _wait_for_task(tasks, produced["id"])
         assert producer_task["state"] == "completed"
         source = settings.artifacts_dir / produced["id"]
-        assert Path(producer_task["result"]["manifest_path"]).read_text(
-            encoding="utf-8"
-        ) == '{"created":true}\n'
+        assert (
+            Path(producer_task["result"]["manifest_path"]).read_text(encoding="utf-8")
+            == '{"created":true}\n'
+        )
 
         archive_root = tmp_path / "archive"
         submitted = tasks.submit(
@@ -73,9 +74,7 @@ def test_archive_moves_artifacts_without_rewriting_immutable_task_result(tmp_pat
         assert archived_manifest.read_text(encoding="utf-8") == '{"created":true}\n'
         refreshed = tasks.get(produced["id"])
         assert refreshed["result"]["manifest_path"] == str(source / "manifest.json")
-        artifact = database.fetch_one(
-            "SELECT * FROM artifacts WHERE task_id=?", (produced["id"],)
-        )
+        artifact = database.fetch_one("SELECT * FROM artifacts WHERE task_id=?", (produced["id"],))
         assert artifact and artifact["path"] == str(source / "manifest.json")
         assert artifact["archive_path"] == str(archived_manifest)
         assert artifact["state"] == "archived"
@@ -84,5 +83,24 @@ def test_archive_moves_artifacts_without_rewriting_immutable_task_result(tmp_pat
         )
         assert record and record["state"] == "completed"
         assert record["completed_at"]
+
+        restored = storage.restore(
+            {"task_ids": [produced["id"]]},
+            lambda *_args: None,
+            lambda: False,
+            "restore-test",
+        )
+        assert restored["restored_count"] == 1
+        assert (source / "manifest.json").read_text(encoding="utf-8") == '{"created":true}\n'
+        assert archived_manifest.is_file()
+        restored_artifact = database.fetch_one(
+            "SELECT * FROM artifacts WHERE task_id=?", (produced["id"],)
+        )
+        assert restored_artifact and restored_artifact["state"] == "active"
+        assert restored_artifact["archive_path"] is None
+        restored_record = database.fetch_one(
+            "SELECT state FROM artifact_archives WHERE task_id=?", (produced["id"],)
+        )
+        assert restored_record == {"state": "restored"}
     finally:
         tasks.shutdown()

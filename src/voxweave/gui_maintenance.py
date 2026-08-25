@@ -4,13 +4,17 @@ import json
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
+from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QApplication
 
+from . import __version__
 from .config import Settings
 from .gui_activity import TaskActivity
 from .gui_support import local_path
+from .process_control import start_managed_process
 from .runtime_verification import load_runtime_verification, save_runtime_verification
+from .updater import RELEASES_PAGE_URL
 
 
 class MaintenanceViewModel(QObject):
@@ -19,6 +23,8 @@ class MaintenanceViewModel(QObject):
     runtimeInstalled = Signal()
     runtimeInstallRequested = Signal()
     diagnosticPathChanged = Signal()
+    storageChanged = Signal()
+    updateChanged = Signal()
 
     def __init__(
         self,
@@ -35,6 +41,11 @@ class MaintenanceViewModel(QObject):
         self.text_callback = text_callback or (lambda key: key)
         self._runtime: dict[str, Any] = {}
         self._diagnostic_path = ""
+        self._storage: dict[str, Any] = {}
+        self._update: dict[str, Any] = {
+            "current_version": __version__,
+            "release_url": RELEASES_PAGE_URL,
+        }
 
     @Property(str, constant=True)
     def dataRootUrl(self) -> str:
@@ -74,6 +85,14 @@ class MaintenanceViewModel(QObject):
     @Property(str, notify=diagnosticPathChanged)
     def diagnosticPath(self) -> str:
         return self._diagnostic_path
+
+    @Property("QVariantMap", notify=storageChanged)
+    def storage(self) -> dict[str, Any]:
+        return dict(self._storage)
+
+    @Property("QVariantMap", notify=updateChanged)
+    def updateInfo(self) -> dict[str, Any]:
+        return dict(self._update)
 
     @Slot()
     def inspectRuntime(self) -> None:
@@ -170,3 +189,168 @@ class MaintenanceViewModel(QObject):
             },
             action_key="storage-archive",
         )
+
+    @Slot(str, int, "QVariantList")
+    def archiveArtifactStates(
+        self,
+        destination_value: str,
+        older_than_days: int,
+        states: list[str],
+    ) -> None:
+        self.activity.submit(
+            "storage.archive",
+            {
+                "destination_root": local_path(destination_value),
+                "older_than_days": older_than_days,
+                "states": list(states),
+                "confirm_source_removal": True,
+            },
+            action_key="storage-archive",
+        )
+
+    @Slot(int)
+    def inspectStorage(self, older_than_days: int = 30) -> None:
+        def updated(result: dict[str, Any]) -> None:
+            self._storage = dict(result)
+            self.storageChanged.emit()
+
+        self.activity.submit(
+            "storage.inspect",
+            {"older_than_days": older_than_days},
+            action_key="storage-inspect",
+            completed=updated,
+        )
+
+    @Slot()
+    def checkForUpdates(self) -> None:
+        def updated(result: dict[str, Any]) -> None:
+            self._update = {**self._update, **result}
+            self.updateChanged.emit()
+
+        self.activity.submit(
+            "update.check",
+            {"include_prerelease": False},
+            action_key="update-check",
+            completed=updated,
+        )
+
+    @Slot()
+    def downloadUpdate(self) -> None:
+        version = str(self._update.get("latest_version") or "")
+        if not version:
+            return
+
+        def updated(result: dict[str, Any]) -> None:
+            self._update = {**self._update, **result}
+            self.updateChanged.emit()
+
+        self.activity.submit(
+            "update.download",
+            {"version": version},
+            action_key="update-download",
+            completed=updated,
+        )
+
+    @Slot(str)
+    def restoreArtifacts(self, task_ids_value: str) -> None:
+        task_ids = [
+            value.strip()
+            for value in task_ids_value.replace("\n", ",").split(",")
+            if value.strip()
+        ]
+        if not task_ids:
+            return
+        self.activity.submit(
+            "storage.restore",
+            {"task_ids": task_ids},
+            action_key="storage-restore",
+            completed=lambda _result: self.inspectStorage(30),
+        )
+
+    @Slot(str)
+    def planStorageMigration(self, target_value: str) -> None:
+        target = local_path(target_value)
+
+        def planned(result: dict[str, Any]) -> None:
+            self._storage = {**self._storage, "migration_plan": dict(result)}
+            self.storageChanged.emit()
+
+        self.activity.submit(
+            "storage.migration.plan",
+            {"target_root": target},
+            action_key="storage-migration-plan",
+            completed=planned,
+        )
+
+    @Slot()
+    def prepareStorageMigration(self) -> None:
+        plan = dict(self._storage.get("migration_plan") or {})
+        if not plan or plan.get("conflicts"):
+            return
+
+        def prepared(result: dict[str, Any]) -> None:
+            self._storage = {**self._storage, "migration": dict(result)}
+            self.storageChanged.emit()
+            start_managed_process(list(result["bootstrap_command"]))
+            QTimer.singleShot(0, QApplication.quit)
+
+        self.activity.requests.submit(
+            "storage.migration.prepare",
+            {
+                "target_root": plan["target_root"],
+                "plan_digest": plan["plan_digest"],
+            },
+            prepared,
+            request_key="storage-migration-prepare",
+        )
+
+    @Slot()
+    def installUpdate(self) -> None:
+        version = str(self._update.get("latest_version") or "")
+        if not version or not self._update.get("downloaded_path"):
+            return
+
+        def installed(result: dict[str, Any]) -> None:
+            self._update = {**self._update, **result}
+            self.updateChanged.emit()
+
+        self.activity.submit(
+            "update.install",
+            {"version": version},
+            action_key="update-install",
+            completed=installed,
+        )
+
+    def _start_update_bootstrap(self, result: dict[str, Any]) -> None:
+        self._update = {**self._update, **result}
+        self.updateChanged.emit()
+        start_managed_process(list(result["bootstrap_command"]))
+        QTimer.singleShot(0, QApplication.quit)
+
+    @Slot()
+    def activateUpdate(self) -> None:
+        version = str(self._update.get("version") or self._update.get("latest_version") or "")
+        if not version:
+            return
+        self.activity.requests.submit(
+            "update.activate",
+            {"version": version},
+            self._start_update_bootstrap,
+            request_key="update-activate",
+        )
+
+    @Slot()
+    def rollbackUpdate(self) -> None:
+        self.activity.requests.submit(
+            "update.rollback",
+            {},
+            self._start_update_bootstrap,
+            request_key="update-rollback",
+        )
+
+    @Slot()
+    def openUpdate(self) -> None:
+        path = str(self._update.get("downloaded_path") or "")
+        url = QUrl.fromLocalFile(path) if path else QUrl(str(self._update.get("release_url") or ""))
+        if url.isValid():
+            QDesktopServices.openUrl(url)

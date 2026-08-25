@@ -84,6 +84,12 @@ def main() -> int:
     audio_path = Path(args.audio)
     vad_model = load_silero_vad(onnx=True)
     waveform = read_audio(str(audio_path), sampling_rate=16000)
+    bucket_count = min(512, max(1, int(waveform.numel()) // 160))
+    bucket_size = max(1, (int(waveform.numel()) + bucket_count - 1) // bucket_count)
+    waveform_peaks = [
+        round(float(waveform[start : start + bucket_size].abs().max()), 6)
+        for start in range(0, int(waveform.numel()), bucket_size)
+    ]
     timestamps = get_speech_timestamps(
         waveform,
         vad_model,
@@ -179,6 +185,8 @@ def main() -> int:
                 "vad": "silero-v6",
                 "speaker_embedding": "wespeaker" if session else None,
                 "speaker_count": len(centroids) if segments else 0,
+                "duration_seconds": round(float(waveform.numel()) / 16000.0, 6),
+                "waveform_peaks": waveform_peaks,
                 "clustering": {
                     "method": "global-average-linkage",
                     "merge_threshold": args.threshold,

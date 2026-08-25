@@ -26,6 +26,74 @@ class StorageRepository:
             "SELECT * FROM artifact_archives WHERE task_id=?", (task_id,)
         )
 
+    def completed_archive_count(self) -> int:
+        row = self.database.fetch_one(
+            "SELECT COUNT(*) AS count FROM artifact_archives WHERE state='completed'"
+        )
+        return int((row or {}).get("count") or 0)
+
+    def completed_archives(self, task_ids: list[str]) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in task_ids)
+        return self.database.fetch_all(
+            "SELECT * FROM artifact_archives "
+            f"WHERE task_id IN ({placeholders}) AND state='completed' ORDER BY task_id",  # noqa: S608
+            tuple(task_ids),
+        )
+
+    def mark_restored(self, task_id: str) -> dict[str, Any]:
+        self.database.execute(
+            "UPDATE artifact_archives SET state='restored' WHERE task_id=?",
+            (task_id,),
+        )
+        restored = self.archive(task_id)
+        if not restored:
+            raise RuntimeError(f"archive record missing after restore: {task_id}")
+        return restored
+
+    def migrations(self) -> list[dict[str, Any]]:
+        return self.database.fetch_all(
+            "SELECT * FROM storage_migrations ORDER BY created_at DESC,id DESC"
+        )
+
+    def terminal_tasks(self) -> list[dict[str, Any]]:
+        return self.database.fetch_all(
+            "SELECT id,state FROM tasks "
+            "WHERE state IN ('completed','failed','cancelled','interrupted')"
+        )
+
+    def active_artifact_paths(self) -> set[str]:
+        return {
+            str(row["path"])
+            for row in self.database.fetch_all(
+                "SELECT path FROM artifacts WHERE state='active'"
+            )
+        }
+
+    def create_migration(
+        self,
+        migration_id: str,
+        source_root: str,
+        target_root: str,
+        plan_digest: str,
+        manifest_path: str,
+    ) -> None:
+        now = utc_now()
+        self.database.execute(
+            "INSERT INTO storage_migrations(id,source_root,target_root,plan_digest,state,"
+            "manifest_path,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                migration_id,
+                source_root,
+                target_root,
+                plan_digest,
+                "prepared",
+                manifest_path,
+                None,
+                now,
+                now,
+            ),
+        )
+
     def plan_archive(
         self,
         task_id: str,

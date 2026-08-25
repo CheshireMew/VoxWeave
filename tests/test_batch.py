@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from voxweave.batch import BatchManager
+from voxweave.batch_output import output_path
 from voxweave.database import Database
+from voxweave.hashing import sha256_file
 from voxweave.model_registry import ModelRegistry
 from voxweave.protocol import OperationError
 from voxweave.task_manager import TaskManager
@@ -262,9 +264,12 @@ def test_watcher_uses_changes_and_submits_stable_file_only_once(tmp_path, monkey
             break
         time.sleep(0.02)
     time.sleep(0.5)
-    assert database.fetch_one(
-        "SELECT COUNT(*) AS count FROM tasks WHERE operation='conversion.run'"
-    )["count"] == 1
+    assert (
+        database.fetch_one("SELECT COUNT(*) AS count FROM tasks WHERE operation='conversion.run'")[
+            "count"
+        ]
+        == 1
+    )
     assert batch.get(rule["id"])["last_error"] is None
     batch.shutdown()
     tasks.shutdown()
@@ -293,6 +298,36 @@ def test_same_stem_different_extensions_publish_distinct_outputs(tmp_path) -> No
     assert {path.read_bytes() for path in outputs} == {b"wave", b"mpeg"}
     assert any("_wav_" in path.name for path in outputs)
     assert any("_mp3_" in path.name for path in outputs)
+    batch.shutdown()
+    tasks.shutdown()
+
+
+def test_skip_collision_is_a_completed_batch_item(tmp_path) -> None:
+    _database, tasks, batch = _managers(tmp_path)
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    source = input_root / "voice.wav"
+    source.write_bytes(b"wave")
+    rule = batch.create(
+        {
+            "input_root": str(input_root),
+            "output_root": str(tmp_path / "output"),
+            "model": "model.example",
+            "preset": {},
+            "collision_policy": "skip",
+            "watch": False,
+        }
+    )
+    existing = output_path(rule, source, sha256_file(source))
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_bytes(b"existing")
+
+    parent = tasks.submit("batch.run", {"batch_id": rule["id"]})
+    completed = _wait_completed(tasks, parent["id"])
+
+    assert completed["state"] == "completed"
+    assert completed["result"]["counts"] == {"skipped": 1}
+    assert existing.read_bytes() == b"existing"
     batch.shutdown()
     tasks.shutdown()
 
@@ -402,5 +437,91 @@ def test_batch_retry_reuses_failed_item_and_completes_parent(tmp_path) -> None:
     assert refreshed and refreshed["state"] == "completed"
     assert refreshed["task_id"] != failed_item["task_id"]
     assert Path(refreshed["output_path"]).read_bytes() == b"voice"
+    batch.shutdown()
+
+
+def test_batch_variants_create_distinct_outputs_and_one_item_can_be_reconfigured(
+    tmp_path,
+) -> None:
+    database, tasks, batch = _managers(tmp_path, fail_first=True)
+    alternate_path = tmp_path / "alternate.pth"
+    alternate_path.write_bytes(b"alternate model")
+    ModelRegistry(database).register(
+        alternate_path,
+        model_id="model.alternate",
+        display_name="Alternate",
+        inspection={"status": "ready"},
+    )
+    input_root = tmp_path / "variant-input"
+    output_root = tmp_path / "variant-output"
+    input_root.mkdir()
+    source = input_root / "take.wav"
+    source.write_bytes(b"voice take")
+    rule = batch.create(
+        {
+            "input_root": str(input_root),
+            "output_root": str(output_root),
+            "extensions": [".wav"],
+            "naming_template": "{stem}_{hash}",
+            "variants": [
+                {
+                    "name": "warm",
+                    "model": "model.example",
+                    "preset": {"pitch": 2},
+                    "preset_name": "warm",
+                    "include_globs": ["*.wav"],
+                },
+                {
+                    "name": "bright",
+                    "model": "model.alternate",
+                    "preset": {"pitch": 5},
+                    "preset_name": "bright",
+                    "extensions": [".wav"],
+                },
+            ],
+        }
+    )
+    plan = batch.submissions.plan(rule, lambda *_args: None, lambda: False)
+    assert plan["file_count"] == 1
+    assert plan["output_count"] == 2
+    assert {example["variant"] for example in plan["examples"]} == {"warm", "bright"}
+    assert len({example["output"] for example in plan["examples"]}) == 2
+    assert any("warm" in Path(example["output"]).stem for example in plan["examples"])
+    assert any("bright" in Path(example["output"]).stem for example in plan["examples"])
+
+    parent = tasks.submit("batch.run", {"batch_id": rule["id"]})
+    failed_parent = _wait_completed(tasks, parent["id"])
+    assert failed_parent["state"] == "failed"
+    page = batch.list()
+    listed = next(item for item in page["items"] if item["id"] == rule["id"])
+    assert listed["item_counts"] == {"completed": 1, "failed": 1}
+    assert len(listed["items"]) == 1
+    failed_item = listed["items"][0]
+    previous_task_id = failed_item["task_id"]
+
+    retried = batch.item_retries.retry(
+        {
+            "item_id": failed_item["id"],
+            "variant": {
+                "name": "rescued",
+                "model": "model.alternate",
+                "preset": {"pitch": -3},
+                "preset_name": "rescued",
+                "output_format": "wav",
+            },
+        }
+    )
+    retry_task_id = retried["tasks"][0]["id"]
+    assert retry_task_id != previous_task_id
+    assert _wait_completed(tasks, retry_task_id)["state"] == "completed"
+    batch.runs.sync()
+    refreshed = database.fetch_one(
+        "SELECT task_id,state,variant_name,variant_json,output_path FROM batch_items WHERE id=?",
+        (failed_item["id"],),
+    )
+    assert refreshed and refreshed["state"] == "completed"
+    assert refreshed["variant_name"] == "rescued"
+    assert refreshed["task_id"] == retry_task_id
+    assert "rescued" in Path(refreshed["output_path"]).stem
     batch.shutdown()
     tasks.shutdown()

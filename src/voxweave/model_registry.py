@@ -205,6 +205,10 @@ class ModelRegistry:
 
     def list_models(self) -> list[dict[str, Any]]:
         rows = self.repository.list()
+        metadata = self.repository.metadata()
+        duplicates: dict[str, list[str]] = {}
+        for row in rows:
+            duplicates.setdefault(str(row["model_sha256"]), []).append(str(row["id"]))
         results = []
         for row in rows:
             model = Database.decode_json_row(
@@ -214,6 +218,26 @@ class ModelRegistry:
             model["version"] = MODEL_PROTOCOL_VERSION
             model["f0"] = bool(model["f0"]) if model["f0"] is not None else None
             model["archived"] = bool(model.get("archived"))
+            user = metadata.get(model["id"], {})
+            model["custom_name"] = user.get("custom_name")
+            model["tags"] = list(user.get("tags") or [])
+            model["favorite"] = bool(user.get("favorite"))
+            model["notes"] = str(user.get("notes") or "")
+            model["sample_path"] = user.get("sample_path")
+            model["cover_path"] = user.get("cover_path")
+            model["usage_count"] = int(user.get("usage_count") or 0)
+            model["last_used_at"] = user.get("last_used_at")
+            model["duplicate_model_ids"] = [
+                model_id
+                for model_id in duplicates.get(str(model["model_sha256"]), [])
+                if model_id != model["id"]
+            ]
+            model["integrity_status"] = str(
+                user.get("integrity_status") or "unchecked"
+            )
+            model["integrity_checked_at"] = user.get("integrity_checked_at")
+            model["integrity_error"] = user.get("integrity_error")
+            model["metadata_revision"] = int(user.get("revision") or 0)
             model_path = Path(str(model["model_path"]))
             index_path = Path(str(model["index_path"])) if model.get("index_path") else None
             if not model_path.is_file():
@@ -222,6 +246,33 @@ class ModelRegistry:
                 model["status"] = "index_missing"
             results.append(model)
         return results
+
+    def update_metadata(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        model_id = str(arguments["model_id"])
+        if not self.repository.get(model_id):
+            raise LookupError(f"model not found: {model_id}")
+        changes = {
+            key: arguments[key]
+            for key in (
+                "custom_name",
+                "tags",
+                "favorite",
+                "notes",
+                "sample_path",
+                "cover_path",
+            )
+            if key in arguments
+        }
+        sample_path = changes.get("sample_path")
+        if sample_path and not Path(str(sample_path)).is_file():
+            raise FileNotFoundError(str(sample_path))
+        cover_path = changes.get("cover_path")
+        if cover_path and not Path(str(cover_path)).is_file():
+            raise FileNotFoundError(str(cover_path))
+        self.repository.update_metadata(
+            model_id, int(arguments.get("expected_revision", 0)), changes
+        )
+        return self.resolve(model_id)
 
     def is_registered(self, model_id: str) -> bool:
         return self.repository.get(model_id) is not None
@@ -326,7 +377,35 @@ class ModelRegistry:
                 "model_unavailable", f"model is not ready: {model['id']} ({model['status']})"
             )
         self.verify_snapshot(model)
+        usage = self.repository.record_usage(model["id"])
+        model["usage_count"] = int(usage.get("usage_count") or 0)
+        model["last_used_at"] = usage.get("last_used_at")
         return model
+
+    def verify_integrity(
+        self,
+        arguments: dict[str, Any],
+        progress: Any,
+        cancelled: Any,
+    ) -> dict[str, Any]:
+        model_id = str(arguments["model_id"])
+        model = self.resolve(model_id)
+        progress(0.1, "verifying_model", model_id)
+        if cancelled():
+            raise InterruptedError("model verification cancelled")
+        try:
+            self.verify_snapshot(model)
+        except FileNotFoundError as error:
+            self.repository.set_integrity(model_id, "missing", str(error))
+        except OperationError as error:
+            status = "missing" if "missing" in error.code else "changed"
+            self.repository.set_integrity(model_id, status, str(error))
+        except Exception as error:  # noqa: BLE001 - persist explicit integrity result
+            self.repository.set_integrity(model_id, "error", str(error))
+        else:
+            self.repository.set_integrity(model_id, "verified", None)
+        progress(0.95, "verifying_model", model_id)
+        return self.resolve(model_id)
 
     def resolve(self, selector: str) -> dict[str, Any]:
         expected = selector.strip().casefold()

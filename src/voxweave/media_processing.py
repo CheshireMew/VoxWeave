@@ -211,6 +211,25 @@ def align_audio_file(
     return dict(_postprocess(settings, "align", request_path, cancelled))
 
 
+def dereverb_audio_file(
+    input_path: Path,
+    output_path: Path,
+    strength: float,
+    settings: Settings | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    request_path = output_path.with_suffix(".dereverb-request.json")
+    _write_postprocess_request(
+        request_path,
+        {
+            "input": str(input_path),
+            "output": str(output_path),
+            "strength": strength,
+        },
+    )
+    return dict(_postprocess(settings, "dereverb", request_path, cancelled))
+
+
 def convert_long_audio(
     engine: RvcEngine,
     input_path: Path,
@@ -314,4 +333,116 @@ def convert_selected_segments(
         if len(conversions) == 1:
             artifact["conversion"] = conversions[0]
     progress(0.8, "converting", f"converted {len(artifacts)} selected segments")
+    return artifacts
+
+
+def convert_assigned_segments(
+    engine: RvcEngine,
+    audio_path: Path,
+    output_path: Path,
+    assignments: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    work_dir: Path,
+    progress: Progress,
+    cancelled: Callable[[], bool],
+    overlap_policy: str,
+    settings: Settings | None = None,
+    ledger: FileVerificationLedger | None = None,
+) -> list[dict[str, Any]]:
+    """Convert explicitly assigned analysis segments, grouping jobs by model revision."""
+
+    settings = settings or getattr(engine, "settings", None)
+    assignment_by_segment: dict[str, dict[str, Any]] = {}
+    for assignment in assignments:
+        for segment_id in assignment["segment_ids"]:
+            if segment_id in assignment_by_segment:
+                raise MediaPipelineError(f"segment is assigned more than once: {segment_id}")
+            assignment_by_segment[segment_id] = assignment
+    selected_ids = set(assignment_by_segment)
+    known = {str(segment.get("id")) for segment in segments}
+    missing = selected_ids - known
+    if missing:
+        raise MediaPipelineError(f"assigned segments are not in analysis: {sorted(missing)}")
+    selected_speakers = {
+        str(segment["speaker"])
+        for segment in segments
+        if str(segment.get("id")) in selected_ids
+    }
+    prepare_request = work_dir / "assigned-segments-prepare.json"
+    _write_postprocess_request(
+        prepare_request,
+        {
+            "input": str(audio_path),
+            "output": str(output_path),
+            "work_dir": str(work_dir),
+            "segments": segments,
+            "selected_speakers": sorted(selected_speakers),
+            "selected_segment_ids": sorted(selected_ids),
+            "overlap_policy": overlap_policy,
+        },
+    )
+    manifest = dict(_postprocess(settings, "prepare-selected", prepare_request, cancelled))
+    prepared_by_assignment: dict[int, list[dict[str, Any]]] = {}
+    for prepared in manifest["segments"]:
+        segment_id = str(prepared["segment"].get("id"))
+        assignment = assignment_by_segment[segment_id]
+        prepared_by_assignment.setdefault(id(assignment), []).append(prepared)
+
+    result_by_chunk: dict[str, dict[str, Any]] = {}
+    for assignment_index, assignment in enumerate(assignments):
+        prepared_segments = prepared_by_assignment.get(id(assignment), [])
+        jobs = [
+            (Path(chunk["source"]), Path(chunk["converted"]))
+            for prepared in prepared_segments
+            for chunk in prepared["chunks"]
+        ]
+        if not jobs:
+            continue
+        model = assignment["model"]
+        parameters = {
+            **model["recommended"],
+            **assignment.get("parameters", {}),
+            "overwrite": False,
+        }
+        progress(
+            0.3 + 0.45 * assignment_index / max(1, len(assignments)),
+            "converting",
+            f"converting {len(jobs)} chunks with {model['display_name']}",
+        )
+        engine_arguments: dict[str, Any] = {
+            "progress": progress,
+            "cancelled": cancelled,
+        }
+        if ledger is not None:
+            engine_arguments["ledger"] = ledger
+        conversions = engine.convert_batch(
+            jobs,
+            model,
+            parameters,
+            **engine_arguments,
+        )
+        for (_source, converted), conversion in zip(jobs, conversions, strict=True):
+            result_by_chunk[str(converted)] = conversion
+
+    finalize_request = work_dir / "assigned-segments-finalize.json"
+    _write_postprocess_request(finalize_request, {"manifest": manifest})
+    artifacts = list(_postprocess(settings, "finalize-selected", finalize_request, cancelled))
+    for artifact, prepared in zip(artifacts, manifest["segments"], strict=True):
+        segment_id = str(prepared["segment"].get("id"))
+        assignment = assignment_by_segment[segment_id]
+        model = assignment["model"]
+        artifact["model"] = {
+            "id": model["id"],
+            "display_name": model["display_name"],
+            "model_sha256": model["model_sha256"],
+            "index_sha256": model.get("index_sha256"),
+        }
+        artifact["parameters"] = {
+            **model["recommended"],
+            **assignment.get("parameters", {}),
+        }
+        artifact["conversions"] = [
+            result_by_chunk[str(chunk["converted"])] for chunk in prepared["chunks"]
+        ]
+    progress(0.8, "converting", f"converted {len(artifacts)} assigned segments")
     return artifacts

@@ -49,7 +49,14 @@ def run_smoke(report_path: Path) -> int:
         settings = load_settings()
         configure_process_environment(settings)
         engine = QQmlApplicationEngine()
-        bridge = Bridge(settings, start_background=False)
+        def no_service_transport(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise RuntimeError("background services are disabled during release smoke")
+
+        bridge = Bridge(
+            settings,
+            start_background=False,
+            transport=no_service_transport,
+        )
         engine.setInitialProperties({"bridge": bridge})
         qml_path = PACKAGE_ROOT / "qml" / "Main.qml"
         engine.load(QUrl.fromLocalFile(str(qml_path)))

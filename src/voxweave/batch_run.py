@@ -5,11 +5,11 @@ from collections.abc import Callable
 from typing import Any
 
 from .batch_repository import BatchRepository
-from .batch_submission import BatchSubmissionService
+from .batch_submission import BatchSubmissionService, submit_source
 from .protocol import OperationError
 from .task_manager import DeferredTask, TaskContext, TaskManager
 
-TERMINAL_TASK_STATES = {"completed", "failed", "cancelled", "interrupted"}
+TERMINAL_ITEM_STATES = {"completed", "failed", "cancelled", "interrupted", "skipped"}
 
 
 class BatchRunCoordinator:
@@ -43,7 +43,9 @@ class BatchRunCoordinator:
                 raise InterruptedError("task cancellation requested")
             context.progress(index / total, "enumerating", f"{index}/{len(files)} files")
             try:
-                item_ids.append(self.submissions.submit_file(rule, path, context.cancelled))
+                item_ids.extend(
+                    submit_source(self.submissions, rule, path, context.cancelled)
+                )
             except Exception as error:  # noqa: BLE001 - isolate each source file
                 failures.append({"source_path": str(path), "error": str(error)})
         result = {"batch": rule, "tasks": [], "failures": failures}
@@ -116,7 +118,7 @@ class BatchRunCoordinator:
                     if item["task_id"]:
                         self.tasks.cancel(item["task_id"])
             if len(items) != len(item_ids) or any(
-                item["state"] not in TERMINAL_TASK_STATES for item in items
+                item["state"] not in TERMINAL_ITEM_STATES for item in items
             ):
                 continue
             counts: dict[str, int] = {}
@@ -132,7 +134,9 @@ class BatchRunCoordinator:
             if parent["cancel_requested"]:
                 self.tasks.cancel_deferred(run["id"], result)
                 state = "cancelled"
-            elif set(counts) == {"completed"} and not result["submission_failures"]:
+            elif set(counts) <= {"completed", "skipped"} and not result[
+                "submission_failures"
+            ]:
                 self.tasks.complete_deferred(run["id"], result)
                 state = "completed"
             else:

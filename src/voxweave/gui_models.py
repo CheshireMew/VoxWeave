@@ -13,7 +13,7 @@ from .gui_requests import RequestCoordinator
 from .gui_support import local_path
 from .gui_tasks import TaskFeed
 
-MODEL_OPERATIONS = {"model.import", "model.catalog.install", "model.scan"}
+MODEL_OPERATIONS = {"model.import", "model.catalog.install", "model.scan", "model.verify"}
 
 
 class ModelCatalogViewModel(QObject):
@@ -22,6 +22,7 @@ class ModelCatalogViewModel(QObject):
     loadingChanged = Signal()
     starterInstallRequested = Signal(object)
     conversionModelRequested = Signal(str)
+    comparisonChanged = Signal()
 
     def __init__(
         self,
@@ -54,13 +55,13 @@ class ModelCatalogViewModel(QObject):
         self._startup_provisioned = False
         self._starter_queue: list[str] = []
         self._starter_total = 0
+        self._comparison_models: set[str] = set()
+        self._comparison_outputs: list[dict[str, Any]] = []
         task_feed.taskUpdated.connect(self._consume_task)
 
     def _set_status(self, key: str, kind: str = "info", **values: Any) -> None:
         if self.status_callback:
-            self.status_callback(
-                localized_text(key, self.locale_context).format(**values), kind
-            )
+            self.status_callback(localized_text(key, self.locale_context).format(**values), kind)
 
     def _set_items(self, result: list[dict[str, Any]]) -> None:
         self._items = result
@@ -91,8 +92,7 @@ class ModelCatalogViewModel(QObject):
             self._starter_details = {
                 str(entry["id"]): dict(entry)
                 for entry in result
-                if bool(entry.get("starter"))
-                and int(entry.get("download_size_bytes") or 0) > 0
+                if bool(entry.get("starter")) and int(entry.get("download_size_bytes") or 0) > 0
             }
             installed = {str(entry["id"]) for entry in result if bool(entry.get("installed"))}
             for model_id in installed:
@@ -138,6 +138,28 @@ class ModelCatalogViewModel(QObject):
                 or model.get("license_spdx") == "LicenseRef-Unknown"
                 else str(model["license_spdx"])
             )
+            item["cover_url"] = (
+                QUrl.fromLocalFile(str(model["cover_path"])).toString()
+                if model.get("cover_path")
+                else ""
+            )
+            projected.append(item)
+        return projected
+
+    @Property("QVariantList", notify=comparisonChanged)
+    def comparisonModelIds(self) -> list[str]:
+        return sorted(self._comparison_models)
+
+    @Property("QVariantList", notify=comparisonChanged)
+    def comparisonOutputs(self) -> list[dict[str, Any]]:
+        language, translations = self.locale_context()
+        projected = []
+        for output in self._comparison_outputs:
+            item = dict(output)
+            item["localized_name"] = localized_model_name(
+                dict(output.get("model") or {}), language, translations
+            )
+            item["url"] = QUrl.fromLocalFile(str(output["output_path"])).toString()
             projected.append(item)
         return projected
 
@@ -261,9 +283,7 @@ class ModelCatalogViewModel(QObject):
             self._finish_provisioning()
             return
         archived_ready = [
-            item
-            for item in self._items
-            if item.get("status") == "ready" and item.get("archived")
+            item for item in self._items if item.get("status") == "ready" and item.get("archived")
         ]
         if archived_ready:
             self._finish_provisioning("models.auto.archived", "warning")
@@ -288,27 +308,17 @@ class ModelCatalogViewModel(QObject):
 
     def _local_scan_completed(self, result: list[dict[str, Any]]) -> None:
         self._set_items(result)
-        if any(
-            item.get("status") == "ready" and not item.get("archived")
-            for item in result
-        ):
+        if any(item.get("status") == "ready" and not item.get("archived") for item in result):
             self._finish_provisioning()
             return
-        if any(
-            item.get("status") == "ready" and item.get("archived")
-            for item in result
-        ):
+        if any(item.get("status") == "ready" and item.get("archived") for item in result):
             self._finish_provisioning("models.auto.archived", "warning")
             return
         self._starter_queue = self._available_starter_ids()
         self._request_starter_install()
 
     def _available_starter_ids(self) -> list[str]:
-        return [
-            model_id
-            for model_id in STARTER_MODEL_IDS
-            if model_id in self._starter_details
-        ]
+        return [model_id for model_id in STARTER_MODEL_IDS if model_id in self._starter_details]
 
     def _request_starter_install(self) -> None:
         if not self._starter_queue:
@@ -395,6 +405,60 @@ class ModelCatalogViewModel(QObject):
             {"model_id": model_id, "archived": archived},
             lambda _result: self.refresh(),
             request_key=f"model-archive:{model_id}",
+        )
+
+    @Slot("QVariantMap")
+    def updateMetadata(self, value: dict[str, Any]) -> None:
+        payload = dict(value)
+        payload["tags"] = [
+            item.strip() for item in str(payload.pop("tags_text", "")).split(",") if item.strip()
+        ]
+        if payload.get("cover_path"):
+            payload["cover_path"] = local_path(str(payload["cover_path"]))
+        self.requests.submit(
+            "model.metadata.update",
+            payload,
+            lambda _result: self.refresh(),
+            request_key=f"model-metadata:{payload['model_id']}",
+        )
+
+    @Slot(str)
+    def verifyIntegrity(self, model_id: str) -> None:
+        self.activity.submit(
+            "model.verify",
+            {"model_id": model_id},
+            action_key=f"model-verify:{model_id}",
+        )
+
+    @Slot(str, bool)
+    def selectForComparison(self, model_id: str, selected: bool) -> None:
+        before = set(self._comparison_models)
+        if selected:
+            if len(self._comparison_models) < 8:
+                self._comparison_models.add(model_id)
+        else:
+            self._comparison_models.discard(model_id)
+        if before != self._comparison_models:
+            self.comparisonChanged.emit()
+
+    @Slot("QVariantMap")
+    def compareModels(self, value: dict[str, Any]) -> None:
+        if len(self._comparison_models) < 2:
+            self._set_status("models.compare.need_two", "warning")
+            return
+        payload = dict(value)
+        payload["input"] = local_path(str(payload["input"]))
+        payload["models"] = sorted(self._comparison_models)
+
+        def completed(result: dict[str, Any]) -> None:
+            self._comparison_outputs = list(result.get("outputs") or [])
+            self.comparisonChanged.emit()
+
+        self.activity.submit(
+            "model.compare",
+            payload,
+            action_key="model-compare",
+            completed=completed,
         )
 
     @Slot()

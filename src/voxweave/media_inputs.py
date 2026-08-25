@@ -72,7 +72,9 @@ class MediaInputResolver:
         context: TaskContext,
     ) -> dict[str, Any]:
         model = self.models.resolve_for_execution(arguments["model"])
-        revision = context.snapshot.get("model")
+        revision = context.snapshot.get("model") or context.snapshot.get("models", {}).get(
+            model["id"]
+        )
         if revision and (
             model["id"] != revision.get("id")
             or model["model_sha256"] != revision.get("model_sha256")
@@ -83,3 +85,50 @@ class MediaInputResolver:
                 f"model revision changed after task submission: {model['id']}",
             )
         return model
+
+    def assigned_models(
+        self,
+        arguments: dict[str, Any],
+        context: TaskContext,
+    ) -> list[dict[str, Any]]:
+        results = []
+        for assignment in arguments.get("assignments") or []:
+            model = self.models.resolve_for_execution(assignment["model"])
+            revision = context.snapshot.get("models", {}).get(model["id"])
+            if revision and (
+                model["model_sha256"] != revision.get("model_sha256")
+                or model.get("index_sha256") != revision.get("index_sha256")
+            ):
+                raise OperationError(
+                    "model_revision_changed",
+                    f"model revision changed after task submission: {model['id']}",
+                )
+            results.append(
+                {
+                    "segment_ids": list(assignment["segment_ids"]),
+                    "model": model,
+                    "parameters": dict(assignment.get("parameters") or {}),
+                }
+            )
+        return results
+
+    def model_list(
+        self,
+        arguments: dict[str, Any],
+        context: TaskContext,
+    ) -> list[dict[str, Any]]:
+        results = []
+        revisions = context.snapshot.get("models", {})
+        for selector in arguments.get("models") or []:
+            model = self.models.resolve_for_execution(selector)
+            revision = revisions.get(model["id"])
+            if revision and (
+                model["model_sha256"] != revision.get("model_sha256")
+                or model.get("index_sha256") != revision.get("index_sha256")
+            ):
+                raise OperationError(
+                    "model_revision_changed",
+                    f"model revision changed after task submission: {model['id']}",
+                )
+            results.append(model)
+        return results

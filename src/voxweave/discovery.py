@@ -56,9 +56,10 @@ class Discovery:
     protocol: str
     protocol_version: int
     created_at: float
+    owner_token: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "pid": self.pid,
             "port": self.port,
             "token": self.token,
@@ -66,6 +67,9 @@ class Discovery:
             "protocol_version": self.protocol_version,
             "created_at": self.created_at,
         }
+        if self.owner_token is not None:
+            payload["owner_token"] = self.owner_token
+        return payload
 
 
 class ServiceLock(InterprocessFileLock):
@@ -103,6 +107,7 @@ def write_discovery(settings: Settings, port: int) -> Discovery:
         protocol=PROTOCOL,
         protocol_version=PROTOCOL_VERSION,
         created_at=time.time(),
+        owner_token=os.environ.get("VOXWEAVE_SERVICE_OWNER_TOKEN") or None,
     )
     temp = settings.discovery_path.with_suffix(".json.tmp")
     temp.write_text(json.dumps(discovery.as_dict(), indent=2) + "\n", encoding="utf-8")

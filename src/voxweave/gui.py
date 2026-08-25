@@ -31,7 +31,9 @@ from .gui_maintenance import MaintenanceViewModel
 from .gui_media import MediaViewModel
 from .gui_models import ModelCatalogViewModel
 from .gui_presenters import error_summary
+from .gui_projects import ProjectsViewModel
 from .gui_realtime import RealtimeViewModel
+from .gui_realtime_controls import RealtimeTrayController, WindowsGlobalHotkeys
 from .gui_requests import RequestCoordinator
 from .gui_tasks import TaskFeed, TaskListViewModel
 from .onboarding import (
@@ -65,6 +67,13 @@ class Bridge(QObject):
         translations_path = PACKAGE_ROOT / "resources" / "translations.json"
         self.translations = json.loads(translations_path.read_text(encoding="utf-8"))
 
+        if (
+            service_client is None
+            and transport is None
+            and getattr(request_json, "__module__", "") == "voxweave.client"
+        ):
+            service_client = ManagedServiceClient(settings)
+            transport = service_client.request
         self._service_client = service_client
         self.requests = RequestCoordinator(
             settings,
@@ -108,6 +117,7 @@ class Bridge(QObject):
             status_callback=self._set_status,
             text_callback=self.text,
         )
+        self._projects = ProjectsViewModel(self.requests, self._activity, self)
         self._realtime = RealtimeViewModel(
             settings, self.requests, self._set_status, self.text, self
         )
@@ -128,7 +138,10 @@ class Bridge(QObject):
         if start_background:
             QTimer.singleShot(0, self._task_feed.start)
             QTimer.singleShot(0, self._batch_rules.refresh)
+            QTimer.singleShot(0, self._projects.refresh)
             QTimer.singleShot(0, self._realtime.start)
+            QTimer.singleShot(0, self._realtime.refreshScenes)
+            QTimer.singleShot(0, self._realtime.inspectRouting)
             QTimer.singleShot(0, self._model_catalog.discover)
             QTimer.singleShot(0, self._maintenance.ensureRuntime)
 
@@ -147,6 +160,10 @@ class Bridge(QObject):
     @Property(QObject, constant=True)
     def media(self) -> MediaViewModel:
         return self._media
+
+    @Property(QObject, constant=True)
+    def projects(self) -> ProjectsViewModel:
+        return self._projects
 
     @Property(QObject, constant=True)
     def realtime(self) -> RealtimeViewModel:
@@ -485,7 +502,44 @@ def main() -> int:
     if not engine.rootObjects():
         bridge.shutdown()
         return 1
+    window = engine.rootObjects()[0]
+    if "--voxweave-update-health-token" in sys.argv:
+        token_index = sys.argv.index("--voxweave-update-health-token") + 1
+        if token_index < len(sys.argv):
+            from .updater import UpdateService
+
+            UpdateService(settings).mark_healthy(sys.argv[token_index])
+    hotkeys = WindowsGlobalHotkeys(
+        {
+            "start_stop": bridge.realtime.toggleStartStop,
+            "bypass": bridge.realtime.toggleBypass,
+            "mute": bridge.realtime.toggleMute,
+            "push_to_talk_pressed": bridge.realtime.pushToTalkPressed,
+            "push_to_talk_released": bridge.realtime.pushToTalkReleased,
+        }
+    )
+    app.installNativeEventFilter(hotkeys)
+
+    def refresh_hotkeys() -> None:
+        failures = hotkeys.update(bridge.realtime.hotkeys)
+        if failures:
+            bridge._set_status(
+                bridge.text(bridge.language, "hotkey.registration_failed").format(
+                    message="; ".join(failures)
+                ),
+                "warning",
+            )
+
+    refresh_hotkeys()
+    bridge.realtime.hotkeysChanged.connect(refresh_hotkeys)
+    mini_window = window.findChild(QObject, "realtimeMiniPanel")
+    if mini_window is not None:
+        bridge.realtime.miniPanelRequested.connect(mini_window.show)
+    tray = RealtimeTrayController(bridge, window, mini_window, bridge)
+    app.setQuitOnLastWindowClosed(not tray.available)
     exit_code = app.exec()
+    tray.close()
+    hotkeys.close()
     bridge.shutdown()
     return exit_code
 

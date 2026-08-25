@@ -8,6 +8,7 @@ from typing import Any
 from .database import Database
 from .model_registry import ModelRegistry
 from .protocol import public_error_code
+from .realtime_recording_manifest import RealtimeRecordingManifestService
 from .realtime_repository import RealtimeRepository
 from .realtime_worker_controller import WorkerExit
 
@@ -105,10 +106,7 @@ class RealtimeSessionState:
                 state="failed",
                 stage="stop_timeout",
                 error_type="stop_timeout",
-                error=(
-                    "realtime audio stream did not stop within "
-                    f"{timeout_seconds:g} seconds"
-                ),
+                error=(f"realtime audio stream did not stop within {timeout_seconds:g} seconds"),
             )
             self._clear_active()
             return True
@@ -161,13 +159,15 @@ class RealtimeSessionState:
                 )
             elif event == "metrics":
                 self._heartbeat(session_id, metrics)
+            elif event == "control":
+                self.repository.heartbeat(session_id, metrics)
             elif event == "stopped":
-                self._finish_stopped(session_id)
+                self._finish_stopped(session_id, metrics)
                 self._clear_active()
                 return WorkerEventResult(True, True)
             return WorkerEventResult(True)
 
-    def _finish_stopped(self, session_id: str) -> None:
+    def _finish_stopped(self, session_id: str, stopped_metrics: dict[str, Any]) -> None:
         current = self.repository.get(session_id)
         if current["state"] in TERMINAL_STATES:
             return
@@ -183,6 +183,12 @@ class RealtimeSessionState:
                 error=str(error),
             )
         else:
+            merged_metrics = {**(current.get("metrics") or {}), **stopped_metrics}
+            manifest_path = RealtimeRecordingManifestService.for_database(
+                self.repository.database
+            ).finalize(current, merged_metrics)
+            if manifest_path:
+                merged_metrics["recording_manifest_path"] = manifest_path
             if self._service_stopping:
                 self._transition(
                     session_id,
@@ -190,9 +196,15 @@ class RealtimeSessionState:
                     stage="service_shutdown",
                     error_type="service_shutdown",
                     error="service stopped during realtime session",
+                    metrics=merged_metrics,
                 )
             elif current["state"] == "stopping":
-                self._transition(session_id, state="stopped", stage="stopped")
+                self._transition(
+                    session_id,
+                    state="stopped",
+                    stage="stopped",
+                    metrics=merged_metrics,
+                )
             else:
                 self._transition(
                     session_id,
@@ -200,6 +212,7 @@ class RealtimeSessionState:
                     stage="failed",
                     error_type="stream_stopped",
                     error="realtime audio stream stopped unexpectedly",
+                    metrics=merged_metrics,
                 )
 
     def handle_worker_exit(self, worker_exit: WorkerExit) -> bool:

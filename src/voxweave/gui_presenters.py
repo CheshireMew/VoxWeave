@@ -56,7 +56,8 @@ def localized_model_name(
     family = str(model.get("family") or "")
     model_id = str(model.get("id") or "")
     name = (
-        table.get(f"model.name.{model_id}")
+        str(model.get("custom_name") or "").strip()
+        or table.get(f"model.name.{model_id}")
         or table.get(f"model.name.{family}")
         or str(model.get("display_name") or family)
     )

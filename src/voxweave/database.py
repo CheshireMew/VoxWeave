@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 22
 
 MODEL_RECOMMENDATION_DEFAULTS = {
     "pitch": 0,
@@ -169,6 +169,10 @@ class Database:
                     16: self._migrate_to_16,
                     17: self._migrate_to_17,
                     18: self._migrate_to_18,
+                    19: self._migrate_to_19,
+                    20: self._migrate_to_20,
+                    21: self._migrate_to_21,
+                    22: self._migrate_to_22,
                 }
                 while version < SCHEMA_VERSION:
                     target = version + 1
@@ -231,7 +235,12 @@ class Database:
                     name TEXT NOT NULL,
                     model_sha256 TEXT NOT NULL,
                     parameters_json TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'conversion'
+                        CHECK(kind IN ('conversion','realtime')),
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
                     UNIQUE(model_id, name)
                 );
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -280,6 +289,14 @@ class Database:
                     recursive INTEGER NOT NULL,
                     watch_enabled INTEGER NOT NULL,
                     extensions_json TEXT NOT NULL,
+                    naming_template TEXT NOT NULL
+                        DEFAULT '{stem}_{source_ext}_{model}_{preset}_{hash}',
+                    preserve_structure INTEGER NOT NULL DEFAULT 1,
+                    collision_policy TEXT NOT NULL DEFAULT 'skip',
+                    output_format TEXT NOT NULL DEFAULT 'auto',
+                    include_globs_json TEXT NOT NULL DEFAULT '[]',
+                    exclude_globs_json TEXT NOT NULL DEFAULT '[]',
+                    variants_json TEXT NOT NULL,
                     last_error TEXT,
                     last_error_at TEXT,
                     state TEXT NOT NULL DEFAULT 'active',
@@ -294,13 +311,15 @@ class Database:
                     source_size INTEGER NOT NULL,
                     source_mtime_ns INTEGER NOT NULL,
                     source_sha256 TEXT NOT NULL,
+                    variant_name TEXT NOT NULL,
+                    variant_json TEXT NOT NULL,
                     output_path TEXT NOT NULL,
                     task_id TEXT REFERENCES tasks(id),
                     state TEXT NOT NULL,
                     error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    UNIQUE(batch_id, source_path, source_sha256)
+                    UNIQUE(batch_id, source_path, source_sha256, variant_name)
                 );
                 CREATE INDEX IF NOT EXISTS batch_rules_watch_index
                     ON batch_rules(watch_enabled,state);
@@ -407,6 +426,94 @@ class Database:
                     changed_fields_json TEXT NOT NULL,
                     settings_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    input_path TEXT NOT NULL,
+                    input_sha256 TEXT,
+                    output_path TEXT,
+                    content_mode TEXT NOT NULL
+                        CHECK(content_mode IN ('clean','mixed','singing')),
+                    analysis_manifest TEXT,
+                    analysis_sha256 TEXT,
+                    document_json TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'active'
+                        CHECK(state IN ('active','archived')),
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS projects_updated_index
+                    ON projects(state,updated_at DESC,id DESC);
+                CREATE TABLE IF NOT EXISTS project_revisions (
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    revision INTEGER NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(project_id,revision)
+                );
+                CREATE TABLE IF NOT EXISTS model_user_metadata (
+                    model_id TEXT PRIMARY KEY REFERENCES models(id),
+                    custom_name TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT NOT NULL DEFAULT '',
+                    sample_path TEXT,
+                    cover_path TEXT,
+                    usage_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TEXT,
+                    integrity_status TEXT NOT NULL DEFAULT 'unchecked',
+                    integrity_checked_at TEXT,
+                    integrity_error TEXT,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS realtime_scenes (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    settings_json TEXT NOT NULL,
+                    hotkeys_json TEXT NOT NULL DEFAULT '{}',
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS result_versions (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+                    project_id TEXT REFERENCES projects(id),
+                    project_revision INTEGER,
+                    input_path TEXT NOT NULL,
+                    input_sha256 TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    output_sha256 TEXT NOT NULL,
+                    model_json TEXT NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    parent_id TEXT REFERENCES result_versions(id),
+                    root_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL DEFAULT 1,
+                    rerun_arguments_json TEXT NOT NULL,
+                    differences_json TEXT NOT NULL DEFAULT '{}',
+                    label TEXT NOT NULL DEFAULT '',
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS result_versions_input_index
+                    ON result_versions(input_sha256,created_at DESC,id DESC);
+                CREATE INDEX IF NOT EXISTS result_versions_lineage_index
+                    ON result_versions(root_id,generation,id);
+                CREATE TABLE IF NOT EXISTS storage_migrations (
+                    id TEXT PRIMARY KEY,
+                    source_root TEXT NOT NULL,
+                    target_root TEXT NOT NULL,
+                    plan_digest TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL,
+                    manifest_path TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
         )
@@ -706,6 +813,215 @@ class Database:
         )
 
     @classmethod
+    def _migrate_to_19(cls, db: sqlite3.Connection) -> None:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                input_path TEXT NOT NULL,
+                input_sha256 TEXT,
+                output_path TEXT,
+                content_mode TEXT NOT NULL
+                    CHECK(content_mode IN ('clean','mixed','singing')),
+                analysis_manifest TEXT,
+                analysis_sha256 TEXT,
+                document_json TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'active'
+                    CHECK(state IN ('active','archived')),
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS projects_updated_index
+                ON projects(state,updated_at DESC,id DESC);
+            CREATE TABLE IF NOT EXISTS project_revisions (
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                revision INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(project_id,revision)
+            );
+            CREATE TABLE IF NOT EXISTS model_user_metadata (
+                model_id TEXT PRIMARY KEY REFERENCES models(id),
+                custom_name TEXT,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                favorite INTEGER NOT NULL DEFAULT 0,
+                notes TEXT NOT NULL DEFAULT '',
+                sample_path TEXT,
+                revision INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS realtime_scenes (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                settings_json TEXT NOT NULL,
+                hotkeys_json TEXT NOT NULL DEFAULT '{}',
+                archived INTEGER NOT NULL DEFAULT 0,
+                revision INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+    @classmethod
+    def _migrate_to_20(cls, db: sqlite3.Connection) -> None:
+        cls._add_column(db, "presets", "kind TEXT NOT NULL DEFAULT 'conversion'")
+        cls._add_column(db, "presets", "archived INTEGER NOT NULL DEFAULT 0")
+        cls._add_column(db, "presets", "revision INTEGER NOT NULL DEFAULT 1")
+        cls._add_column(db, "presets", "updated_at TEXT")
+        db.execute("UPDATE presets SET updated_at=created_at WHERE updated_at IS NULL")
+        cls._add_column(
+            db, "model_user_metadata", "revision INTEGER NOT NULL DEFAULT 1"
+        )
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS result_versions (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+                project_id TEXT REFERENCES projects(id),
+                project_revision INTEGER,
+                input_path TEXT NOT NULL,
+                input_sha256 TEXT NOT NULL,
+                output_path TEXT NOT NULL,
+                output_sha256 TEXT NOT NULL,
+                model_json TEXT NOT NULL,
+                parameters_json TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                favorite INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS result_versions_input_index
+                ON result_versions(input_sha256,created_at DESC,id DESC);
+            """
+        )
+
+    @classmethod
+    def _migrate_to_21(cls, db: sqlite3.Connection) -> None:
+        cls._add_column(
+            db,
+            "batch_rules",
+            "naming_template TEXT NOT NULL DEFAULT '{stem}_{source_ext}_{model}_{preset}_{hash}'",
+        )
+        cls._add_column(
+            db, "batch_rules", "preserve_structure INTEGER NOT NULL DEFAULT 1"
+        )
+        cls._add_column(
+            db, "batch_rules", "collision_policy TEXT NOT NULL DEFAULT 'skip'"
+        )
+        cls._add_column(
+            db, "batch_rules", "output_format TEXT NOT NULL DEFAULT 'auto'"
+        )
+        cls._add_column(
+            db, "batch_rules", "include_globs_json TEXT NOT NULL DEFAULT '[]'"
+        )
+        cls._add_column(
+            db, "batch_rules", "exclude_globs_json TEXT NOT NULL DEFAULT '[]'"
+        )
+
+    @classmethod
+    def _migrate_to_22(cls, db: sqlite3.Connection) -> None:
+        cls._add_column(db, "batch_rules", "variants_json TEXT NOT NULL DEFAULT '[]'")
+        rows = db.execute(
+            "SELECT id,model_id,model_sha256,index_sha256,preset_json,preset_name,"
+            "output_format,include_globs_json,exclude_globs_json FROM batch_rules"
+        ).fetchall()
+        for row in rows:
+            variants = [
+                {
+                    "name": "default",
+                    "model_id": row["model_id"],
+                    "model_sha256": row["model_sha256"],
+                    "index_sha256": row["index_sha256"],
+                    "preset": json.loads(row["preset_json"] or "{}"),
+                    "preset_name": row["preset_name"],
+                    "output_format": row["output_format"],
+                    "include_globs": json.loads(row["include_globs_json"] or "[]"),
+                    "exclude_globs": json.loads(row["exclude_globs_json"] or "[]"),
+                    "extensions": [],
+                }
+            ]
+            db.execute(
+                "UPDATE batch_rules SET variants_json=? WHERE id=?",
+                (json.dumps(variants, ensure_ascii=False), row["id"]),
+            )
+
+        if "variant_name" not in cls._columns(db, "batch_items"):
+            db.execute("ALTER TABLE batch_items RENAME TO batch_items_v21")
+            db.executescript(
+                """
+                CREATE TABLE batch_items (
+                    id TEXT PRIMARY KEY,
+                    batch_id TEXT NOT NULL REFERENCES batch_rules(id),
+                    source_path TEXT NOT NULL,
+                    source_size INTEGER NOT NULL,
+                    source_mtime_ns INTEGER NOT NULL,
+                    source_sha256 TEXT NOT NULL,
+                    variant_name TEXT NOT NULL,
+                    variant_json TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    task_id TEXT REFERENCES tasks(id),
+                    state TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(batch_id, source_path, source_sha256, variant_name)
+                );
+                INSERT INTO batch_items(
+                    id,batch_id,source_path,source_size,source_mtime_ns,source_sha256,
+                    variant_name,variant_json,output_path,task_id,state,error,created_at,updated_at
+                )
+                SELECT id,batch_id,source_path,source_size,source_mtime_ns,source_sha256,
+                    'default','{}',output_path,task_id,state,error,created_at,updated_at
+                FROM batch_items_v21;
+                DROP TABLE batch_items_v21;
+                CREATE INDEX IF NOT EXISTS batch_items_state_index
+                    ON batch_items(batch_id,state,updated_at);
+                CREATE INDEX IF NOT EXISTS batch_items_pending_index
+                    ON batch_items(state,task_id,id) WHERE task_id IS NOT NULL;
+                """
+            )
+
+        for definition in (
+            "cover_path TEXT",
+            "usage_count INTEGER NOT NULL DEFAULT 0",
+            "last_used_at TEXT",
+            "integrity_status TEXT NOT NULL DEFAULT 'unchecked'",
+            "integrity_checked_at TEXT",
+            "integrity_error TEXT",
+        ):
+            cls._add_column(db, "model_user_metadata", definition)
+
+        for definition in (
+            "parent_id TEXT REFERENCES result_versions(id)",
+            "root_id TEXT",
+            "generation INTEGER NOT NULL DEFAULT 1",
+            "rerun_arguments_json TEXT NOT NULL DEFAULT '{}'",
+            "differences_json TEXT NOT NULL DEFAULT '{}'",
+        ):
+            cls._add_column(db, "result_versions", definition)
+        db.execute("UPDATE result_versions SET root_id=id WHERE root_id IS NULL")
+        db.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS result_versions_lineage_index
+                ON result_versions(root_id,generation,id);
+            CREATE TABLE IF NOT EXISTS storage_migrations (
+                id TEXT PRIMARY KEY,
+                source_root TEXT NOT NULL,
+                target_root TEXT NOT NULL,
+                plan_digest TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL,
+                manifest_path TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+
+    @classmethod
     def _validate_schema(cls, db: sqlite3.Connection) -> None:
         required = {
             "models": {"id", "model_sha256", "status", "archived"},
@@ -727,8 +1043,21 @@ class Database:
                 "state",
                 "watch_enabled",
                 "revision",
+                "naming_template",
+                "preserve_structure",
+                "collision_policy",
+                "output_format",
+                "include_globs_json",
+                "exclude_globs_json",
+                "variants_json",
             },
-            "batch_items": {"id", "source_sha256", "task_id"},
+            "batch_items": {
+                "id",
+                "source_sha256",
+                "variant_name",
+                "variant_json",
+                "task_id",
+            },
             "batch_runs": {
                 "id",
                 "batch_id",
@@ -740,6 +1069,37 @@ class Database:
             "artifacts": {"id", "task_id", "path", "state"},
             "operation_receipts": {"request_id", "operation", "state"},
             "settings_events": {"revision", "settings_json"},
+            "projects": {
+                "id",
+                "input_path",
+                "document_json",
+                "state",
+                "revision",
+            },
+            "project_revisions": {"project_id", "revision", "snapshot_json"},
+            "model_user_metadata": {
+                "model_id",
+                "tags_json",
+                "favorite",
+                "cover_path",
+                "usage_count",
+                "integrity_status",
+                "revision",
+            },
+            "realtime_scenes": {"id", "name", "settings_json", "revision"},
+            "presets": {"id", "kind", "archived", "revision", "updated_at"},
+            "result_versions": {
+                "id",
+                "task_id",
+                "input_sha256",
+                "output_sha256",
+                "result_json",
+                "root_id",
+                "generation",
+                "rerun_arguments_json",
+                "differences_json",
+            },
+            "storage_migrations": {"id", "source_root", "target_root", "state"},
         }
         for table, columns in required.items():
             actual = cls._columns(db, table)

@@ -110,21 +110,21 @@ VoxWeave does not overwrite existing output by default. Each task freezes the in
 
 Conversion Studio accepts WAV, FLAC, MP3, MP4, and MKV. Speech modes can analyze speakers and convert selected speakers only. Singing mode can separate vocals and remix accompaniment when the user supplies the optional separation model. Up to four parameter sets can produce synchronized A/B previews.
 
-Long audio is split at low-energy boundaries while one RVC model remains loaded. Video output stream-copies the original video and audio and adds a named converted audio track. The final file is decoded, manifested, and hashed before publication.
+Long audio is split at low-energy boundaries while one RVC model remains loaded. The final processing chain includes dereverberation, noise reduction, EQ, dynamics, loudness, limiting, and silence trimming. The model library shows covers, usage, recently used models, duplicate weights, and integrity status; presets can be copied. Every published result retains lineage, differences, A/B playback data, and an exact rerun configuration tied to the original input and model revision.
 
 ### Live microphone
 
 Choose the Windows audio host, microphone, and playback device in Settings & Diagnostics, then select a model and parameters on Live Voice. Input and output must belong to the same host API. Headphones are recommended in continuous mode to prevent the playback signal from returning through the microphone.
 
-Live Voice offers 0.25, 0.5, and 1.0 second latency budgets. Silero VAD and the configured microphone activation level decide when inference runs. Test mode captures and converts a complete utterance, then plays it after the user pauses, which is useful before continuous monitoring.
+Live Voice offers 0.25, 0.5, and 1.0 second latency budgets. Calibration measures noise floor, SNR, pitch range, and device stability before recommending voice parameters. A route test opens the selected input and output for a real loop probe. Push-to-talk, recording, bypass, and mute remain available from a floating mini panel and the tray. Dry/wet recordings receive a hashed manifest and can be promoted directly into an offline project.
 
 Live and offline work share one GPU boundary. A live session cannot start while an offline task is running. Tasks submitted during a live session stay queued and resume after the session stops. Because model preparation pauses the offline queue, it never runs silently in the background: use Prepare Model explicitly, or start a live session and wait for the same preparation step.
 
 ### Batch and watched folders
 
-A batch rule persists its input directory, output directory, model, and watch state. New files are queued only after their writes become stable. The output directory is excluded from input discovery, content SHA-256 prevents duplicate work, and one failed file does not erase the rest of the batch result.
+A batch rule can persist several conditional model/preset variants. One source may produce several distinct outputs, with per-variant extension and glob filters. New files are queued only after writes become stable, content SHA-256 prevents duplicate work, and one failed item can be reconfigured and retried without rerunning the batch.
 
-Tasks can be cancelled, retried, and inspected in Task Center. VoxWeave never removes intermediate artifacts automatically. Use the confirmed archive action in Settings or submit the `storage.archive` long-running operation to release active storage.
+Tasks can be cancelled, retried, and inspected in Task Center. Archived artifacts can be restored, and a verified migration can move the complete data root while retaining the old root as a fallback. Updates install side by side; activation becomes permanent only after the new version reports healthy startup, otherwise the launcher returns to the previous version. VoxWeave never removes intermediate artifacts automatically.
 
 ## CLI and loopback API
 

@@ -20,6 +20,7 @@ Item {
     readonly property int activeBatchCount: root.batches.filter(function(rule) {
         return rule.state !== "archived"
     }).length
+    ListModel { id: batchVariantsModel }
 
     function modelIndex(modelId) {
         for (var index = 0; index < batchModel.count; ++index)
@@ -58,7 +59,57 @@ Item {
         batchRmsMix.value = 0.25
         batchProtect.value = 0.33
         watchCheck.checked = false
+        recursiveCheck.checked = true
+        preserveStructure.checked = true
+        namingTemplate.text = "{stem}_{source_ext}_{model}_{preset}_{variant}_{hash}"
+        collisionPolicy.currentIndex = 0
+        outputFormat.currentIndex = 0
+        includeGlobs.text = ""
+        excludeGlobs.text = ""
+        root.applyProcessingChain({})
         root.applyRecommendations()
+        batchVariantsModel.clear()
+        if (batchModel.currentIndex >= 0) batchVariantsModel.append({
+            "name": "variant-1",
+            "model_id": String(batchModel.currentValue),
+            "extensions": "",
+            "include_globs": "",
+            "exclude_globs": ""
+        })
+    }
+
+    function applyProcessingChain(chain) {
+        var values = chain || ({})
+        batchNoiseReduction.value = Number(values.noise_reduction_db || 0)
+        batchDereverb.value = Number(values.dereverb_strength || 0) * 100
+        batchHighpass.value = Number(values.highpass_hz || 0)
+        batchLowEq.value = Number(values.low_eq_db || 0)
+        batchPresenceEq.value = Number(values.presence_eq_db || 0)
+        batchCompressor.checked = Boolean(values.compressor)
+        batchDeesser.checked = Boolean(values.deesser)
+        batchTrimSilence.checked = Boolean(values.trim_silence)
+        batchTargetLoudness.checked = values.target_lufs !== null
+            && values.target_lufs !== undefined
+        batchTargetLufs.value = Number(values.target_lufs === null
+            || values.target_lufs === undefined ? -16 : values.target_lufs)
+        batchLimiter.value = Number(values.limiter_dbfs === null
+            || values.limiter_dbfs === undefined ? -1 : values.limiter_dbfs)
+    }
+
+    function processingChain() {
+        return {
+            "noise_reduction_db": Number(batchNoiseReduction.value),
+            "dereverb_strength": Number(batchDereverb.value) / 100.0,
+            "highpass_hz": Math.round(Number(batchHighpass.value)),
+            "low_eq_db": Number(batchLowEq.value),
+            "presence_eq_db": Number(batchPresenceEq.value),
+            "compressor": Boolean(batchCompressor.checked),
+            "deesser": Boolean(batchDeesser.checked),
+            "target_lufs": batchTargetLoudness.checked
+                ? Number(batchTargetLufs.value) : null,
+            "limiter_dbfs": Number(batchLimiter.value),
+            "trim_silence": Boolean(batchTrimSilence.checked)
+        }
     }
 
     function itemCountText(counts) {
@@ -85,7 +136,86 @@ Item {
         batchProtect.value = Number(values.protect === undefined ? 0.33 : values.protect)
         batchMode.currentIndex = ["clean", "mixed", "singing"].indexOf(values.content_mode || "clean")
         watchCheck.checked = Boolean(rule.watch_enabled)
+        recursiveCheck.checked = Boolean(rule.recursive)
+        preserveStructure.checked = Boolean(rule.preserve_structure)
+        namingTemplate.text = String(rule.naming_template
+            || "{stem}_{source_ext}_{model}_{preset}_{hash}")
+        collisionPolicy.currentIndex = ["skip", "version", "overwrite"].indexOf(
+            rule.collision_policy || "skip")
+        outputFormat.currentIndex = ["auto", "wav", "flac", "mp3"].indexOf(
+            rule.output_format || "auto")
+        includeGlobs.text = (rule.include_globs || []).join(", ")
+        excludeGlobs.text = (rule.exclude_globs || []).join(", ")
+        root.applyProcessingChain(values.processing_chain)
+        batchVariantsModel.clear()
+        var variants = rule.variants || []
+        for (var variantIndex = 0; variantIndex < variants.length; ++variantIndex) {
+            var variant = variants[variantIndex]
+            batchVariantsModel.append({
+                "name": String(variant.name || "variant-" + (variantIndex + 1)),
+                "model_id": String(variant.model_id || rule.model_id),
+                "extensions": (variant.extensions || []).join(", "),
+                "include_globs": (variant.include_globs || []).join(", "),
+                "exclude_globs": (variant.exclude_globs || []).join(", ")
+            })
+        }
+        if (batchVariantsModel.count === 0) batchVariantsModel.append({
+            "name": "variant-1", "model_id": String(rule.model_id),
+            "extensions": "", "include_globs": "", "exclude_globs": ""
+        })
         batchScroll.contentY = 0
+    }
+
+    function splitValues(value) {
+        return String(value || "").split(",").map(function(item) {
+            return item.trim()
+        }).filter(function(item) { return item.length > 0 })
+    }
+
+    function variantPreset() {
+        return {
+            "pitch": batchPitch.value,
+            "f0": ["rmvpe", "fcpe", "pm"][batchF0.currentIndex],
+            "index_rate": batchIndexRate.value,
+            "rms_mix_rate": batchRmsMix.value,
+            "protect": batchProtect.value,
+            "content_mode": ["clean", "mixed", "singing"][batchMode.currentIndex],
+            "processing_chain": root.processingChain()
+        }
+    }
+
+    function variantsPayload() {
+        var result = []
+        for (var index = 0; index < batchVariantsModel.count; ++index) {
+            var item = batchVariantsModel.get(index)
+            result.push({
+                "name": String(item.name),
+                "model": String(item.model_id),
+                "preset_name": batchPresetName.text.length > 0
+                    ? batchPresetName.text : "custom",
+                "preset": root.variantPreset(),
+                "output_format": ["auto", "wav", "flac", "mp3"][outputFormat.currentIndex],
+                "extensions": root.splitValues(item.extensions),
+                "include_globs": root.splitValues(item.include_globs),
+                "exclude_globs": root.splitValues(item.exclude_globs)
+            })
+        }
+        return result
+    }
+
+    function retryVariant(item, rule) {
+        if (root.editingBatchId === String(rule.id)) return root.variantsPayload()[0]
+        var stored = item.variant || (rule.variants || [])[0] || ({})
+        return {
+            "name": String(stored.name || item.variant_name || "retry"),
+            "model": String(stored.model_id || rule.model_id),
+            "preset_name": String(stored.preset_name || rule.preset_name || "custom"),
+            "preset": stored.preset || rule.preset || ({}),
+            "output_format": String(stored.output_format || rule.output_format || "auto"),
+            "extensions": stored.extensions || [],
+            "include_globs": stored.include_globs || [],
+            "exclude_globs": stored.exclude_globs || []
+        }
     }
 
     function saveRule() {
@@ -93,18 +223,21 @@ Item {
             "batch_id": root.editingBatchId,
             "input_root": batchInput.text,
             "output_root": batchOutput.text,
-            "model": batchModel.currentValue,
+            "variants": root.variantsPayload(),
             "preset_name": batchPresetName.text.length > 0 ? batchPresetName.text : "custom",
-            "recursive": true,
+            "recursive": recursiveCheck.checked,
             "watch": watchCheck.checked,
-            "preset": {
-                "pitch": batchPitch.value,
-                "f0": ["rmvpe", "fcpe", "pm"][batchF0.currentIndex],
-                "index_rate": batchIndexRate.value,
-                "rms_mix_rate": batchRmsMix.value,
-                "protect": batchProtect.value,
-                "content_mode": ["clean", "mixed", "singing"][batchMode.currentIndex]
-            }
+            "naming_template": namingTemplate.text,
+            "preserve_structure": preserveStructure.checked,
+            "collision_policy": ["skip", "version", "overwrite"][collisionPolicy.currentIndex],
+            "output_format": ["auto", "wav", "flac", "mp3"][outputFormat.currentIndex],
+            "include_globs": includeGlobs.text.split(",").map(function(value) {
+                return value.trim()
+            }).filter(function(value) { return value.length > 0 }),
+            "exclude_globs": excludeGlobs.text.split(",").map(function(value) {
+                return value.trim()
+            }).filter(function(value) { return value.length > 0 }),
+            "preset": root.variantPreset()
         })
     }
 
@@ -186,6 +319,71 @@ FolderDialog {
                         }
                     }
 
+                    SectionHeader {
+                        Layout.fillWidth: true
+                        title: root.bridge.text(root.bridge.language, "section.batch_output_rules")
+                    }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: width >= 680 ? 2 : 1
+                        columnSpacing: 10
+                        rowSpacing: 8
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.naming_template") }
+                            AppTextField {
+                                id: namingTemplate
+                                Layout.fillWidth: true
+                                text: "{stem}_{source_ext}_{model}_{preset}_{variant}_{hash}"
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.output_format") }
+                            AppComboBox {
+                                id: outputFormat
+                                Layout.fillWidth: true
+                                model: ["Auto", "WAV", "FLAC", "MP3"]
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.collision_policy") }
+                            AppComboBox {
+                                id: collisionPolicy
+                                Layout.fillWidth: true
+                                model: [
+                                    root.bridge.text(root.bridge.language, "batch.collision.skip"),
+                                    root.bridge.text(root.bridge.language, "batch.collision.version"),
+                                    root.bridge.text(root.bridge.language, "batch.collision.overwrite")
+                                ]
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.include_globs") }
+                            AppTextField { id: includeGlobs; Layout.fillWidth: true; placeholderText: "*.wav, podcast/**/*.mp3" }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.exclude_globs") }
+                            AppTextField { id: excludeGlobs; Layout.fillWidth: true; placeholderText: "draft/**, *_old.wav" }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            AppCheckBox {
+                                id: recursiveCheck
+                                text: root.bridge.text(root.bridge.language, "batch.recursive")
+                                checked: true
+                            }
+                            AppCheckBox {
+                                id: preserveStructure
+                                text: root.bridge.text(root.bridge.language, "batch.preserve_structure")
+                                checked: true
+                            }
+                        }
+                    }
+
                     FieldLabel { text: root.bridge.text(root.bridge.language, "field.model") }
                     AppComboBox {
                         id: batchModel
@@ -196,6 +394,77 @@ FolderDialog {
                         emptyText: root.bridge.text(root.bridge.language, "empty.models.short")
                         enabled: root.models.length > 0
                         onActivated: root.applyRecommendations()
+                    }
+                    AppButton {
+                        Layout.fillWidth: true
+                        text: "Add selected model as output variant"
+                        enabled: batchModel.currentIndex >= 0
+                        onClicked: batchVariantsModel.append({
+                            "name": "variant-" + (batchVariantsModel.count + 1),
+                            "model_id": String(batchModel.currentValue),
+                            "extensions": "",
+                            "include_globs": "",
+                            "exclude_globs": ""
+                        })
+                    }
+                    Repeater {
+                        model: batchVariantsModel
+                        delegate: AppPanel {
+                            id: variantRow
+                            required property int index
+                            required property string name
+                            required property string model_id
+                            required property string extensions
+                            required property string include_globs
+                            required property string exclude_globs
+                            Layout.fillWidth: true
+                            GridLayout {
+                                Layout.fillWidth: true
+                                columns: width >= 760 ? 3 : 1
+                                AppTextField {
+                                    Layout.fillWidth: true
+                                    text: variantRow.name
+                                    placeholderText: "Variant name"
+                                    onEditingFinished: batchVariantsModel.setProperty(
+                                        variantRow.index, "name", text.trim())
+                                }
+                                AppComboBox {
+                                    Layout.fillWidth: true
+                                    model: root.models
+                                    textRole: "localized_name"
+                                    valueRole: "id"
+                                    currentIndex: root.modelIndex(variantRow.model_id)
+                                    onActivated: batchVariantsModel.setProperty(
+                                        variantRow.index, "model_id", String(currentValue))
+                                }
+                                AppButton {
+                                    text: "Remove variant"
+                                    enabled: batchVariantsModel.count > 1
+                                    onClicked: batchVariantsModel.remove(variantRow.index)
+                                }
+                                AppTextField {
+                                    Layout.fillWidth: true
+                                    text: variantRow.extensions
+                                    placeholderText: "Extensions, e.g. .wav, .mp3"
+                                    onEditingFinished: batchVariantsModel.setProperty(
+                                        variantRow.index, "extensions", text)
+                                }
+                                AppTextField {
+                                    Layout.fillWidth: true
+                                    text: variantRow.include_globs
+                                    placeholderText: "Include globs for this model"
+                                    onEditingFinished: batchVariantsModel.setProperty(
+                                        variantRow.index, "include_globs", text)
+                                }
+                                AppTextField {
+                                    Layout.fillWidth: true
+                                    text: variantRow.exclude_globs
+                                    placeholderText: "Exclude globs for this model"
+                                    onEditingFinished: batchVariantsModel.setProperty(
+                                        variantRow.index, "exclude_globs", text)
+                                }
+                            }
+                        }
                     }
 
                     GridLayout {
@@ -241,6 +510,56 @@ FolderDialog {
                             Layout.fillWidth: true
                             FieldLabel { text: root.bridge.text(root.bridge.language, "field.protect") }
                             AppSlider { id: batchProtect; Layout.fillWidth: true; from: 0; to: 0.5; value: 0.33; stepSize: 0.01; decimals: 2; accessibleName: root.bridge.text(root.bridge.language, "field.protect") }
+                        }
+                    }
+
+                    SectionHeader {
+                        Layout.fillWidth: true
+                        title: root.bridge.text(root.bridge.language, "section.processing_chain")
+                    }
+                    GridLayout {
+                        objectName: "batchProcessingChain"
+                        Layout.fillWidth: true
+                        columns: width > 760 ? 4 : 2
+                        columnSpacing: 9
+                        rowSpacing: 7
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.noise_reduction") }
+                            AppSlider { id: batchNoiseReduction; Layout.fillWidth: true; from: 0; to: 30; value: 0; stepSize: 1; suffix: " dB" }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: "Dereverb" }
+                            AppSlider { id: batchDereverb; Layout.fillWidth: true; from: 0; to: 100; value: 0; stepSize: 5; suffix: "%" }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.highpass") }
+                            AppSlider { id: batchHighpass; Layout.fillWidth: true; from: 0; to: 400; value: 0; stepSize: 10; suffix: " Hz" }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.low_eq") }
+                            AppSlider { id: batchLowEq; Layout.fillWidth: true; from: -12; to: 12; value: 0; stepSize: 1; suffix: " dB"; showPositiveSign: true }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.presence_eq") }
+                            AppSlider { id: batchPresenceEq; Layout.fillWidth: true; from: -12; to: 12; value: 0; stepSize: 1; suffix: " dB"; showPositiveSign: true }
+                        }
+                        AppCheckBox { id: batchCompressor; text: root.bridge.text(root.bridge.language, "field.compressor") }
+                        AppCheckBox { id: batchDeesser; text: root.bridge.text(root.bridge.language, "field.deesser") }
+                        AppCheckBox { id: batchTrimSilence; text: root.bridge.text(root.bridge.language, "field.trim_silence") }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            FieldLabel { text: root.bridge.text(root.bridge.language, "field.limiter") }
+                            AppSlider { id: batchLimiter; Layout.fillWidth: true; from: -3; to: -0.1; value: -1; stepSize: 0.1; decimals: 1; suffix: " dBFS" }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            AppCheckBox { id: batchTargetLoudness; text: root.bridge.text(root.bridge.language, "field.target_loudness") }
+                            AppSlider { id: batchTargetLufs; Layout.fillWidth: true; from: -24; to: -9; value: -16; stepSize: 1; suffix: " LUFS"; enabled: batchTargetLoudness.checked }
                         }
                     }
 
@@ -314,8 +633,11 @@ FolderDialog {
                         delegate: Rectangle {
                             id: batchRule
                             required property var modelData
+                            property var failedItems: (modelData.items || []).filter(function(item) {
+                                return ["failed", "cancelled", "interrupted"].includes(item.state)
+                            })
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 146
+                            Layout.preferredHeight: 146 + batchRule.failedItems.length * 34
                             radius: root.theme.radiusSmall
                             color: root.theme.field
                             border.color: root.theme.border
@@ -349,6 +671,13 @@ FolderDialog {
                                         text: root.bridge.text(root.bridge.language, "action.run_batch")
                                         enabled: !root.bridge.activity.busyKeys.includes("batch-run:" + batchRule.modelData.id)
                                         onClicked: root.bridge.batchRules.run(batchRule.modelData.id)
+                                    }
+                                    AppButton {
+                                        compact: true
+                                        visible: batchRule.modelData.state !== "archived"
+                                        text: root.bridge.text(root.bridge.language, "action.plan_batch")
+                                        enabled: !root.bridge.activity.busyKeys.includes("batch-plan:" + batchRule.modelData.id)
+                                        onClicked: root.bridge.batchRules.plan(batchRule.modelData.id)
                                     }
                                     AppButton {
                                         compact: true
@@ -414,6 +743,29 @@ FolderDialog {
                                     font.family: root.theme.uiFont
                                     font.pixelSize: 10
                                     elide: Text.ElideRight
+                                }
+                                Repeater {
+                                    model: batchRule.failedItems
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: modelData.source_path + " · "
+                                                + (modelData.error || modelData.state)
+                                            color: root.theme.danger
+                                            font.pixelSize: 10
+                                            elide: Text.ElideMiddle
+                                        }
+                                        AppButton {
+                                            compact: true
+                                            text: root.editingBatchId === String(batchRule.modelData.id)
+                                                ? "Retry with edited settings" : "Retry item"
+                                            onClicked: root.bridge.batchRules.retryItem(
+                                                modelData.id,
+                                                root.retryVariant(modelData, batchRule.modelData))
+                                        }
+                                    }
                                 }
                             }
                         }

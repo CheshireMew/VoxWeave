@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import resample_poly
+from scipy.signal import istft, resample_poly, stft
 
 
 def _sha256_file(path: Path) -> str:
@@ -73,6 +73,63 @@ def align(converted_path: Path, original_path: Path, output_path: Path) -> dict[
         **_record(output_path),
         "sample_rate": original_rate,
         "samples": len(aligned),
+    }
+
+
+def dereverb(
+    input_path: Path,
+    output_path: Path,
+    strength: float,
+) -> dict[str, Any]:
+    """Suppress late spectral energy while preserving direct speech transients."""
+
+    if not 0 < strength <= 1:
+        raise ValueError("dereverb strength must be greater than 0 and at most 1")
+    audio, sample_rate = sf.read(input_path, dtype="float32", always_2d=True)
+    if not len(audio):
+        raise ValueError("dereverb input is empty")
+    processed = np.empty_like(audio)
+    for channel in range(audio.shape[1]):
+        frequencies, times, spectrum = stft(
+            audio[:, channel],
+            fs=sample_rate,
+            nperseg=1024,
+            noverlap=768,
+            boundary="zeros",
+        )
+        del frequencies, times
+        power = np.square(np.abs(spectrum), dtype=np.float64)
+        late = np.zeros_like(power)
+        delay = max(1, int(round(0.06 / (256 / sample_rate))))
+        for index in range(1, power.shape[1]):
+            source_index = max(0, index - delay)
+            late[:, index] = 0.94 * late[:, index - 1] + 0.06 * power[:, source_index]
+        residual = np.maximum(
+            power - (0.82 * strength) * late,
+            power * (0.08 + 0.22 * (1.0 - strength)),
+        )
+        gain = np.sqrt(residual / np.maximum(power, 1e-12))
+        _time, restored = istft(
+            spectrum * gain,
+            fs=sample_rate,
+            nperseg=1024,
+            noverlap=768,
+            boundary=True,
+        )
+        if len(restored) < len(audio):
+            restored = np.pad(restored, (0, len(audio) - len(restored)))
+        processed[:, channel] = restored[: len(audio)]
+    source_peak = float(np.max(np.abs(audio)))
+    output_peak = float(np.max(np.abs(processed)))
+    if source_peak > 1e-6 and output_peak > source_peak:
+        processed *= source_peak / output_peak
+    sf.write(output_path, processed, sample_rate, subtype="PCM_24")
+    return {
+        **_record(output_path),
+        "strength": strength,
+        "sample_rate": sample_rate,
+        "channels": int(audio.shape[1]),
+        "algorithm": "late-spectral-decay-suppression-v1",
     }
 
 
@@ -209,6 +266,7 @@ def prepare_selected(
     segments: list[dict[str, Any]],
     selected_speakers: set[str],
     overlap_policy: str,
+    selected_segment_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     info = sf.info(audio_path)
     sample_rate = info.samplerate
@@ -222,6 +280,7 @@ def prepare_selected(
         segment
         for segment in segments
         if segment["speaker"] in selected_speakers
+        and (selected_segment_ids is None or segment.get("id") in selected_segment_ids)
         and (
             overlap_policy == "convert"
             or segment.get("overlap") not in {True, "unknown", "unresolved"}

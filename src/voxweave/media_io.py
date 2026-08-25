@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -422,6 +423,85 @@ def match_loudness(
             if ledger is not None
             else sha256_file(output)
         ),
+    }
+
+
+def process_audio_chain(
+    settings: Settings,
+    source: Path,
+    output: Path,
+    chain: dict[str, Any],
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    ffmpeg_source = source
+    dereverb_metadata: dict[str, Any] | None = None
+    dereverb_strength = float(chain.get("dereverb_strength") or 0)
+    if dereverb_strength > 0:
+        from .media_processing import dereverb_audio_file  # noqa: PLC0415
+
+        dereverbed = output.with_name(f"{output.stem}-dereverbed.wav")
+        dereverb_metadata = dereverb_audio_file(
+            source,
+            dereverbed,
+            dereverb_strength,
+            settings,
+            cancelled,
+        )
+        ffmpeg_source = dereverbed
+    filters: list[str] = []
+    if chain.get("trim_silence"):
+        filters.append(
+            "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-50dB:"
+            "stop_periods=-1:stop_duration=0.3:stop_threshold=-50dB"
+        )
+    if int(chain.get("highpass_hz") or 0) > 0:
+        filters.append(f"highpass=f={int(chain['highpass_hz'])}")
+    if float(chain.get("noise_reduction_db") or 0) > 0:
+        filters.append(f"afftdn=nr={float(chain['noise_reduction_db']):g}:nf=-45")
+    if float(chain.get("low_eq_db") or 0):
+        filters.append(f"equalizer=f=140:t=q:w=0.8:g={float(chain['low_eq_db']):g}")
+    if float(chain.get("presence_eq_db") or 0):
+        filters.append(
+            f"equalizer=f=3200:t=q:w=1.1:g={float(chain['presence_eq_db']):g}"
+        )
+    if chain.get("deesser"):
+        filters.append("deesser=i=0.35:m=0.5:f=0.5:s=o")
+    if chain.get("compressor"):
+        filters.append(
+            "acompressor=threshold=-18dB:ratio=3:attack=20:release=200:makeup=2dB"
+        )
+    if chain.get("target_lufs") is not None:
+        filters.append(f"loudnorm=I={float(chain['target_lufs']):g}:TP=-1:LRA=11")
+    limiter_dbfs = float(chain.get("limiter_dbfs", -1))
+    filters.append(f"alimiter=limit={math.pow(10, limiter_dbfs / 20):.6f}")
+    filters.append("aresample=48000")
+    before = measure_audio_quality(settings, source, cancelled=cancelled)
+    _run(
+        [
+            _binary(settings, "ffmpeg"),
+            "-v",
+            "error",
+            "-n",
+            "-i",
+            str(ffmpeg_source),
+            "-af",
+            ",".join(filters),
+            "-c:a",
+            "pcm_s24le",
+            str(output),
+        ],
+        cancelled=cancelled,
+    )
+    after = measure_audio_quality(settings, output, cancelled=cancelled)
+    return {
+        "enabled": True,
+        "settings": chain,
+        "filters": filters,
+        "dereverb": dereverb_metadata,
+        "before": before,
+        "after": after,
+        "output_path": str(output),
+        "output_sha256": sha256_file(output),
     }
 
 

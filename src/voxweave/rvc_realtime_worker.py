@@ -187,6 +187,8 @@ class ResidentRealtimeWorker:
         self.processor: RealtimeAudioProcessor | None = None
         self.converter_key: str | None = None
         self.prepared_key: str | None = None
+        self.active_session_id: str | None = None
+        self.emit_session: Any = None
 
     def close(self) -> None:
         self.processor = None
@@ -320,8 +322,25 @@ class ResidentRealtimeWorker:
             _emit({**payload, "session_id": session_id, "model_id": model_id})
 
         try:
+            self.active_session_id = session_id
+            self.emit_session = emit_session
             arguments = SimpleNamespace(**command)
             spec, hostapi, cached = self._prepare_processor(command, emit_session)
+            if hasattr(self.processor, "configure_control"):
+                self.processor.configure_control(
+                    bypass=False,
+                    muted=False,
+                    push_to_talk_enabled=bool(
+                        getattr(arguments, "push_to_talk", False)
+                    ),
+                    push_to_talk_pressed=False,
+                )
+            if hasattr(self.processor, "configure_recording"):
+                self.processor.configure_recording(
+                    bool(getattr(arguments, "recording", False)),
+                    directory=getattr(arguments, "recording_directory", None),
+                    session_id=session_id,
+                )
             emit_session(
                 {
                     "ok": True,
@@ -346,7 +365,12 @@ class ResidentRealtimeWorker:
                     stop_event=stop_event,
                 )
                 self.processor.reset()
-            emit_session({"ok": True, "event": "stopped"})
+            recording = (
+                self.processor.close_recording()
+                if hasattr(self.processor, "close_recording")
+                else {}
+            )
+            emit_session({"ok": True, "event": "stopped", **recording})
         except RealtimeInferenceStopTimeout as error:
             self.prepared_key = None
             emit_session(
@@ -359,12 +383,51 @@ class ResidentRealtimeWorker:
             return False
         except Exception as error:  # noqa: BLE001 - resident worker command boundary
             emit_session(self._failure_payload(error))
+        finally:
+            if self.processor is not None and hasattr(self.processor, "close_recording"):
+                with contextlib.suppress(Exception):
+                    self.processor.close_recording()
+            self.active_session_id = None
+            self.emit_session = None
         return True
+
+    def control(self, payload: dict[str, Any]) -> None:
+        session_id = str(payload.get("session_id") or "")
+        if session_id != self.active_session_id or self.processor is None:
+            return
+        try:
+            self.processor.configure_control(
+                bypass=payload.get("bypass"),
+                muted=payload.get("muted"),
+                push_to_talk_enabled=payload.get("push_to_talk_enabled"),
+                push_to_talk_pressed=payload.get("push_to_talk_pressed"),
+            )
+            if payload.get("recording") is not None:
+                metrics = self.processor.configure_recording(
+                    bool(payload["recording"]),
+                    directory=payload.get("recording_directory"),
+                    session_id=session_id,
+                )
+            else:
+                metrics = self.processor.metrics_snapshot()
+            if self.emit_session:
+                self.emit_session({"ok": True, "event": "control", **metrics})
+        except Exception as error:  # noqa: BLE001 - control command boundary
+            if self.emit_session:
+                self.emit_session(
+                    {
+                        "ok": False,
+                        "event": "control_failed",
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                )
 
 
 class WorkerControl:
-    def __init__(self, source: Any) -> None:
+    def __init__(self, source: Any, control_handler: Any = None) -> None:
         self.source = source
+        self.control_handler = control_handler
         self.commands: queue.Queue[dict[str, Any]] = queue.Queue()
         self.lock = threading.Lock()
         self.pending_stops: set[str] = set()
@@ -436,6 +499,8 @@ class WorkerControl:
             self.commands.put(payload)
         elif command == "stop":
             self.request_stop(str(payload.get("session_id") or ""))
+        elif command == "control" and self.control_handler:
+            self.control_handler(payload)
         elif command == "shutdown":
             self.request_shutdown()
             return False
@@ -491,7 +556,7 @@ def run_resident_worker() -> int:
         functional=functional,
         transforms=transforms,
     )
-    control = WorkerControl(sys.stdin)
+    control = WorkerControl(sys.stdin, worker.control)
     control.start()
     original_argv = sys.argv[:]
     sys.argv = [original_argv[0], "--pycmd", sys.executable, "--noautoopen"]

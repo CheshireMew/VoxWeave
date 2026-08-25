@@ -71,7 +71,6 @@ class RealtimeSessionManager:
                     return self.status()
                 self._pause_offline_dispatch()
                 try:
-                    self.worker.cancel_idle_release()
                     self.release_offline_resources()
                     self.worker.prepare(
                         worker_command,
@@ -86,6 +85,11 @@ class RealtimeSessionManager:
 
     def start(self, arguments: dict[str, Any]) -> dict[str, Any]:
         with self._control_lock:
+            arguments = dict(arguments)
+            if arguments.get("recording") and not arguments.get("recording_directory"):
+                directory = self.requests.engine.settings.artifacts_dir / "realtime"
+                directory.mkdir(parents=True, exist_ok=True)
+                arguments["recording_directory"] = str(directory.resolve())
             model, normalized, worker_command = self.requests.worker_command(arguments)
             session_id = str(uuid.uuid4())
             try:
@@ -94,10 +98,7 @@ class RealtimeSessionManager:
                         raise RuntimeError("realtime manager is shutting down")
                     if self.sessions.active():
                         active = self.sessions.active()
-                        raise RuntimeError(
-                            f"realtime session is already active: {active['id']}"
-                        )
-                    self.worker.cancel_idle_release()
+                        raise RuntimeError(f"realtime session is already active: {active['id']}")
                     self._pause_offline_dispatch()
                     self.release_offline_resources()
                     self.sessions.begin(session_id, model, normalized)
@@ -127,9 +128,7 @@ class RealtimeSessionManager:
         release_dispatch = False
         with self._lock:
             if payload.get("prepare_id"):
-                release_dispatch = (
-                    not payload.get("ok") and not self.worker.status()["model_ready"]
-                )
+                release_dispatch = not payload.get("ok") and not self.worker.status()["model_ready"]
             else:
                 result = self.sessions.handle_worker_event(payload)
                 release_dispatch = (

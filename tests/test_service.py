@@ -108,6 +108,7 @@ def test_service_owned_settings_update_preserves_runtime_fields(tmp_path) -> Non
             "input_gate_db": -40.0,
             "block_seconds": 0.5,
             "test_mode": True,
+            "push_to_talk": False,
         }
         response = client.post(
             "/v1/execute",

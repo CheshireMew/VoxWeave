@@ -73,10 +73,6 @@ class RealtimeWorkerController:
         with self._lock:
             return bool(self._prepare_id and self._preparing_key == cache_key)
 
-    def cancel_idle_release(self) -> None:
-        with self._lock:
-            self._cancel_timer_locked("_idle_release_timer")
-
     def prepare(
         self,
         command: dict[str, Any],
@@ -164,6 +160,19 @@ class RealtimeWorkerController:
                 daemon=True,
             )
             self._stop_watchdog.start()
+
+    def control(self, session_id: str, changes: dict[str, Any]) -> None:
+        with self._lock:
+            generation = self._generation
+            if (
+                generation is None
+                or not self._transport.is_active(generation)
+                or self._active_session_id != session_id
+            ):
+                raise RuntimeError("active realtime worker is unavailable")
+            self._transport.send(
+                {"command": "control", "session_id": session_id, **changes}
+            )
 
     def release(self) -> None:
         with self._lock:

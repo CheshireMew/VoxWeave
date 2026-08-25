@@ -222,13 +222,15 @@ def test_batch_manager_is_only_a_small_composition_boundary() -> None:
     lines, methods, attributes = _class_shape("batch.py", "BatchManager")
     assert lines <= 90
     assert methods <= 13
-    assert attributes <= 4
+    assert attributes <= 5
     limits = {
         ("batch_rules.py", "BatchRuleService"): (120, 8, 2),
         ("batch_submission.py", "BatchSubmissionService"): (210, 5, 4),
         ("batch_run.py", "BatchRunCoordinator"): (165, 8, 4),
         ("batch_watch.py", "BatchWatchSupervisor"): (225, 11, 9),
         ("batch_directory_watcher.py", "WindowsDirectoryWatcher"): (165, 7, 7),
+        ("batch_variants.py", "BatchVariantService"): (90, 3, 1),
+        ("batch_item_retry.py", "BatchItemRetryService"): (125, 2, 4),
     }
     for (module, class_name), maximums in limits.items():
         shape = _class_shape(module, class_name)
@@ -305,7 +307,7 @@ def test_realtime_parameter_contract_is_the_only_definition_of_ui_constraints() 
         for path in SOURCE.glob("*.py")
     }
     assert {name: count for name, count in definitions.items() if count} == {
-        "parameter_contracts.py": 9
+        "parameter_contracts.py": 10
     }
     engine = (SOURCE / "rvc_engine.py").read_text(encoding="utf-8")
     page = (SOURCE / "qml" / "RealtimePage.qml").read_text(encoding="utf-8")

@@ -18,6 +18,7 @@ from pydantic import (
 from . import __version__
 from .capabilities import CONTROL_PROTOCOL, CONTROL_PROTOCOL_VERSION
 from .config import SettingsConflictError
+from .hotkeys import parse_windows_hotkey
 from .parameter_contracts import (
     BLOCK_SECONDS_SPEC,
     F0_SPEC,
@@ -117,6 +118,7 @@ class RealtimeSettings(Command):
     )
     block_seconds: BlockSeconds
     test_mode: bool
+    push_to_talk: bool
 
 
 class RealtimeSettingsPatch(Command):
@@ -140,6 +142,7 @@ class RealtimeSettingsPatch(Command):
     )
     block_seconds: BlockSeconds | None = None
     test_mode: bool | None = None
+    push_to_talk: bool | None = None
 
     @model_validator(mode="after")
     def reject_explicit_nulls(self) -> RealtimeSettingsPatch:
@@ -188,6 +191,42 @@ class ModelResolveCommand(Command):
 class ModelArchiveCommand(Command):
     model_id: NonEmpty
     archived: bool = True
+
+
+class ModelVerifyCommand(Command):
+    model_id: NonEmpty
+
+
+class ModelMetadataUpdateCommand(Command):
+    model_id: NonEmpty
+    expected_revision: int = Field(default=0, ge=0)
+    custom_name: str | None = Field(default=None, max_length=256)
+    tags: list[str] | None = Field(default=None, max_length=100)
+    favorite: bool | None = None
+    notes: str | None = Field(default=None, max_length=5000)
+    sample_path: AbsolutePath | None = None
+    cover_path: AbsolutePath | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> ModelMetadataUpdateCommand:
+        if all(
+            value is None
+            for value in (
+                self.custom_name,
+                self.tags,
+                self.favorite,
+                self.notes,
+                self.sample_path,
+                self.cover_path,
+            )
+        ):
+            raise ValueError("model metadata update requires at least one changed field")
+        if self.tags is not None:
+            normalized = [tag.strip() for tag in self.tags if tag.strip()]
+            if len(set(tag.casefold() for tag in normalized)) != len(normalized):
+                raise ValueError("model metadata tags must be unique")
+            self.tags = normalized
+        return self
 
 
 class ModelRecommendedParameters(Command):
@@ -247,6 +286,21 @@ class ModelCatalogInstallCommand(Command):
 
 class PresetListCommand(Command):
     model: NonEmpty | None = None
+    kind: Literal["conversion", "realtime"] | None = None
+    include_archived: bool = False
+
+
+class AudioProcessingChain(Command):
+    noise_reduction_db: float = Field(default=0, ge=0, le=30)
+    dereverb_strength: float = Field(default=0, ge=0, le=1)
+    highpass_hz: int = Field(default=0, ge=0, le=400)
+    low_eq_db: float = Field(default=0, ge=-12, le=12)
+    presence_eq_db: float = Field(default=0, ge=-12, le=12)
+    compressor: bool = False
+    deesser: bool = False
+    target_lufs: float | None = Field(default=None, ge=-24, le=-9)
+    limiter_dbfs: float = Field(default=-1, ge=-3, le=-0.1)
+    trim_silence: bool = False
 
 
 class ConversionParameters(Command):
@@ -262,12 +316,82 @@ class ConversionParameters(Command):
         default=None, ge=PROTECT_SPEC.minimum, le=PROTECT_SPEC.maximum
     )
     content_mode: Literal["clean", "mixed", "singing"] | None = None
+    processing_chain: AudioProcessingChain = Field(default_factory=AudioProcessingChain)
+
+
+class RealtimeVoiceParameters(Command):
+    pitch: int | None = Field(default=None, ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum)
+    f0: F0Method | None = None
+    index_rate: float | None = Field(
+        default=None, ge=INDEX_RATE_SPEC.minimum, le=INDEX_RATE_SPEC.maximum
+    )
+    rms_mix_rate: float | None = Field(
+        default=None, ge=RMS_MIX_RATE_SPEC.minimum, le=RMS_MIX_RATE_SPEC.maximum
+    )
+    vad_threshold: float | None = Field(
+        default=None, ge=VAD_THRESHOLD_SPEC.minimum, le=VAD_THRESHOLD_SPEC.maximum
+    )
+    input_gate_db: float | None = Field(
+        default=None, ge=INPUT_GATE_DB_SPEC.minimum, le=INPUT_GATE_DB_SPEC.maximum
+    )
+    block_seconds: BlockSeconds | None = None
+    test_mode: bool | None = None
 
 
 class PresetSaveCommand(Command):
     model: NonEmpty
     name: NonEmpty
-    parameters: ConversionParameters
+    kind: Literal["conversion", "realtime"] = "conversion"
+    parameters: ConversionParameters | RealtimeVoiceParameters
+
+    @model_validator(mode="after")
+    def validate_parameter_kind(self) -> PresetSaveCommand:
+        realtime = isinstance(self.parameters, RealtimeVoiceParameters)
+        if realtime != (self.kind == "realtime"):
+            raise ValueError("preset parameters must match preset kind")
+        return self
+
+
+class PresetUpdateCommand(Command):
+    preset_id: NonEmpty
+    expected_revision: int = Field(ge=1)
+    name: NonEmpty | None = None
+    parameters: ConversionParameters | RealtimeVoiceParameters | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> PresetUpdateCommand:
+        if self.name is None and self.parameters is None:
+            raise ValueError("preset update requires name or parameters")
+        return self
+
+
+class PresetArchiveCommand(Command):
+    preset_id: NonEmpty
+    expected_revision: int = Field(ge=1)
+    archived: bool = True
+
+
+class PresetCopyCommand(Command):
+    preset_id: NonEmpty
+    name: NonEmpty
+
+
+class PresetExportCommand(Command):
+    preset_ids: list[NonEmpty] = Field(min_length=1, max_length=1000)
+
+
+class PresetBundleItem(Command):
+    model_id: NonEmpty
+    model_sha256: Sha256
+    name: NonEmpty
+    kind: Literal["conversion", "realtime"]
+    parameters: dict[str, Any]
+
+
+class PresetImportCommand(Command):
+    protocol: Literal["voxweave-preset-bundle"]
+    version: Literal[1]
+    presets: list[PresetBundleItem] = Field(min_length=1, max_length=1000)
 
 
 class MediaInspectCommand(Command):
@@ -310,12 +434,146 @@ class RealtimeStartCommand(Command):
     )
     block_seconds: BlockSeconds = BLOCK_SECONDS_SPEC.default
     test_mode: bool = TEST_MODE_SPEC.default
+    push_to_talk: bool = False
+    recording: bool = False
+    recording_directory: AbsolutePath | None = None
+
+
+class RealtimeControlCommand(Command):
+    bypass: bool | None = None
+    muted: bool | None = None
+    recording: bool | None = None
+    push_to_talk_enabled: bool | None = None
+    push_to_talk_pressed: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> RealtimeControlCommand:
+        if all(
+            value is None
+            for value in (
+                self.bypass,
+                self.muted,
+                self.recording,
+                self.push_to_talk_enabled,
+                self.push_to_talk_pressed,
+            )
+        ):
+            raise ValueError("realtime control requires at least one changed field")
+        return self
+
+
+class RealtimeSceneSettings(Command):
+    model: NonEmpty
+    hostapi: str = Field(default="", max_length=256)
+    input_device: NonEmpty
+    output_device: NonEmpty
+    pitch: int = Field(
+        default=PITCH_SPEC.default, ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum
+    )
+    f0: F0Method = F0_SPEC.default
+    index_rate: float = Field(
+        default=INDEX_RATE_SPEC.default,
+        ge=INDEX_RATE_SPEC.minimum,
+        le=INDEX_RATE_SPEC.maximum,
+    )
+    rms_mix_rate: float = Field(
+        default=RMS_MIX_RATE_SPEC.default,
+        ge=RMS_MIX_RATE_SPEC.minimum,
+        le=RMS_MIX_RATE_SPEC.maximum,
+    )
+    vad_threshold: float = Field(
+        default=VAD_THRESHOLD_SPEC.default,
+        ge=VAD_THRESHOLD_SPEC.minimum,
+        le=VAD_THRESHOLD_SPEC.maximum,
+    )
+    input_gate_db: float = Field(
+        default=INPUT_GATE_DB_SPEC.default,
+        ge=INPUT_GATE_DB_SPEC.minimum,
+        le=INPUT_GATE_DB_SPEC.maximum,
+    )
+    block_seconds: BlockSeconds = BLOCK_SECONDS_SPEC.default
+    test_mode: bool = TEST_MODE_SPEC.default
+    push_to_talk: bool = False
+    recording: bool = False
+
+
+class RealtimeSceneHotkeys(Command):
+    start_stop: str = Field(default="Ctrl+Alt+F9", max_length=64)
+    bypass: str = Field(default="Ctrl+Alt+F10", max_length=64)
+    mute: str = Field(default="Ctrl+Alt+F11", max_length=64)
+    push_to_talk: str = Field(default="Ctrl+Alt+F12", max_length=64)
+
+    @model_validator(mode="after")
+    def validate_hotkeys(self) -> RealtimeSceneHotkeys:
+        values = [self.start_stop, self.bypass, self.mute, self.push_to_talk]
+        for value in values:
+            parse_windows_hotkey(value)
+        if len({value.casefold() for value in values}) != len(values):
+            raise ValueError("realtime scene hotkeys must be unique")
+        return self
+
+
+class RealtimeSceneCreateCommand(Command):
+    name: NonEmpty
+    settings: RealtimeSceneSettings
+    hotkeys: RealtimeSceneHotkeys = Field(default_factory=RealtimeSceneHotkeys)
+
+
+class RealtimeSceneUpdateCommand(Command):
+    scene_id: NonEmpty
+    expected_revision: int = Field(ge=1)
+    name: NonEmpty | None = None
+    settings: RealtimeSceneSettings | None = None
+    hotkeys: RealtimeSceneHotkeys | None = None
+
+    @model_validator(mode="after")
+    def require_scene_change(self) -> RealtimeSceneUpdateCommand:
+        if self.name is None and self.settings is None and self.hotkeys is None:
+            raise ValueError("scene update requires a change")
+        return self
+
+
+class RealtimeSceneIdCommand(Command):
+    scene_id: NonEmpty
+
+
+class RealtimeSceneArchiveCommand(RealtimeSceneIdCommand):
+    expected_revision: int = Field(ge=1)
+    archived: bool = True
+
+
+class RealtimeSceneListCommand(Command):
+    include_archived: bool = False
+
+
+class RealtimeSceneApplyCommand(RealtimeSceneIdCommand):
+    start: bool = True
+    recording: bool | None = None
 
 
 class RealtimeAudioTestCommand(Command):
     mode: Literal["input", "output"]
     device: int = Field(ge=0)
     duration_seconds: float = Field(default=2.0, ge=0.5, le=5.0)
+
+
+class RealtimeCalibrationCommand(Command):
+    input_device: int = Field(ge=0)
+    output_device: int = Field(ge=0)
+    duration_seconds: float = Field(default=3.0, ge=1.0, le=10.0)
+    model: NonEmpty | None = None
+
+
+class RealtimeRoutingTestCommand(Command):
+    input_device: int = Field(ge=0)
+    output_device: int = Field(ge=0)
+    duration_seconds: float = Field(default=1.5, ge=1.0, le=5.0)
+
+
+class RealtimeRecordingPromoteCommand(Command):
+    session_id: NonEmpty
+    project_name: NonEmpty
+    output: AbsolutePath | None = None
 
 
 class ConversionPreviewCommand(Command):
@@ -335,11 +593,40 @@ class ConversionPreviewCommand(Command):
         return self
 
 
+class ModelCompareCommand(Command):
+    input: AbsolutePath
+    input_sha256: Sha256 | None = None
+    models: list[NonEmpty] = Field(min_length=2, max_length=8)
+    parameters: ConversionParameters = Field(default_factory=ConversionParameters)
+    start_seconds: float = Field(default=0, ge=0)
+    duration_seconds: float = Field(default=15, ge=10, le=20)
+    output_directory: AbsolutePath | None = None
+    content_mode: Literal["clean", "mixed", "singing"] = "clean"
+
+    @model_validator(mode="after")
+    def validate_models(self) -> ModelCompareCommand:
+        if len(set(model.casefold() for model in self.models)) != len(self.models):
+            raise ValueError("model comparison requires unique models")
+        return self
+
+
+class VoiceAssignment(Command):
+    segment_ids: list[NonEmpty] = Field(min_length=1, max_length=10000)
+    model: NonEmpty
+    parameters: ConversionParameters = Field(default_factory=ConversionParameters)
+
+    @model_validator(mode="after")
+    def validate_segments(self) -> VoiceAssignment:
+        if len(set(self.segment_ids)) != len(self.segment_ids):
+            raise ValueError("voice assignment segment_ids must be unique")
+        return self
+
+
 class ConversionRunCommand(Command):
     input: AbsolutePath
     input_sha256: Sha256 | None = None
     output: AbsolutePath
-    model: NonEmpty
+    model: NonEmpty | None = None
     pitch: int | None = Field(default=None, ge=PITCH_SPEC.minimum, le=PITCH_SPEC.maximum)
     f0: F0Method | None = None
     index_rate: float | None = Field(
@@ -353,9 +640,133 @@ class ConversionRunCommand(Command):
     )
     content_mode: Literal["clean", "mixed", "singing"] = "clean"
     selected_speakers: list[NonEmpty] = Field(default_factory=list)
+    assignments: list[VoiceAssignment] = Field(default_factory=list, max_length=10000)
     analysis_manifest: AbsolutePath | None = None
     overlap_policy: Literal["skip", "convert"] = "convert"
     overwrite: bool = False
+    processing_chain: AudioProcessingChain = Field(default_factory=AudioProcessingChain)
+
+    @model_validator(mode="after")
+    def validate_voice_selection(self) -> ConversionRunCommand:
+        if not self.model and not self.assignments:
+            raise ValueError("conversion requires model or voice assignments")
+        if self.assignments and self.selected_speakers:
+            raise ValueError("assignments and selected_speakers cannot be combined")
+        if self.assignments and not self.analysis_manifest:
+            raise ValueError("voice assignments require analysis_manifest")
+        assigned: set[str] = set()
+        for assignment in self.assignments:
+            overlap = assigned.intersection(assignment.segment_ids)
+            if overlap:
+                raise ValueError(
+                    f"segments cannot be assigned more than once: {sorted(overlap)}"
+                )
+            assigned.update(assignment.segment_ids)
+        return self
+
+
+class ProjectSegment(Command):
+    id: NonEmpty
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    speaker: NonEmpty
+    speaker_similarity: float | None = None
+    overlap: bool | Literal["unknown", "unresolved"] = False
+    enabled: bool = True
+    model: NonEmpty | None = None
+    parameters: ConversionParameters = Field(default_factory=ConversionParameters)
+    label: str = Field(default="", max_length=256)
+    notes: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> ProjectSegment:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("project segment end_seconds must be after start_seconds")
+        return self
+
+
+class ProjectDocument(Command):
+    version: Literal[1] = 1
+    default_model: NonEmpty | None = None
+    default_parameters: ConversionParameters = Field(default_factory=ConversionParameters)
+    overlap_policy: Literal["skip", "convert"] = "convert"
+    duration_seconds: float = Field(default=0, ge=0)
+    waveform_peaks: list[float] = Field(default_factory=list, max_length=2048)
+    segments: list[ProjectSegment] = Field(default_factory=list, max_length=10000)
+
+    @model_validator(mode="after")
+    def validate_segment_ids(self) -> ProjectDocument:
+        identifiers = [segment.id for segment in self.segments]
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError("project segment ids must be unique")
+        return self
+
+
+class ProjectCreateCommand(Command):
+    name: NonEmpty
+    input: AbsolutePath
+    output: AbsolutePath | None = None
+    content_mode: Literal["clean", "mixed", "singing"] = "clean"
+    document: ProjectDocument = Field(default_factory=ProjectDocument)
+
+
+class ProjectUpdateCommand(Command):
+    project_id: NonEmpty
+    expected_revision: int = Field(ge=1)
+    name: NonEmpty | None = None
+    input: AbsolutePath | None = None
+    output: AbsolutePath | None = None
+    content_mode: Literal["clean", "mixed", "singing"] | None = None
+    document: ProjectDocument | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> ProjectUpdateCommand:
+        if all(
+            value is None
+            for value in (
+                self.name,
+                self.input,
+                self.output,
+                self.content_mode,
+                self.document,
+            )
+        ):
+            raise ValueError("project update requires at least one changed field")
+        return self
+
+
+class ProjectIdCommand(Command):
+    project_id: NonEmpty
+
+
+class ProjectListCommand(Command):
+    limit: int = Field(default=100, ge=1, le=500)
+    cursor: str | None = None
+    include_archived: bool = False
+
+
+class ProjectArchiveCommand(ProjectIdCommand):
+    expected_revision: int = Field(ge=1)
+    archived: bool = True
+
+
+class ProjectRestoreCommand(ProjectIdCommand):
+    expected_revision: int = Field(ge=1)
+    revision: int = Field(ge=1)
+
+
+class ProjectAnalyzeCommand(ProjectIdCommand):
+    expected_revision: int = Field(ge=1)
+
+
+class ProjectRunCommand(ProjectIdCommand):
+    expected_revision: int = Field(ge=1)
+    overwrite: bool = False
+
+
+class ProjectPreviewCommand(ProjectIdCommand):
+    expected_revision: int = Field(ge=1)
+    segment_id: NonEmpty
 
 
 def _normalize_extension(value: str) -> str:
@@ -368,15 +779,72 @@ def _normalize_extension(value: str) -> str:
 Extension = Annotated[str, AfterValidator(_normalize_extension)]
 
 
+class BatchVariant(Command):
+    name: NonEmpty
+    model: NonEmpty
+    preset: ConversionParameters = Field(default_factory=ConversionParameters)
+    preset_name: NonEmpty = "default"
+    output_format: Literal["auto", "wav", "flac", "mp3"] = "auto"
+    extensions: list[Extension] = Field(default_factory=list)
+    include_globs: list[str] = Field(default_factory=list, max_length=50)
+    exclude_globs: list[str] = Field(default_factory=list, max_length=50)
+
+
 class BatchCreateCommand(Command):
     input_root: AbsolutePath
     output_root: AbsolutePath
-    model: NonEmpty
+    variants: list[BatchVariant] = Field(default_factory=list, max_length=32)
+    model: NonEmpty | None = None
     preset: ConversionParameters = Field(default_factory=ConversionParameters)
     preset_name: NonEmpty = "default"
     recursive: bool = True
     watch: bool = False
     extensions: list[Extension] = Field(default_factory=list)
+    naming_template: str = Field(
+        default="{stem}_{source_ext}_{model}_{preset}_{hash}", min_length=1, max_length=256
+    )
+    preserve_structure: bool = True
+    collision_policy: Literal["skip", "version", "overwrite"] = "skip"
+    output_format: Literal["auto", "wav", "flac", "mp3"] = "auto"
+    include_globs: list[str] = Field(default_factory=list, max_length=50)
+    exclude_globs: list[str] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_single_model(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("variants"):
+            return value
+        model = value.get("model")
+        if model:
+            migrated = dict(value)
+            migrated["variants"] = [
+                {
+                    "name": "default",
+                    "model": model,
+                    "preset": value.get("preset") or {},
+                    "preset_name": value.get("preset_name") or "default",
+                    "output_format": value.get("output_format") or "auto",
+                }
+            ]
+            return migrated
+        return value
+
+    @model_validator(mode="after")
+    def validate_naming_template(self) -> BatchCreateCommand:
+        if not self.variants:
+            raise ValueError("batch requires at least one output variant")
+        names = [variant.name.casefold() for variant in self.variants]
+        if len(set(names)) != len(names):
+            raise ValueError("batch variant names must be unique")
+        allowed = {"stem", "source_ext", "model", "preset", "variant", "hash"}
+        fields = set(re.findall(r"\{([A-Za-z0-9_]+)\}", self.naming_template))
+        unknown = fields - allowed
+        if unknown:
+            raise ValueError(f"unsupported naming template fields: {sorted(unknown)}")
+        remainder = re.sub(r"\{[A-Za-z0-9_]+\}", "", self.naming_template)
+        if "{" in remainder or "}" in remainder:
+            raise ValueError("invalid naming template")
+        return self
 
 
 class BatchUpdateCommand(BatchCreateCommand):
@@ -392,6 +860,12 @@ class BatchIdCommand(Command):
     batch_id: NonEmpty
 
 
+class BatchItemRetryCommand(Command):
+    item_id: NonEmpty
+    variant: BatchVariant
+    output: AbsolutePath | None = None
+
+
 class BatchWatchCommand(BatchIdCommand):
     enabled: bool
 
@@ -405,6 +879,9 @@ class StorageArchiveCommand(Command):
     destination_root: AbsolutePath
     older_than_days: int = Field(default=30, ge=1)
     task_ids: list[NonEmpty] | None = None
+    states: list[Literal["completed", "failed", "cancelled", "interrupted"]] = Field(
+        default_factory=lambda: ["completed", "failed", "cancelled", "interrupted"]
+    )
     confirm_source_removal: Literal[True]
 
     @model_validator(mode="after")
@@ -412,6 +889,42 @@ class StorageArchiveCommand(Command):
         if self.task_ids is not None and not self.task_ids:
             raise ValueError("task_ids must be a non-empty array when provided")
         return self
+
+
+class StorageInspectCommand(Command):
+    older_than_days: int = Field(default=30, ge=1, le=3650)
+
+
+class StorageRestoreCommand(Command):
+    task_ids: list[NonEmpty] = Field(min_length=1, max_length=1000)
+
+
+class StorageMigrationPlanCommand(Command):
+    target_root: AbsolutePath
+
+
+class StorageMigrationPrepareCommand(StorageMigrationPlanCommand):
+    plan_digest: Sha256
+
+
+class UpdateCheckCommand(Command):
+    include_prerelease: bool = False
+
+
+class UpdateDownloadCommand(Command):
+    version: NonEmpty
+
+
+class UpdateInstallCommand(Command):
+    version: NonEmpty
+
+
+class UpdateActivateCommand(Command):
+    version: NonEmpty
+
+
+class UpdateRollbackCommand(Command):
+    version: NonEmpty | None = None
 
 
 class TaskIdCommand(Command):
@@ -426,6 +939,34 @@ class TaskListCommand(Command):
 class TaskEventsCommand(Command):
     after_id: int = Field(default=0, ge=0)
     limit: int = Field(default=500, ge=1, le=2000)
+
+
+class ResultVersionIdCommand(Command):
+    version_id: NonEmpty
+
+
+class ResultVersionListCommand(Command):
+    input_sha256: Sha256 | None = None
+    project_id: NonEmpty | None = None
+    favorites_only: bool = False
+    limit: int = Field(default=100, ge=1, le=500)
+    cursor: str | None = None
+
+
+class ResultVersionUpdateCommand(ResultVersionIdCommand):
+    label: str | None = Field(default=None, max_length=256)
+    favorite: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> ResultVersionUpdateCommand:
+        if self.label is None and self.favorite is None:
+            raise ValueError("result version update requires label or favorite")
+        return self
+
+
+class ResultVersionRerunCommand(ResultVersionIdCommand):
+    output: AbsolutePath | None = None
+    overwrite: bool = False
 
 
 class ResultModel(BaseModel):
@@ -583,6 +1124,21 @@ class ModelRecord(ResultModel):
     status: str
     archived: bool
     imported_at: str
+    custom_name: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    favorite: bool = False
+    notes: str = ""
+    sample_path: str | None = None
+    cover_path: str | None = None
+    usage_count: int = 0
+    last_used_at: str | None = None
+    duplicate_model_ids: list[str] = Field(default_factory=list)
+    integrity_status: Literal["unchecked", "verified", "missing", "changed", "error"] = (
+        "unchecked"
+    )
+    integrity_checked_at: str | None = None
+    integrity_error: str | None = None
+    metadata_revision: int = 0
     protocol: Literal["voxweave-rvc-model"]
     version: Literal[1]
 
@@ -623,9 +1179,13 @@ class PresetRecord(ResultModel):
     id: str
     model_id: str
     name: str
+    kind: Literal["conversion", "realtime"]
     model_sha256: str
-    parameters: ConversionParameters
+    parameters: dict[str, Any]
+    archived: bool
+    revision: int
     created_at: str
+    updated_at: str
 
 
 class PresetListRecord(PresetRecord):
@@ -633,6 +1193,58 @@ class PresetListRecord(PresetRecord):
 
 
 class PresetList(RootModel[list[PresetListRecord]]):
+    pass
+
+
+class PresetBundle(ResultModel):
+    protocol: Literal["voxweave-preset-bundle"]
+    version: Literal[1]
+    presets: list[PresetBundleItem]
+
+
+class ProjectRecord(ResultModel):
+    id: str
+    name: str
+    input_path: str
+    input_sha256: str | None
+    output_path: str | None
+    content_mode: Literal["clean", "mixed", "singing"]
+    analysis_manifest: str | None
+    analysis_sha256: str | None
+    document: ProjectDocument
+    state: Literal["active", "archived"]
+    revision: int
+    created_at: str
+    updated_at: str
+
+
+class ProjectSummary(ResultModel):
+    id: str
+    name: str
+    input_path: str
+    output_path: str | None
+    content_mode: Literal["clean", "mixed", "singing"]
+    state: Literal["active", "archived"]
+    revision: int
+    segment_count: int
+    assigned_segment_count: int
+    created_at: str
+    updated_at: str
+
+
+class ProjectPage(ResultModel):
+    items: list[ProjectSummary]
+    next_cursor: str | None
+
+
+class ProjectRevisionRecord(ResultModel):
+    project_id: str
+    revision: int
+    snapshot: dict[str, Any]
+    created_at: str
+
+
+class ProjectRevisionList(RootModel[list[ProjectRevisionRecord]]):
     pass
 
 
@@ -648,6 +1260,14 @@ class BatchRecord(ResultModel):
     recursive: bool
     watch_enabled: bool
     extensions: list[str]
+    naming_template: str = "{stem}_{source_ext}_{model}_{preset}_{hash}"
+    preserve_structure: bool = True
+    collision_policy: Literal["skip", "version", "overwrite"] = "skip"
+    output_format: Literal["auto", "wav", "flac", "mp3"] = "auto"
+    include_globs: list[str] = Field(default_factory=list)
+    exclude_globs: list[str] = Field(default_factory=list)
+    variants: list[dict[str, Any]] = Field(default_factory=list)
+    items: list[dict[str, Any]] = Field(default_factory=list)
     last_error: str | None
     last_error_at: str | None
     state: str
@@ -704,6 +1324,8 @@ class MediaAnalysisResult(ResultModel):
     separation: dict[str, Any] | None
     speaker_samples: list[dict[str, Any]]
     speaker_count: int
+    duration_seconds: float = 0
+    waveform_peaks: list[float] = Field(default_factory=list)
     segments: list[dict[str, Any]]
     manifest_path: str
     note: str | None = None
@@ -711,6 +1333,13 @@ class MediaAnalysisResult(ResultModel):
 
 class ConversionPreviewResult(ResultModel):
     model: ModelRecord
+    source: str
+    content_mode: Literal["clean", "mixed", "singing"]
+    separation: dict[str, Any] | None
+    outputs: list[dict[str, Any]]
+
+
+class ModelComparisonResult(ResultModel):
     source: str
     content_mode: Literal["clean", "mixed", "singing"]
     separation: dict[str, Any] | None
@@ -725,8 +1354,11 @@ class ConversionResult(ResultModel):
     model: dict[str, Any]
     parameters: ConversionParameters
     selected_speakers: list[str]
+    assignments: list[dict[str, Any]] = Field(default_factory=list)
+    project: dict[str, Any] | None = None
     separation: dict[str, Any] | None
     loudness_match: dict[str, Any]
+    processing_chain: dict[str, Any] = Field(default_factory=dict)
     segments: list[dict[str, Any]]
     manifest_path: str
 
@@ -765,6 +1397,38 @@ class AudioTestResult(ResultModel):
     sample_rate: int
     peak: float | None = None
     rms: float | None = None
+    noise_floor_db: float | None = None
+    signal_db: float | None = None
+    snr_db: float | None = None
+    pitch_hz_min: float | None = None
+    pitch_hz_median: float | None = None
+    pitch_hz_max: float | None = None
+    voiced_fraction: float | None = None
+    clip_ratio: float | None = None
+    captured_frames: int | None = None
+    expected_frames: int | None = None
+    device_stability: float | None = None
+
+
+class RealtimeCalibrationResult(ResultModel):
+    input_device: int
+    output_device: int
+    measured_peak: float
+    measured_rms: float
+    measured_input_db: float
+    recommended_input_gate_db: float
+    recommended_vad_threshold: float
+    latency_options_ms: dict[str, int]
+    recommended_block_seconds: float
+    noise_floor_db: float
+    signal_db: float
+    snr_db: float
+    pitch_hz_min: float | None
+    pitch_hz_median: float | None
+    pitch_hz_max: float | None
+    device_stability: float
+    recommended_pitch: int
+    recommended_index_rate: float
 
 
 class RealtimeWorkerStatus(ResultModel):
@@ -793,6 +1457,58 @@ class RealtimeStatusResult(ResultModel):
     updated_at: str | None = None
 
 
+class RealtimeSceneRecord(ResultModel):
+    id: str
+    name: str
+    settings: RealtimeSceneSettings
+    hotkeys: RealtimeSceneHotkeys
+    archived: bool
+    revision: int
+    created_at: str
+    updated_at: str
+
+
+class RealtimeSceneList(ResultModel):
+    items: list[RealtimeSceneRecord]
+
+
+class RealtimeRoutingRecord(ResultModel):
+    kind: Literal["direct", "virtual_input", "virtual_output", "mixer"]
+    device_id: int
+    name: str
+    hostapi: str
+    input_channels: int
+    output_channels: int
+
+
+class RealtimeRoutingResult(ResultModel):
+    virtual_audio_available: bool
+    detected_products: list[str]
+    routes: list[RealtimeRoutingRecord]
+    recommended_input_device: int | None
+    recommended_output_device: int | None
+    instructions: list[str]
+
+
+class RealtimeRoutingTestResult(ResultModel):
+    passed: bool
+    input_device: int
+    output_device: int
+    sample_rate: int
+    correlation: float
+    latency_ms: float | None
+    received_db: float
+    detail: str
+
+
+class RealtimeRecordingPromotionResult(ResultModel):
+    session_id: str
+    recording_manifest_path: str
+    dry_path: str
+    wet_path: str
+    project: ProjectRecord
+
+
 class BatchExecutionResult(ResultModel):
     batch: BatchRecord | None = None
     tasks: list[dict[str, Any]] = Field(default_factory=list)
@@ -805,11 +1521,109 @@ class BatchExecutionResult(ResultModel):
     submission_failures: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class BatchPlanResult(ResultModel):
+    batch_id: str
+    file_count: int
+    output_count: int
+    total_bytes: int
+    collisions: int
+    examples: list[dict[str, Any]]
+
+
 class StorageArchiveResult(ResultModel):
     destination_root: str
     candidate_count: int
     archived_count: int
     archives: list[dict[str, Any]]
+
+
+class StorageInspectResult(ResultModel):
+    data_root: str
+    total_bytes: int
+    free_bytes: int
+    areas: dict[str, dict[str, int]]
+    reclaimable_task_count: int
+    reclaimable_bytes: int
+    archive_count: int
+    categories: dict[str, dict[str, int]] = Field(default_factory=dict)
+    migrations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class StorageRestoreResult(ResultModel):
+    requested_count: int
+    restored_count: int
+    archives: list[dict[str, Any]]
+
+
+class StorageMigrationPlanResult(ResultModel):
+    source_root: str
+    target_root: str
+    file_count: int
+    total_bytes: int
+    free_bytes: int
+    plan_digest: str
+    conflicts: list[str]
+
+
+class StorageMigrationPrepareResult(StorageMigrationPlanResult):
+    migration_id: str
+    state: str
+    manifest_path: str
+    bootstrap_command: list[str]
+
+
+class UpdateReleaseResult(ResultModel):
+    current_version: str
+    latest_version: str
+    update_available: bool
+    prerelease: bool
+    release_name: str
+    release_url: str
+    published_at: str | None
+    notes: str
+    download_size_bytes: int
+    downloaded_path: str | None = None
+    sha256: str | None = None
+
+
+class UpdateInstallationResult(ResultModel):
+    version: str
+    state: Literal["installed", "pending", "active", "rolled_back", "failed"]
+    install_path: str
+    executable_path: str
+    archive_path: str
+    sha256: str
+    previous_version: str | None = None
+    bootstrap_command: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ResultVersionRecord(ResultModel):
+    id: str
+    task_id: str
+    project_id: str | None
+    project_revision: int | None
+    input_path: str
+    input_sha256: str
+    output_path: str
+    output_sha256: str
+    model: dict[str, Any]
+    parameters: dict[str, Any]
+    result: dict[str, Any]
+    parent_id: str | None
+    root_id: str
+    generation: int
+    rerun_arguments: dict[str, Any]
+    differences: dict[str, Any]
+    children: list[str] = Field(default_factory=list)
+    label: str
+    favorite: bool
+    created_at: str
+
+
+class ResultVersionPage(ResultModel):
+    items: list[ResultVersionRecord]
+    next_cursor: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -838,12 +1652,21 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
     "model.catalog.list": OperationSpec(EmptyCommand, CatalogModelList),
     "model.resolve": OperationSpec(ModelResolveCommand, ModelRecord),
     "model.archive": OperationSpec(ModelArchiveCommand, ModelRecord, mutating=True),
+    "model.verify": OperationSpec(ModelVerifyCommand, ModelRecord, long_running=True),
+    "model.metadata.update": OperationSpec(
+        ModelMetadataUpdateCommand, ModelRecord, mutating=True
+    ),
     "model.import": OperationSpec(ModelImportCommand, ModelRecord, long_running=True),
     "model.catalog.install": OperationSpec(
         ModelCatalogInstallCommand, ModelRecord, long_running=True
     ),
     "preset.list": OperationSpec(PresetListCommand, PresetList),
     "preset.save": OperationSpec(PresetSaveCommand, PresetRecord, mutating=True),
+    "preset.update": OperationSpec(PresetUpdateCommand, PresetRecord, mutating=True),
+    "preset.archive": OperationSpec(PresetArchiveCommand, PresetRecord, mutating=True),
+    "preset.copy": OperationSpec(PresetCopyCommand, PresetRecord, mutating=True),
+    "preset.export": OperationSpec(PresetExportCommand, PresetBundle),
+    "preset.import": OperationSpec(PresetImportCommand, PresetList, mutating=True),
     "media.inspect": OperationSpec(MediaInspectCommand, MediaRecord, long_running=True),
     "media.analyze": OperationSpec(
         MediaAnalyzeCommand, MediaAnalysisResult, long_running=True
@@ -852,11 +1675,17 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
     "realtime.audio_test": OperationSpec(
         RealtimeAudioTestCommand, AudioTestResult, mutating=True
     ),
+    "realtime.calibrate": OperationSpec(
+        RealtimeCalibrationCommand, RealtimeCalibrationResult, mutating=True
+    ),
     "realtime.prepare": OperationSpec(
         RealtimeStartCommand, RealtimeStatusResult, mutating=True
     ),
     "realtime.start": OperationSpec(
         RealtimeStartCommand, RealtimeStatusResult, mutating=True
+    ),
+    "realtime.control": OperationSpec(
+        RealtimeControlCommand, RealtimeStatusResult, mutating=True
     ),
     "realtime.status": OperationSpec(EmptyCommand, RealtimeStatusResult),
     "realtime.stop": OperationSpec(
@@ -865,11 +1694,51 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
     "realtime.release": OperationSpec(
         EmptyCommand, RealtimeStatusResult, mutating=True
     ),
+    "realtime.routing.inspect": OperationSpec(EmptyCommand, RealtimeRoutingResult),
+    "realtime.routing.test": OperationSpec(
+        RealtimeRoutingTestCommand, RealtimeRoutingTestResult, mutating=True
+    ),
+    "realtime.recording.promote": OperationSpec(
+        RealtimeRecordingPromoteCommand,
+        RealtimeRecordingPromotionResult,
+        mutating=True,
+    ),
+    "realtime.scene.create": OperationSpec(
+        RealtimeSceneCreateCommand, RealtimeSceneRecord, mutating=True
+    ),
+    "realtime.scene.update": OperationSpec(
+        RealtimeSceneUpdateCommand, RealtimeSceneRecord, mutating=True
+    ),
+    "realtime.scene.archive": OperationSpec(
+        RealtimeSceneArchiveCommand, RealtimeSceneRecord, mutating=True
+    ),
+    "realtime.scene.get": OperationSpec(RealtimeSceneIdCommand, RealtimeSceneRecord),
+    "realtime.scene.list": OperationSpec(RealtimeSceneListCommand, RealtimeSceneList),
+    "realtime.scene.apply": OperationSpec(
+        RealtimeSceneApplyCommand, RealtimeStatusResult, mutating=True
+    ),
     "conversion.preview": OperationSpec(
         ConversionPreviewCommand, ConversionPreviewResult, long_running=True
     ),
+    "model.compare": OperationSpec(
+        ModelCompareCommand, ModelComparisonResult, long_running=True
+    ),
     "conversion.run": OperationSpec(
         ConversionRunCommand, ConversionResult, long_running=True
+    ),
+    "project.create": OperationSpec(ProjectCreateCommand, ProjectRecord, mutating=True),
+    "project.update": OperationSpec(ProjectUpdateCommand, ProjectRecord, mutating=True),
+    "project.archive": OperationSpec(ProjectArchiveCommand, ProjectRecord, mutating=True),
+    "project.get": OperationSpec(ProjectIdCommand, ProjectRecord),
+    "project.list": OperationSpec(ProjectListCommand, ProjectPage),
+    "project.history": OperationSpec(ProjectIdCommand, ProjectRevisionList),
+    "project.restore": OperationSpec(ProjectRestoreCommand, ProjectRecord, mutating=True),
+    "project.analyze": OperationSpec(
+        ProjectAnalyzeCommand, ProjectRecord, long_running=True
+    ),
+    "project.run": OperationSpec(ProjectRunCommand, ConversionResult, long_running=True),
+    "project.preview": OperationSpec(
+        ProjectPreviewCommand, ConversionPreviewResult, long_running=True
     ),
     "batch.create": OperationSpec(BatchCreateCommand, BatchRecord, mutating=True),
     "batch.update": OperationSpec(BatchUpdateCommand, BatchRecord, mutating=True),
@@ -877,10 +1746,51 @@ OPERATION_SPECS: dict[str, OperationSpec] = {
     "batch.get": OperationSpec(BatchIdCommand, BatchRecord),
     "batch.list": OperationSpec(BatchListCommand, BatchPage),
     "batch.run": OperationSpec(BatchIdCommand, BatchExecutionResult, long_running=True),
+    "batch.plan": OperationSpec(BatchIdCommand, BatchPlanResult, long_running=True),
     "batch.retry": OperationSpec(BatchIdCommand, BatchExecutionResult, long_running=True),
+    "batch.item.retry": OperationSpec(
+        BatchItemRetryCommand, BatchExecutionResult, mutating=True
+    ),
     "batch.watch": OperationSpec(BatchWatchCommand, BatchRecord, mutating=True),
     "storage.archive": OperationSpec(
         StorageArchiveCommand, StorageArchiveResult, long_running=True
+    ),
+    "storage.inspect": OperationSpec(
+        StorageInspectCommand, StorageInspectResult, long_running=True
+    ),
+    "storage.restore": OperationSpec(
+        StorageRestoreCommand, StorageRestoreResult, long_running=True
+    ),
+    "storage.migration.plan": OperationSpec(
+        StorageMigrationPlanCommand, StorageMigrationPlanResult, long_running=True
+    ),
+    "storage.migration.prepare": OperationSpec(
+        StorageMigrationPrepareCommand,
+        StorageMigrationPrepareResult,
+        mutating=True,
+    ),
+    "update.check": OperationSpec(
+        UpdateCheckCommand, UpdateReleaseResult, long_running=True
+    ),
+    "update.download": OperationSpec(
+        UpdateDownloadCommand, UpdateReleaseResult, long_running=True, mutating=True
+    ),
+    "update.install": OperationSpec(
+        UpdateInstallCommand, UpdateInstallationResult, long_running=True
+    ),
+    "update.activate": OperationSpec(
+        UpdateActivateCommand, UpdateInstallationResult, mutating=True
+    ),
+    "update.rollback": OperationSpec(
+        UpdateRollbackCommand, UpdateInstallationResult, mutating=True
+    ),
+    "result.get": OperationSpec(ResultVersionIdCommand, ResultVersionRecord),
+    "result.list": OperationSpec(ResultVersionListCommand, ResultVersionPage),
+    "result.update": OperationSpec(
+        ResultVersionUpdateCommand, ResultVersionRecord, mutating=True
+    ),
+    "result.rerun": OperationSpec(
+        ResultVersionRerunCommand, ConversionResult, long_running=True
     ),
     "task.list": OperationSpec(TaskListCommand, TaskPage),
     "task.events": OperationSpec(TaskEventsCommand, EventList),

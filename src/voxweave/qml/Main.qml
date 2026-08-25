@@ -57,6 +57,7 @@ Basic.ApplicationWindow {
     Shortcut { sequence: "Ctrl+4"; onActivated: root.currentPage = 3 }
     Shortcut { sequence: "Ctrl+5"; onActivated: root.currentPage = 4 }
     Shortcut { sequence: "Ctrl+6"; onActivated: root.currentPage = 5 }
+    Shortcut { sequence: "Ctrl+7"; onActivated: root.currentPage = 6 }
 
 
     Connections {
@@ -96,6 +97,14 @@ Basic.ApplicationWindow {
         function onStatusChanged() {
             root.realtimeStatus = root.bridge.realtime.status
         }
+    }
+
+    RealtimeMiniPanel {
+        id: realtimeMiniPanel
+        objectName: "realtimeMiniPanel"
+        bridge: root.bridge
+        theme: theme
+        mainWindow: root
     }
 
 
@@ -164,40 +173,49 @@ Basic.ApplicationWindow {
                     onClicked: root.currentPage = 1
                 }
                 NavButton {
+                    objectName: "navButtonProjects"
+                    Layout.fillWidth: true
+                    iconName: "projects"
+                    text: root.bridge.text(root.bridge.language, "nav.projects")
+                    selected: root.currentPage === 2
+                    showLabel: root.expandedSidebar
+                    onClicked: root.currentPage = 2
+                }
+                NavButton {
                     objectName: "navButton2"
                     Layout.fillWidth: true
                     iconName: "models"
                     text: root.bridge.text(root.bridge.language, "nav.models")
-                    selected: root.currentPage === 2
+                    selected: root.currentPage === 3
                     showLabel: root.expandedSidebar
-                    onClicked: root.currentPage = 2
+                    onClicked: root.currentPage = 3
                 }
                 NavButton {
                     objectName: "navButton3"
                     Layout.fillWidth: true
                     iconName: "batch"
                     text: root.bridge.text(root.bridge.language, "nav.batch")
-                    selected: root.currentPage === 3
+                    selected: root.currentPage === 4
                     showLabel: root.expandedSidebar
-                    onClicked: root.currentPage = 3
+                    onClicked: root.currentPage = 4
                 }
                 NavButton {
                     objectName: "navButton4"
                     Layout.fillWidth: true
                     iconName: "tasks"
                     text: root.bridge.text(root.bridge.language, "nav.tasks")
-                    selected: root.currentPage === 4
+                    selected: root.currentPage === 5
                     showLabel: root.expandedSidebar
-                    onClicked: root.currentPage = 4
+                    onClicked: root.currentPage = 5
                 }
                 NavButton {
                     objectName: "navButton5"
                     Layout.fillWidth: true
                     iconName: "settings"
                     text: root.bridge.text(root.bridge.language, "nav.settings")
-                    selected: root.currentPage === 5
+                    selected: root.currentPage === 6
                     showLabel: root.expandedSidebar
-                    onClicked: root.currentPage = 5
+                    onClicked: root.currentPage = 6
                 }
 
                 Item { Layout.fillHeight: true }
@@ -298,6 +316,12 @@ Basic.ApplicationWindow {
                     previewOutputs: root.previewOutputs
                     presets: root.presets
                     requestedModelId: root.conversionModelId
+                }
+
+                ProjectsPage {
+                    bridge: root.bridge
+                    theme: theme
+                    models: root.readyModels
                 }
 
                 ModelsPage {

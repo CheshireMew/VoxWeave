@@ -84,6 +84,7 @@ Item {
             "input_gate_db": Number(inputGateSlider.value),
             "block_seconds": Number(latencyMode.currentValue),
             "test_mode": Boolean(testMode.checked)
+            ,"push_to_talk": Boolean(pushToTalkMode.checked)
         }
     }
 
@@ -101,7 +102,38 @@ Item {
             "vad_threshold": preferences.vad_threshold,
             "input_gate_db": preferences.input_gate_db,
             "block_seconds": preferences.block_seconds,
-            "test_mode": Boolean(testModeValue)
+            "test_mode": Boolean(testModeValue),
+            "recording": Boolean(recordMode.checked)
+            ,"push_to_talk": Boolean(pushToTalkMode.checked)
+        }
+    }
+
+    function currentSceneSettings() {
+        var preferences = root.currentPreferences()
+        return {
+            "model": preferences.model,
+            "hostapi": preferences.hostapi,
+            "input_device": preferences.input_device,
+            "output_device": preferences.output_device,
+            "pitch": preferences.pitch,
+            "f0": preferences.f0,
+            "index_rate": preferences.index_rate,
+            "rms_mix_rate": preferences.rms_mix_rate,
+            "vad_threshold": preferences.vad_threshold,
+            "input_gate_db": preferences.input_gate_db,
+            "block_seconds": preferences.block_seconds,
+            "test_mode": Boolean(testMode.checked),
+            "recording": Boolean(recordMode.checked)
+            ,"push_to_talk": Boolean(pushToTalkMode.checked)
+        }
+    }
+
+    function currentHotkeys() {
+        return {
+            "start_stop": String(sceneStartHotkey.text),
+            "bypass": String(sceneBypassHotkey.text),
+            "mute": String(sceneMuteHotkey.text)
+            ,"push_to_talk": String(scenePushToTalkHotkey.text)
         }
     }
 
@@ -157,6 +189,7 @@ Item {
         indexRateSlider.value = Number(saved.index_rate) * 100
         rmsMixSlider.value = Number(saved.rms_mix_rate) * 100
         testMode.checked = Boolean(saved.test_mode)
+        pushToTalkMode.checked = Boolean(saved.push_to_talk)
         var f0Index = root.comboValueIndex(f0Method, saved.f0)
         f0Method.currentIndex = f0Index >= 0 ? f0Index : 0
         var latencyIndex = root.comboValueIndex(latencyMode, saved.block_seconds)
@@ -207,7 +240,7 @@ Item {
             GridLayout {
                 objectName: "realtimeActionRow"
                 Layout.fillWidth: true
-                columns: width >= 760 ? 5 : 3
+                columns: width >= 1000 ? 7 : (width >= 760 ? 5 : 3)
                 columnSpacing: 8
                 AppButton {
                     objectName: "realtimePrepareButton"
@@ -238,6 +271,24 @@ Item {
                     kind: "danger"
                     enabled: root.active && root.session.state !== "stopping"
                     onClicked: root.bridge.realtime.stopSession()
+                }
+                AppButton {
+                    objectName: "realtimeBypassButton"
+                    Layout.fillWidth: true
+                    text: root.metrics.bypass
+                        ? root.bridge.text(root.bridge.language, "action.disable_bypass")
+                        : root.bridge.text(root.bridge.language, "action.enable_bypass")
+                    enabled: root.session.state === "running"
+                    onClicked: root.bridge.realtime.toggleBypass()
+                }
+                AppButton {
+                    objectName: "realtimeMuteButton"
+                    Layout.fillWidth: true
+                    text: root.metrics.muted
+                        ? root.bridge.text(root.bridge.language, "action.unmute")
+                        : root.bridge.text(root.bridge.language, "action.mute")
+                    enabled: root.session.state === "running"
+                    onClicked: root.bridge.realtime.toggleMute()
                 }
                 AppButton {
                     objectName: "realtimeReleaseButton"
@@ -292,8 +343,8 @@ Item {
                     ? root.bridge.text(root.bridge.language, "realtime.disabled.action.model")
                     : root.bridge.text(root.bridge.language, "realtime.disabled.action.audio")
                 onClicked: root.navigateRequested(
-                    !root.bridge.maintenance.runtimeReady ? 5
-                    : (realtimeModel.count <= 0 || realtimeModel.currentIndex < 0) ? 2 : 5
+                    !root.bridge.maintenance.runtimeReady ? 6
+                    : (realtimeModel.count <= 0 || realtimeModel.currentIndex < 0) ? 3 : 6
                 )
             }
 
@@ -305,6 +356,54 @@ Item {
                 checked: false
                 enabled: !root.active
                 onClicked: root.saveCurrentPreferences()
+            }
+            AppCheckBox {
+                id: recordMode
+                objectName: "realtimeRecordMode"
+                Layout.fillWidth: true
+                text: root.bridge.text(root.bridge.language, "realtime.record_dry_wet")
+                checked: false
+                enabled: !root.active
+            }
+            AppCheckBox {
+                id: pushToTalkMode
+                objectName: "realtimePushToTalkMode"
+                Layout.fillWidth: true
+                text: "Push to talk (hold the global hotkey)"
+                checked: false
+                enabled: !root.active
+                onClicked: root.saveCurrentPreferences()
+            }
+            AppButton {
+                Layout.fillWidth: true
+                visible: root.active
+                text: root.metrics.recording
+                    ? root.bridge.text(root.bridge.language, "action.stop_recording")
+                    : root.bridge.text(root.bridge.language, "action.start_recording")
+                onClicked: root.bridge.realtime.toggleRecording()
+            }
+            AppButton {
+                objectName: "realtimeMiniPanelButton"
+                Layout.fillWidth: true
+                text: "Open mini controls"
+                onClicked: root.bridge.realtime.showMiniPanel()
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                visible: root.session.state === "stopped"
+                    && Boolean(root.metrics.recording_manifest_path)
+                AppTextField {
+                    id: recordingProjectName
+                    Layout.fillWidth: true
+                    text: "Realtime recording"
+                    placeholderText: "Offline project name"
+                }
+                AppButton {
+                    text: "Continue as offline project"
+                    enabled: recordingProjectName.text.trim().length > 0
+                    onClicked: root.bridge.realtime.promoteRecording(
+                        recordingProjectName.text.trim())
+                }
             }
         }
 
@@ -460,7 +559,225 @@ Item {
 
                 }
 
-                Item { Layout.row: 2; Layout.preferredHeight: 2 }
+                AppPanel {
+                    objectName: "realtimeScenesPanel"
+                    Layout.row: 2
+                    Layout.fillWidth: true
+                    SectionHeader {
+                        Layout.fillWidth: true
+                        title: root.bridge.text(root.bridge.language, "section.realtime_scenes")
+                    }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 8
+                        rowSpacing: 8
+                        AppComboBox {
+                            id: sceneSelector
+                            objectName: "realtimeSceneSelector"
+                            Layout.fillWidth: true
+                            model: root.bridge.realtime.scenes
+                            textRole: "name"
+                            valueRole: "id"
+                            emptyText: root.bridge.text(root.bridge.language, "empty.realtime_scenes")
+                            onCurrentIndexChanged: {
+                                var scene = root.bridge.realtime.scenes[currentIndex]
+                                if (!scene) return
+                                sceneName.text = String(scene.name)
+                                sceneStartHotkey.text = String(scene.hotkeys.start_stop)
+                                sceneBypassHotkey.text = String(scene.hotkeys.bypass)
+                                sceneMuteHotkey.text = String(scene.hotkeys.mute)
+                                scenePushToTalkHotkey.text = String(
+                                    scene.hotkeys.push_to_talk || "Ctrl+Alt+F12")
+                            }
+                            onActivated: {
+                                var scene = root.bridge.realtime.scenes[currentIndex]
+                                if (!scene) return
+                                sceneName.text = String(scene.name)
+                                sceneStartHotkey.text = String(scene.hotkeys.start_stop)
+                                sceneBypassHotkey.text = String(scene.hotkeys.bypass)
+                                sceneMuteHotkey.text = String(scene.hotkeys.mute)
+                                scenePushToTalkHotkey.text = String(
+                                    scene.hotkeys.push_to_talk || "Ctrl+Alt+F12")
+                            }
+                        }
+                        AppTextField {
+                            id: sceneName
+                            Layout.fillWidth: true
+                            placeholderText: root.bridge.text(root.bridge.language, "placeholder.scene_name")
+                        }
+                        AppTextField {
+                            id: sceneStartHotkey
+                            Layout.fillWidth: true
+                            text: "Ctrl+Alt+F9"
+                            placeholderText: root.bridge.text(root.bridge.language, "placeholder.hotkey_start")
+                        }
+                        AppTextField {
+                            id: sceneBypassHotkey
+                            Layout.fillWidth: true
+                            text: "Ctrl+Alt+F10"
+                            placeholderText: root.bridge.text(root.bridge.language, "placeholder.hotkey_bypass")
+                        }
+                        AppTextField {
+                            id: sceneMuteHotkey
+                            Layout.fillWidth: true
+                            text: "Ctrl+Alt+F11"
+                            placeholderText: root.bridge.text(root.bridge.language, "placeholder.hotkey_mute")
+                        }
+                        AppTextField {
+                            id: scenePushToTalkHotkey
+                            objectName: "realtimePushToTalkHotkey"
+                            Layout.fillWidth: true
+                            text: "Ctrl+Alt+F12"
+                            placeholderText: "Push-to-talk hotkey"
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            AppButton {
+                                text: root.bridge.text(root.bridge.language, "action.scene_create")
+                                enabled: sceneName.text.trim().length > 0 && !root.active
+                                onClicked: root.bridge.realtime.createScene({
+                                    "name": sceneName.text.trim(),
+                                    "settings": root.currentSceneSettings(),
+                                    "hotkeys": root.currentHotkeys()
+                                })
+                            }
+                            AppButton {
+                                text: root.bridge.text(root.bridge.language, "action.scene_update")
+                                enabled: sceneSelector.currentIndex >= 0 && !root.active
+                                onClicked: {
+                                    var scene = root.bridge.realtime.scenes[sceneSelector.currentIndex]
+                                    root.bridge.realtime.updateScene({
+                                        "scene_id": scene.id,
+                                        "expected_revision": scene.revision,
+                                        "name": sceneName.text.trim(),
+                                        "settings": root.currentSceneSettings(),
+                                        "hotkeys": root.currentHotkeys()
+                                    })
+                                }
+                            }
+                            AppButton {
+                                text: {
+                                    var scene = root.bridge.realtime.scenes[
+                                        sceneSelector.currentIndex]
+                                    return scene && scene.archived
+                                        ? root.bridge.text(root.bridge.language,
+                                            "action.restore")
+                                        : root.bridge.text(root.bridge.language,
+                                            "scene.archive")
+                                }
+                                enabled: sceneSelector.currentIndex >= 0 && !root.active
+                                onClicked: {
+                                    var scene = root.bridge.realtime.scenes[
+                                        sceneSelector.currentIndex]
+                                    root.bridge.realtime.archiveScene(scene.id,
+                                        scene.revision, !scene.archived)
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            AppButton {
+                                text: root.bridge.text(root.bridge.language, "action.scene_prepare")
+                                enabled: sceneSelector.currentIndex >= 0 && !root.active
+                                    && !root.bridge.realtime.scenes[
+                                        sceneSelector.currentIndex].archived
+                                onClicked: root.bridge.realtime.applyScene(
+                                    String(sceneSelector.currentValue), false)
+                            }
+                            AppButton {
+                                text: root.bridge.text(root.bridge.language, "action.scene_start")
+                                kind: "primary"
+                                enabled: sceneSelector.currentIndex >= 0 && !root.active
+                                    && !root.bridge.realtime.scenes[
+                                        sceneSelector.currentIndex].archived
+                                onClicked: root.bridge.realtime.applyScene(
+                                    String(sceneSelector.currentValue), true)
+                            }
+                        }
+                    }
+                }
+
+                AppPanel {
+                    objectName: "realtimeRoutingPanel"
+                    Layout.row: 3
+                    Layout.fillWidth: true
+                    SectionHeader {
+                        Layout.fillWidth: true
+                        title: root.bridge.text(root.bridge.language, "section.audio_routing")
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: root.bridge.realtime.routing.virtual_audio_available
+                            ? root.bridge.text(root.bridge.language, "routing.detected").arg(
+                                root.bridge.realtime.routing.detected_products.join(", "))
+                            : root.bridge.text(root.bridge.language, "routing.not_detected")
+                        color: root.bridge.realtime.routing.virtual_audio_available
+                            ? root.theme.success : root.theme.warning
+                        wrapMode: Text.Wrap
+                    }
+                    Repeater {
+                        model: root.bridge.realtime.routing.instructions || []
+                        delegate: Label {
+                            required property string modelData
+                            Layout.fillWidth: true
+                            text: "• " + modelData
+                            color: root.theme.textMuted
+                            wrapMode: Text.Wrap
+                        }
+                    }
+                    AppButton {
+                        Layout.fillWidth: true
+                        text: root.bridge.text(root.bridge.language, "action.refresh_routing")
+                        onClicked: root.bridge.realtime.inspectRouting()
+                    }
+                    AppButton {
+                        objectName: "realtimeCalibrationButton"
+                        Layout.fillWidth: true
+                        text: root.bridge.text(root.bridge.language, "action.calibrate_audio")
+                        enabled: !root.active && Boolean(root.bridge.realtime.audioRoute.ready)
+                        onClicked: root.bridge.realtime.calibrate()
+                    }
+                    AppButton {
+                        objectName: "realtimeRoutingTestButton"
+                        Layout.fillWidth: true
+                        text: "Run end-to-end routing test"
+                        enabled: !root.active && Boolean(root.bridge.realtime.audioRoute.ready)
+                        onClicked: root.bridge.realtime.testRouting()
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: root.bridge.realtime.routingTest.passed !== undefined
+                        text: (root.bridge.realtime.routingTest.passed ? "Routing passed" : "Routing failed")
+                            + " · correlation "
+                            + Number(root.bridge.realtime.routingTest.correlation || 0).toFixed(2)
+                            + " · latency "
+                            + Number(root.bridge.realtime.routingTest.latency_ms || 0).toFixed(1)
+                            + " ms"
+                        color: root.bridge.realtime.routingTest.passed
+                            ? root.theme.success : root.theme.danger
+                        wrapMode: Text.Wrap
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: root.bridge.realtime.calibration.measured_input_db !== undefined
+                        text: root.bridge.text(root.bridge.language, "realtime.calibration.result")
+                            .arg(Number(root.bridge.realtime.calibration.measured_input_db).toFixed(1))
+                            .arg(Number(root.bridge.realtime.calibration.recommended_input_gate_db).toFixed(1))
+                            + " · noise "
+                            + Number(root.bridge.realtime.calibration.noise_floor_db || 0).toFixed(1)
+                            + " dB · SNR "
+                            + Number(root.bridge.realtime.calibration.snr_db || 0).toFixed(1)
+                            + " dB · pitch "
+                            + String(root.bridge.realtime.calibration.recommended_pitch || 0)
+                            + " · index "
+                            + Number(root.bridge.realtime.calibration.recommended_index_rate || 0).toFixed(2)
+                        color: root.theme.textMuted
+                        wrapMode: Text.Wrap
+                    }
+                }
+
+                Item { Layout.row: 4; Layout.preferredHeight: 2 }
             }
         }
     }
