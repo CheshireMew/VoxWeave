@@ -40,7 +40,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $venv 'Scripts\python.exe'))) {
 $venvPython = Join-Path $venv 'Scripts\python.exe'
 $lockFile = Join-Path $repository 'requirements.lock'
 $env:PIP_CONSTRAINT = $lockFile
-& $venvPython -m pip install 'pip==26.2.1'
+& $venvPython -m pip install 'pip==26.2.2'
 & $venvPython -m pip install -c $lockFile -e "${repository}[dev]"
 
 $configure = @('-m','voxweave.bootstrap','--data-root',$resolvedDataRoot)
