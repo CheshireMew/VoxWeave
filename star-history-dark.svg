@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1000" height="650" viewBox="0 0 1000 650" role="img" aria-labelledby="title description">
   <title id="title">Star history for CheshireMew/VoxWeave</title>
-  <desc id="description">Cumulative GitHub stars through 2026-11-01. Total: 245.</desc>
+  <desc id="description">Cumulative GitHub stars through 2026-11-06. Total: 248.</desc>
   <rect width="100%" height="100%" rx="12" fill="#0d1117"/>
   <g data-style="hand-drawn" font-family="Comic Sans MS,Segoe Print,Bradley Hand,cursive" fill="#f0f6fc">
     <text x="500.0" y="58" text-anchor="middle" font-size="34" font-weight="700">Star History</text>
@@ -21,17 +21,17 @@
     <text x="91" y="105.00" text-anchor="end" dominant-baseline="middle" font-size="17">500</text>
     <path d="M 105.00 557 L 106.00 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
     <text x="105.00" y="594" text-anchor="start" font-size="17">08-09</text>
-    <path d="M 278.04 557 L 279.04 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
-    <text x="278.04" y="594" text-anchor="middle" font-size="17">08-26</text>
-    <path d="M 451.07 557 L 452.07 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
-    <text x="451.07" y="594" text-anchor="middle" font-size="17">09-12</text>
-    <path d="M 613.93 557 L 614.93 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
-    <text x="613.93" y="594" text-anchor="middle" font-size="17">09-28</text>
-    <path d="M 786.96 557 L 787.96 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
-    <text x="786.96" y="594" text-anchor="middle" font-size="17">10-15</text>
+    <path d="M 277.92 557 L 278.92 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="277.92" y="594" text-anchor="middle" font-size="17">08-27</text>
+    <path d="M 450.84 557 L 451.84 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="450.84" y="594" text-anchor="middle" font-size="17">09-14</text>
+    <path d="M 614.16 557 L 615.16 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="614.16" y="594" text-anchor="middle" font-size="17">10-01</text>
+    <path d="M 787.08 557 L 788.08 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="787.08" y="594" text-anchor="middle" font-size="17">10-19</text>
     <path d="M 960.00 557 L 961.00 567" fill="none" stroke="#f0f6fc" stroke-width="2.5" stroke-linecap="round"/>
-    <text x="960.00" y="594" text-anchor="end" font-size="17">11-01</text>
-    <path data-role="star-line" d="M 105.00 560.00 L 125.36 514.50 L 135.54 392.56 L 145.71 368.90 L 155.89 365.26 L 176.25 364.35 L 186.43 363.44 L 196.61 357.98 L 206.79 357.07 L 227.14 356.16 L 237.32 355.25 L 247.50 354.34 L 257.68 353.43 L 267.86 352.52 L 308.57 351.61 L 390.00 350.70 L 400.18 348.88 L 491.79 347.97 L 501.96 347.06 L 522.32 346.15 L 603.75 345.24 L 695.36 344.33 L 715.71 343.42 L 725.89 342.51 L 837.86 341.60 L 858.21 339.78 L 888.75 338.87 L 919.29 337.96 L 960.00 337.05" fill="none" stroke="#ff5a36" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+    <text x="960.00" y="594" text-anchor="end" font-size="17">11-06</text>
+    <path data-role="star-line" d="M 105.00 560.00 L 124.21 514.50 L 133.82 392.56 L 143.43 368.90 L 153.03 365.26 L 172.25 364.35 L 181.85 363.44 L 191.46 357.98 L 201.07 357.07 L 220.28 356.16 L 229.89 355.25 L 239.49 354.34 L 249.10 353.43 L 258.71 352.52 L 297.13 351.61 L 373.99 350.70 L 383.60 348.88 L 470.06 347.97 L 479.66 347.06 L 498.88 346.15 L 575.73 345.24 L 662.19 344.33 L 681.40 343.42 L 691.01 342.51 L 796.69 341.60 L 815.90 339.78 L 844.72 338.87 L 873.54 337.96 L 911.97 337.05 L 960.00 334.32" fill="none" stroke="#ff5a36" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
     <g data-role="signature" transform="translate(786 608)">
       <path d="M 12 0 L 15 9 L 25 6 L 18 14 L 26 21 L 16 18 L 12 28 L 9 18 L 0 22 L 7 14 L 0 7 L 9 10 Z" fill="none" stroke="#39d353" stroke-width="2.5" stroke-linejoin="round"/>
       <text x="34" y="18" fill="#9da7b3" font-size="15">project-steward</text>
